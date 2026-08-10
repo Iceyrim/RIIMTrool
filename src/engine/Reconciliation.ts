@@ -30,7 +30,12 @@ export interface ReconciliationResult {
  *  - syncFromExchange(): startup only. Exchange is unconditionally ground truth; local state is
  *    discarded and reseeded. Mismatches are expected and silently corrected.
  *  - checkAgainstExchange(): every runtime cycle. Local state is now trusted as live; mismatches
- *    are strict anomalies, logged rather than silently adopted.
+ *    are strict anomalies, logged rather than silently adopted — EXCEPT a local RESTING order the
+ *    exchange no longer shows, which gets the same fill-replay treatment syncFromExchange gives
+ *    it: a real fill (full or partial) explains the disappearance and is resolved straight into
+ *    the registry, not left stuck as RESTING forever with no runtime path back to healthy. Only a
+ *    vanished order with zero fill evidence (or a fill-lookup that itself fails) is still a
+ *    genuine anomaly — that case is not silently adopted.
  */
 export class Reconciliation {
   private healthyStreak = 0;
@@ -149,9 +154,12 @@ export class Reconciliation {
 
   /**
    * Runtime, called every engine cycle. Local state is trusted as live here, so this is a strict
-   * compare: any mismatch is a logged anomaly, not silently repaired the way startup sync
-   * repairs it — silently adopting a surprise order mid-run could mask a real bug instead of
-   * fixing stale state.
+   * compare: a surprise exchange order with no local record (EXCHANGE_ORDER_NOT_LOCAL) is always
+   * a logged anomaly, never silently adopted — that could mask a real bug instead of fixing stale
+   * state. A local RESTING order the exchange no longer shows (LOCAL_ORDER_NOT_ON_EXCHANGE) gets
+   * one exception: resolveVanishedOrder() below checks whether a real fill explains it, the same
+   * way startup sync resolves local-only orders, so an ordinary fill event doesn't get treated as
+   * an anomaly and doesn't leave the market permanently blocked with no runtime path to healthy.
    */
   async checkAgainstExchange(): Promise<ReconciliationResult> {
     const now = Date.now();
@@ -175,7 +183,10 @@ export class Reconciliation {
     for (const local of localResting) {
       if (local.exchangeOrderId === null) continue;
       const stillOpen = exchangeOrders.some((e) => e.exchangeOrderId === local.exchangeOrderId);
-      if (!stillOpen) {
+      if (stillOpen) continue;
+
+      const resolved = await this.resolveVanishedOrder(local, now);
+      if (!resolved) {
         anomalies.push({
           kind: "LOCAL_ORDER_NOT_ON_EXCHANGE",
           exchangeOrderId: local.exchangeOrderId,
@@ -201,5 +212,37 @@ export class Reconciliation {
       this.healthyStreak = 0;
     }
     return result;
+  }
+
+  /**
+   * A local RESTING order the exchange no longer shows is either explained (it filled, fully or
+   * partially, before disappearing — a normal event for a resting maker quote) or genuinely
+   * unexplained. Mirrors syncFromExchange's per-order fill-replay resolution, applied to a single
+   * order rather than a wholesale reseed. Returns true (and updates the registry) only when real
+   * fill evidence explains the disappearance; false leaves the registry untouched so the caller
+   * still raises it as an anomaly.
+   */
+  private async resolveVanishedOrder(local: LocalOrder, now: number): Promise<boolean> {
+    let fills: NormalizedFill[];
+    try {
+      fills = await this.adapter.getOrderFills(local.exchangeOrderId as string, this.market);
+    } catch {
+      // Can't confirm what happened — do not guess it's fine. Stays an anomaly.
+      return false;
+    }
+
+    const filledSize = fills.reduce((sum, f) => sum + f.size, 0);
+    if (filledSize <= 0) {
+      // Vanished with zero fill evidence at all — genuinely unexplained, keep blocking.
+      return false;
+    }
+
+    this.registry.upsert({
+      ...local,
+      filledSize,
+      state: filledSize >= local.size ? "FILLED" : "CANCELLED",
+      updatedAt: now,
+    });
+    return true;
   }
 }

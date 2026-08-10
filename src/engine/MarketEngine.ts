@@ -78,6 +78,11 @@ export class MarketEngine {
     }
 
     const reconciliationResult = await this.reconciliation.checkAgainstExchange();
+    // Reconciliation may have just resolved a vanished order straight into the registry (a real
+    // fill explaining a LOCAL_ORDER_NOT_ON_EXCHANGE anomaly) — persist that immediately, since a
+    // still-degraded cycle (e.g. a genuinely unexplained anomaly elsewhere) returns early below,
+    // before the save() at the end of this method would otherwise run.
+    this.registry.save();
 
     const summary: CycleSummary = {
       market: this.config.symbol,

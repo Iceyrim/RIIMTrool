@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -129,6 +129,96 @@ describe("MarketEngine", () => {
     expect(summary.reconciliation.healthy).toBe(false);
     expect(summary.blockedReason).toMatch(/degraded/);
     expect(summary.quotesPlaced).toBe(0);
+  });
+
+  it("resumes quoting once reconciliation resolves filled orders via fill-replay, instead of staying blocked forever", async () => {
+    const engine = new MarketEngine(adapter, testConfig(), tempStatePath());
+    await engine.start();
+    const first = await engine.runCycle();
+    expect(first.quotesPlaced).toBe(10);
+
+    // Two resting quotes fill and drop off the exchange's open-orders view between cycles —
+    // exactly what the paper-run bug looked like: quotes vanish, but with real fill evidence
+    // behind the disappearance. Picking the two outermost (10bps) levels, not the innermost ones:
+    // the innermost levels' neighbor gap is numerically right at the ladder's own coverage
+    // tolerance radius, which is an unrelated, pre-existing floating-point edge sensitivity in
+    // manageQuoteLadder's alreadyCovered check, not something this fix touches.
+    const resting = engine.registry.listByState("RESTING").slice(-2);
+    const filledOne = resting[0];
+    const filledTwo = resting[1];
+    if (!filledOne || !filledTwo) throw new Error("expected two resting orders from cycle 1");
+    for (const order of [filledOne, filledTwo]) {
+      adapter.openOrders = adapter.openOrders.filter(
+        (o) => o.exchangeOrderId !== order.exchangeOrderId,
+      );
+      adapter.fillsByOrderId.set(order.exchangeOrderId as string, [
+        {
+          exchangeOrderId: order.exchangeOrderId as string,
+          tradeId: `t-${order.exchangeOrderId}`,
+          market: MARKET,
+          side: order.side,
+          price: order.price,
+          size: order.size,
+          timestamp: Date.now(),
+        },
+      ]);
+    }
+
+    const second = await engine.runCycle();
+    expect(second.reconciliation.healthy).toBe(true);
+    expect(second.blockedReason).toBeUndefined();
+    expect(second.quotesPlaced).toBe(2); // exactly the two vacated levels refilled
+    expect(engine.registry.get(filledOne.clientOrderId)?.state).toBe("FILLED");
+    expect(engine.registry.get(filledTwo.clientOrderId)?.state).toBe("FILLED");
+  });
+
+  it("persists a fill-replay-resolved order to disk even when the cycle stays blocked by a separate, unexplained anomaly", async () => {
+    const statePath = tempStatePath();
+    const engine = new MarketEngine(adapter, testConfig(), statePath);
+    await engine.start();
+    await engine.runCycle();
+
+    const resolvedOrder = engine.registry.listByState("RESTING")[0];
+    if (!resolvedOrder) throw new Error("expected a resting order from cycle 1");
+    adapter.openOrders = adapter.openOrders.filter(
+      (o) => o.exchangeOrderId !== resolvedOrder.exchangeOrderId,
+    );
+    adapter.fillsByOrderId.set(resolvedOrder.exchangeOrderId as string, [
+      {
+        exchangeOrderId: resolvedOrder.exchangeOrderId as string,
+        tradeId: "t-resolved",
+        market: MARKET,
+        side: resolvedOrder.side,
+        price: resolvedOrder.price,
+        size: resolvedOrder.size,
+        timestamp: Date.now(),
+      },
+    ]);
+    // A genuinely unexplained anomaly keeps this cycle degraded regardless of the resolution
+    // above — the save() fix must still fire on the early-return path.
+    adapter.openOrders.push({
+      exchangeOrderId: "surprise",
+      market: MARKET,
+      side: "buy",
+      price: 59000,
+      size: 0.001,
+      filledSize: 0,
+      remainingSize: 0.001,
+      isReduceOnly: false,
+      state: "open",
+    });
+
+    const second = await engine.runCycle();
+    expect(second.blockedReason).toMatch(/degraded/);
+
+    const persisted = JSON.parse(readFileSync(statePath, "utf-8")) as Array<{
+      clientOrderId: string;
+      state: string;
+    }>;
+    const persistedResolved = persisted.find(
+      (o) => o.clientOrderId === resolvedOrder.clientOrderId,
+    );
+    expect(persistedResolved?.state).toBe("FILLED");
   });
 
   it("blocks all new placements when the account is at bankruptcy risk", async () => {
