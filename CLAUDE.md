@@ -1,0 +1,38 @@
+# RIIMTrool — Standing Context for Claude Code
+
+Read this first, every session. Full architecture spec is in `SPEC.md` — read it fully before any structural work; don't re-derive decisions already made there.
+
+## What this is
+
+A unified, multi-market, multi-exchange trading bot, built fresh to replace two separate single-market bots that had real, expensive production incidents. Every design decision in SPEC.md exists because of a specific incident on the predecessor system — don't simplify away the "why" sections.
+
+## Standing constraints (non-negotiable, every session)
+
+- Never touch `.env`. No real credentials exist in this project yet (paper-mode only, `N1_PRIVATE_KEY` deliberately not configured). When it eventually is, that's set manually by the human operator, never by Claude Code.
+- Never attempt live order placement or any authenticated exchange action. This project is greenfield / paper-mode only until explicitly told otherwise.
+- Show plans before implementing structural changes — get explicit approval on design before writing code, especially for anything touching the adapter interface, engine core, or isolation guarantees.
+- Full test suite (`npm test`, `npx tsc --noEmit`, lint) must pass before anything is considered done. Report results, don't just claim success.
+- Commit only when told to — the human runs `git add/commit/push` themselves in terminal, every time, immediately after verification. Never leave verified work uncommitted across multiple steps.
+
+## Current status (update this section as steps complete)
+
+Per SPEC.md Section 10 build order:
+- [x] Step 1 — ExchangeAdapter interface + N1 implementation
+- [x] Step 2 — Single-market core engine (Section 5a/5b/5c fixes built in from the start)
+- [x] Step 3 — Proven end-to-end: real paper soak test, 89 cycles, zero anomalies (found and fixed a real reconciliation deadlock bug along the way — see git log)
+- [x] Step 4 — Multi-market with tested isolation guarantees (independent per-market timers, fake-timer tests proving a hung/degraded market can't block another)
+- [x] Step 5 — Unified dashboard (live exposure calc from position data, not a session counter — this was a real bug in the old system, deliberately avoided here)
+- [x] Step 6 — Trade logging (durable JSONL, deduped by tradeId, wired into shared engine code so it works identically across adapters)
+- [ ] Step 7 — Validate the exchange abstraction by implementing a second adapter (even minimal/stub). This is the real test of whether the ExchangeAdapter boundary holds — any code needed outside the adapter itself is a sign the boundary was drawn wrong.
+
+## Key architectural facts worth remembering
+
+- One process, N markets — not one process per market (that was the old, painful model).
+- Market isolation within the shared process is the single most important guarantee (SPEC.md Section 4). Every new feature touching scheduling, state, or risk needs to be checked against: "can a problem in one market ever affect another?"
+- Exchange-specific code lives only inside adapter implementations (`src/adapters/n1/`). Engine, risk, reconciliation code talks only to the normalized `ExchangeAdapter` interface types.
+- Config is per-market YAML (`config/markets.yaml`), not `.env` — this was a deliberate move away from flat `.env` config for trading parameters specifically, since `.env` heredoc/append mistakes caused real config corruption on the old system multiple times.
+- Currently two markets configured: BTCUSD, ETHUSD, using the proven live parameters from the old bots (spread, sizing, session loss caps — ETH's cap is deliberately tighter than BTC's, per an old incident).
+
+## When eventually going live
+
+Wallet to use: `2ZUbwKwirxbkSsWH8nFkCAEHtgR8QUpXYYB5p6yqyeDV` (same as the old BTC/ETH bots). This gets set manually in `.env` by the human, never by Claude Code, and only after step 7 and a real live-readiness review — not automatically once paper mode looks good.
