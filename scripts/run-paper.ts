@@ -22,6 +22,8 @@
  *   PAPER_STARTING_BALANCE_USDC      — default: 10000
  *   PAPER_CYCLE_INTERVAL_MS          — default: 5000
  *   PAPER_DURATION_MS                — default: unset (runs until Ctrl-C)
+ *   DASHBOARD_PORT                   — default: 4000. Status-only HTTP server, bound to
+ *                                      127.0.0.1 only (see src/dashboard/server.ts).
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -31,6 +33,8 @@ import { N1PaperAdapter } from "../src/adapters/n1/N1PaperAdapter.js";
 import { RealN1MarketDataSource } from "../src/adapters/n1/N1MarketDataSource.js";
 import { loadMarketsConfig } from "../src/config/loadConfig.js";
 import { toEngineMarketConfig } from "../src/config/toEngineMarketConfig.js";
+import { createDashboardServer } from "../src/dashboard/server.js";
+import type { DashboardMarket } from "../src/dashboard/DashboardService.js";
 import { MarketEngine } from "../src/engine/MarketEngine.js";
 import { PaperRunner, type PaperRunnerMarket } from "../src/paperRunner/PaperRunner.js";
 
@@ -92,6 +96,16 @@ async function main(): Promise<void> {
     pnlSource: paperAdapter,
   }));
 
+  // Same shared paperAdapter across every market (SPEC.md Section 4.3) — the dashboard reads
+  // from it directly, never issuing its own exchange call.
+  const dashboardMarkets: DashboardMarket[] = runnerMarkets.map(({ market, engine }) => ({
+    market,
+    engine,
+    adapter: paperAdapter,
+  }));
+  const dashboardPort = Number(process.env.DASHBOARD_PORT ?? "4000");
+  const dashboardServer = createDashboardServer(dashboardMarkets, { port: dashboardPort });
+
   const logFilePath = join(
     process.cwd(),
     "state",
@@ -104,6 +118,7 @@ async function main(): Promise<void> {
 
   const shutdown = (): void => {
     const report = runner.stop();
+    dashboardServer.close();
     console.log("\n=== Soak report ===");
     console.log(JSON.stringify(report, null, 2));
     process.exit(0);
@@ -116,6 +131,7 @@ async function main(): Promise<void> {
     `Cycle interval: ${intervalMs}ms${durationMs ? `, duration: ${durationMs}ms` : " (until Ctrl-C)"}`,
   );
   console.log(`Log file: ${logFilePath}`);
+  console.log(`Dashboard: http://127.0.0.1:${dashboardPort}`);
   await runner.start();
 }
 

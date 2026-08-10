@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>RIIMTrool — Status</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0e14;
+        --panel: #131722;
+        --border: #232838;
+        --text: #e6e9f0;
+        --muted: #8b92a5;
+        --green: #3ddc84;
+        --red: #ff5c5c;
+        --yellow: #ffb84d;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 4px;
+      }
+      .subhead {
+        color: var(--muted);
+        font-size: 13px;
+        margin-bottom: 20px;
+      }
+      .summary {
+        display: flex;
+        gap: 16px;
+        margin-bottom: 24px;
+        flex-wrap: wrap;
+      }
+      .stat {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px 16px;
+        min-width: 160px;
+      }
+      .stat .label {
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .stat .value {
+        font-size: 22px;
+        font-weight: 600;
+        margin-top: 4px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+        margin-bottom: 20px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+        font-size: 13px;
+        white-space: nowrap;
+      }
+      th {
+        color: var(--muted);
+        font-weight: 500;
+        text-transform: uppercase;
+        font-size: 11px;
+        letter-spacing: 0.04em;
+      }
+      tr:last-child td {
+        border-bottom: none;
+      }
+      .pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .pill.healthy {
+        background: rgba(61, 220, 132, 0.15);
+        color: var(--green);
+      }
+      .pill.degraded {
+        background: rgba(255, 92, 92, 0.15);
+        color: var(--red);
+      }
+      .pnl-pos {
+        color: var(--green);
+      }
+      .pnl-neg {
+        color: var(--red);
+      }
+      .anomalies {
+        color: var(--yellow);
+        font-size: 12px;
+      }
+      .todo {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.6;
+      }
+      #error {
+        display: none;
+        background: rgba(255, 92, 92, 0.12);
+        border: 1px solid var(--red);
+        color: var(--red);
+        border-radius: 8px;
+        padding: 10px 14px;
+        margin-bottom: 20px;
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>RIIMTrool — Multi-Market Status</h1>
+    <div class="subhead" id="updated">Loading…</div>
+    <div id="error"></div>
+
+    <div class="summary">
+      <div class="stat">
+        <div class="label">Total exposure (USD)</div>
+        <div class="value" id="totalExposure">—</div>
+      </div>
+      <div class="stat">
+        <div class="label">Markets</div>
+        <div class="value" id="marketCount">—</div>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Market</th>
+          <th>Reconciliation</th>
+          <th>Streak</th>
+          <th>Session PnL (USD)</th>
+          <th>Position</th>
+          <th>Notional (USD)</th>
+          <th>Open Orders</th>
+        </tr>
+      </thead>
+      <tbody id="marketRows"></tbody>
+    </table>
+
+    <div id="todoSection"></div>
+
+    <script>
+      const POLL_INTERVAL_MS = 5000;
+
+      function fmtUsd(n) {
+        return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      }
+
+      function pnlClass(n) {
+        return n >= 0 ? "pnl-pos" : "pnl-neg";
+      }
+
+      function render(status) {
+        document.getElementById("updated").textContent =
+          "Last updated: " + new Date(status.generatedAt).toLocaleString();
+        document.getElementById("totalExposure").textContent = fmtUsd(status.totalExposureUsd);
+        document.getElementById("marketCount").textContent = status.markets.length;
+
+        const rows = status.markets
+          .map((m) => {
+            const rec = m.reconciliation;
+            const pillClass = rec.healthy ? "healthy" : "degraded";
+            const pillLabel = rec.healthy ? "HEALTHY" : "DEGRADED";
+            const streak = rec.healthy
+              ? `${rec.healthyStreak} healthy`
+              : `${rec.degradedStreak} degraded`;
+            const position = m.position
+              ? `${m.position.baseSize} @ ${fmtUsd(m.position.markPrice)}`
+              : "flat";
+            const notional = m.position ? fmtUsd(m.position.notionalUsd) : "—";
+            const anomalies = rec.anomalies.length
+              ? `<div class="anomalies">${rec.anomalies.map((a) => a.detail).join("<br/>")}</div>`
+              : "";
+
+            return `<tr>
+              <td>${m.market}</td>
+              <td><span class="pill ${pillClass}">${pillLabel}</span>${anomalies}</td>
+              <td>${streak}</td>
+              <td class="${pnlClass(m.sessionRealizedPnlUsd)}">${fmtUsd(m.sessionRealizedPnlUsd)}</td>
+              <td>${position}</td>
+              <td>${notional}</td>
+              <td>${m.openOrders.length}</td>
+            </tr>`;
+          })
+          .join("");
+        document.getElementById("marketRows").innerHTML = rows;
+
+        const todoSection = document.getElementById("todoSection");
+        todoSection.innerHTML = status.todo.length
+          ? `<div class="todo"><strong>Not yet implemented:</strong><br/>${status.todo.join("<br/>")}</div>`
+          : "";
+
+        document.getElementById("error").style.display = "none";
+      }
+
+      async function poll() {
+        try {
+          const res = await fetch("/api/status");
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          render(await res.json());
+        } catch (err) {
+          const el = document.getElementById("error");
+          el.textContent = "Failed to fetch status: " + err.message;
+          el.style.display = "block";
+        }
+      }
+
+      poll();
+      setInterval(poll, POLL_INTERVAL_MS);
+    </script>
+  </body>
+</html>
