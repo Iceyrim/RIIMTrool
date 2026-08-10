@@ -45,14 +45,29 @@ export interface SoakReport {
 }
 
 /**
- * Drives one or more MarketEngines on an interval, logging every cycle and producing the
- * soak-test report SPEC.md Section 9.3 requires before any live change. Each market's engine
- * runs independently within a cycle — a thrown error from one market's runCycle() is caught and
- * logged, not allowed to stop the others, the same per-market isolation principle Section 4.2
- * requires of the live engine loop.
+ * Drives one or more MarketEngines, logging every cycle and producing the soak-test report
+ * SPEC.md Section 9.3 requires before any live change.
+ *
+ * SPEC.md Section 4.2 requires that a stuck/degraded market never blocks or delays another
+ * market's loop — not just that a thrown error doesn't propagate. A single shared interval that
+ * walks markets sequentially (`for (...) { await engine.runCycle() }`) fails that guarantee: a
+ * cycle that never resolves (a hung adapter call, not a thrown error) stalls every market queued
+ * behind it in that same callback. So the live loop (start()) gives each market its own
+ * independent, self-rescheduling timer — a hang in one market's in-flight cycle just means that
+ * market's own timer doesn't reschedule yet; it has no way to reach another market's timer
+ * callback at all, since they're separate callbacks on separate timers, not sequential steps
+ * inside one shared callback. Each market's timer also guards against overlapping cycles for
+ * itself (skips and logs if the previous cycle for that market hasn't settled yet) — a stuck
+ * market keeps skipping its own ticks forever, which is the correct isolated failure mode, rather
+ * than stacking concurrent cycles for the same market or blocking anyone else.
+ *
+ * runOnce() (manual single-step, used by tests and soak-step tooling) runs every market's cycle
+ * concurrently via Promise.all rather than sequentially, for the same reason.
  */
 export class PaperRunner {
-  private timer?: ReturnType<typeof setInterval>;
+  private readonly marketTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly inFlight = new Set<string>();
+  private running = false;
   private durationTimer?: ReturnType<typeof setTimeout>;
   private cycleCount = 0;
   private startedAt = 0;
@@ -68,44 +83,77 @@ export class PaperRunner {
       await engine.start();
     }
     this.startedAt = Date.now();
-    this.timer = setInterval(() => {
-      void this.runOnce();
-    }, this.config.intervalMs);
+    this.running = true;
+    for (const entry of this.markets) {
+      this.scheduleNextTick(entry);
+    }
     if (this.config.durationMs !== undefined) {
       this.durationTimer = setTimeout(() => this.stop(), this.config.durationMs);
     }
   }
 
-  /** Runs exactly one cycle across every configured market. Exposed publicly so tests (and a
-   * manual single-step invocation) don't have to wait on real interval timing. */
-  async runOnce(): Promise<CycleLogEntry[]> {
-    const entries: CycleLogEntry[] = [];
-    for (const { market, engine, pnlSource } of this.markets) {
-      let summary: CycleSummary;
+  /** Schedules this one market's next tick, independent of every other market's timer. */
+  private scheduleNextTick(entry: PaperRunnerMarket): void {
+    const timer = setTimeout(() => void this.tick(entry), this.config.intervalMs);
+    this.marketTimers.set(entry.market, timer);
+  }
+
+  private async tick(entry: PaperRunnerMarket): Promise<void> {
+    if (!this.running) return;
+
+    if (this.inFlight.has(entry.market)) {
+      console.warn(
+        `[PaperRunner:${entry.market}] previous cycle still in flight (stuck/degraded?), ` +
+          `skipping this tick — other markets are unaffected`,
+      );
+    } else {
+      this.inFlight.add(entry.market);
       try {
-        summary = await engine.runCycle();
-      } catch (err) {
-        console.error(
-          `[PaperRunner:${market}] runCycle() threw, skipping this cycle: ${String(err)}`,
-        );
-        continue;
+        await this.runMarketCycle(entry);
+      } finally {
+        this.inFlight.delete(entry.market);
       }
-
-      const pnlDelta = pnlSource.drainRealizedPnlDeltaUsd(market);
-      if (pnlDelta !== 0) engine.recordRealizedPnl(pnlDelta);
-
-      this.cycleCount++;
-      const entry: CycleLogEntry = {
-        timestamp: Date.now(),
-        market,
-        summary,
-        sessionRealizedPnlUsd: engine.getSessionRealizedPnlUsd(),
-      };
-      this.log.push(entry);
-      this.emitLogLine(entry);
-      entries.push(entry);
     }
-    return entries;
+
+    if (this.running) this.scheduleNextTick(entry);
+  }
+
+  /** Runs exactly one cycle across every configured market, concurrently. Exposed publicly so
+   * tests (and a manual single-step invocation) don't have to wait on real interval timing. */
+  async runOnce(): Promise<CycleLogEntry[]> {
+    const results = await Promise.all(this.markets.map((entry) => this.runMarketCycle(entry)));
+    return results.filter((entry): entry is CycleLogEntry => entry !== undefined);
+  }
+
+  /** Runs one cycle for exactly one market: engine.runCycle(), PnL drain, logging. A thrown error
+   * from runCycle() is caught and logged here, not allowed to propagate — this is what isolates a
+   * crashed market from whichever caller invoked this (runOnce()'s Promise.all, or this market's
+   * own live timer). Returns undefined when the cycle threw, so callers can filter it out. */
+  private async runMarketCycle(entry: PaperRunnerMarket): Promise<CycleLogEntry | undefined> {
+    const { market, engine, pnlSource } = entry;
+    let summary: CycleSummary;
+    try {
+      summary = await engine.runCycle();
+    } catch (err) {
+      console.error(
+        `[PaperRunner:${market}] runCycle() threw, skipping this cycle: ${String(err)}`,
+      );
+      return undefined;
+    }
+
+    const pnlDelta = pnlSource.drainRealizedPnlDeltaUsd(market);
+    if (pnlDelta !== 0) engine.recordRealizedPnl(pnlDelta);
+
+    this.cycleCount++;
+    const logEntry: CycleLogEntry = {
+      timestamp: Date.now(),
+      market,
+      summary,
+      sessionRealizedPnlUsd: engine.getSessionRealizedPnlUsd(),
+    };
+    this.log.push(logEntry);
+    this.emitLogLine(logEntry);
+    return logEntry;
   }
 
   private emitLogLine(entry: CycleLogEntry): void {
@@ -118,7 +166,9 @@ export class PaperRunner {
   }
 
   stop(): SoakReport {
-    if (this.timer) clearInterval(this.timer);
+    this.running = false;
+    for (const timer of this.marketTimers.values()) clearTimeout(timer);
+    this.marketTimers.clear();
     if (this.durationTimer) clearTimeout(this.durationTimer);
     return {
       startedAt: this.startedAt,

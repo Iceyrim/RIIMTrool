@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MarketEngine } from "../../src/engine/MarketEngine.js";
 import type { EngineMarketConfig } from "../../src/engine/types.js";
 import { PaperRunner, type RealizedPnlSource } from "../../src/paperRunner/PaperRunner.js";
@@ -128,6 +128,105 @@ describe("PaperRunner", () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]?.market).toBe("BTCUSD");
+  });
+
+  it("SPEC 4.2: a market whose cycle hangs forever does not block or delay the other market's independent live timer", async () => {
+    vi.useFakeTimers();
+    try {
+      const btcEngine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempStatePath("BTCUSD"));
+      const ethEngine = new MarketEngine(ethAdapter, testConfig("ETHUSD"), tempStatePath("ETHUSD"));
+      const dir = mkdtempSync(join(tmpdir(), "riimtrool-paperrunner-stuck-test-"));
+      const logFilePath = join(dir, "cycles.jsonl");
+
+      const runner = new PaperRunner(
+        [
+          { market: "BTCUSD", engine: btcEngine, pnlSource: btcPnl },
+          { market: "ETHUSD", engine: ethEngine, pnlSource: ethPnl },
+        ],
+        { intervalMs: 1000, logFilePath },
+      );
+      await runner.start();
+
+      // Simulate a genuinely stuck reconciliation loop: the adapter call never resolves and
+      // never rejects — the failure mode the "runCycle() throws" test above does NOT cover, and
+      // the one SPEC.md Section 4.2 is actually worried about ("stuck", not just "crashed").
+      btcAdapter.refreshAccountState = () => new Promise<void>(() => {});
+
+      await vi.advanceTimersByTimeAsync(1000 * 5);
+      runner.stop();
+
+      const lines = readFileSync(logFilePath, "utf-8").trim().split("\n").filter(Boolean);
+      const entries = lines.map((l) => JSON.parse(l) as { market: string });
+      const ethCycles = entries.filter((e) => e.market === "ETHUSD").length;
+      const btcCycles = entries.filter((e) => e.market === "BTCUSD").length;
+
+      // ETH's own independent timer kept firing on schedule the whole time BTC was stuck —
+      // proof this is about timer independence, not just try/catch around a synchronous throw.
+      expect(ethCycles).toBeGreaterThanOrEqual(4);
+      // BTC never completed a single cycle. That's expected — the guarantee under test is that
+      // this never shows up as a delay or block on ETH, not that BTC recovers on its own.
+      expect(btcCycles).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("SPEC 4.2: a market degraded every cycle (but still resolving) does not block the other market's independent loop", async () => {
+    vi.useFakeTimers();
+    try {
+      const btcEngine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempStatePath("BTCUSD"));
+      const ethEngine = new MarketEngine(ethAdapter, testConfig("ETHUSD"), tempStatePath("ETHUSD"));
+      const dir = mkdtempSync(join(tmpdir(), "riimtrool-paperrunner-degraded-test-"));
+      const logFilePath = join(dir, "cycles.jsonl");
+
+      const runner = new PaperRunner(
+        [
+          { market: "BTCUSD", engine: btcEngine, pnlSource: btcPnl },
+          { market: "ETHUSD", engine: ethEngine, pnlSource: ethPnl },
+        ],
+        { intervalMs: 1000, logFilePath },
+      );
+      await runner.start();
+
+      // A surprise exchange order with no local record keeps BTC's reconciliation unhealthy
+      // every cycle (SPEC 4.1 anomaly) — degraded, but each check still resolves normally. A
+      // different failure mode than the hung-promise test above.
+      btcAdapter.openOrders.push({
+        exchangeOrderId: "surprise",
+        market: "BTCUSD",
+        side: "buy",
+        price: 59000,
+        size: 0.001,
+        filledSize: 0,
+        remainingSize: 0.001,
+        isReduceOnly: false,
+        state: "open",
+      });
+
+      await vi.advanceTimersByTimeAsync(1000 * 4);
+      runner.stop();
+
+      const lines = readFileSync(logFilePath, "utf-8").trim().split("\n").filter(Boolean);
+      const entries = lines.map(
+        (l) =>
+          JSON.parse(l) as {
+            market: string;
+            summary: { blockedReason?: string; quotesPlaced: number };
+          },
+      );
+      const btcEntries = entries.filter((e) => e.market === "BTCUSD");
+      const ethEntries = entries.filter((e) => e.market === "ETHUSD");
+
+      expect(btcEntries.length).toBeGreaterThanOrEqual(3);
+      expect(btcEntries.every((e) => e.summary.blockedReason?.includes("degraded"))).toBe(true);
+      expect(btcEntries.every((e) => e.summary.quotesPlaced === 0)).toBe(true);
+
+      // ETH kept quoting normally on its own schedule the entire time, unaffected by BTC.
+      expect(ethEntries.length).toBeGreaterThanOrEqual(3);
+      expect(ethEntries.some((e) => e.summary.quotesPlaced > 0)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("writes an append-only JSON-lines log file when configured", async () => {
