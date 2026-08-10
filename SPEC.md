@@ -198,3 +198,33 @@ These aren't code requirements, they're process requirements for however this ge
 8. Only once all of the above is proven stable: consider adding a third market/exchange, or revisiting deferred items like adaptive per-level spacing (Section 3) or exchange-enforced reduce-only orders (Section 5c)
 
 Do not skip step 3 to save time — proving isolation (step 4) is much easier to get right and to test when you already trust the single-market core completely. Likewise, do not skip step 7 — an abstraction layer that has only ever had one implementation behind it is unverified, no matter how clean it looks.
+
+---
+
+## 11. RISEx Adapter — Second Real-Exchange Validation (Live-Readiness Gate)
+
+Step 7 validated the `ExchangeAdapter` abstraction against a synthetic second implementation (`StubAdapter`) with no real-exchange characteristics behind it. RISEx (perpetuals DEX on RISE L2) is the real second exchange, and a much stronger test of the interface boundary than Stub's synthetic differences: a genuinely different chain family (EVM vs N1's Solana/Nord app-chain), a different auth model (EIP-712/JWT vs raw keypair), integer tick/step price representation instead of decimals, and native per-position isolated margin instead of N1's account-wide-only cross margin.
+
+### No public testnet
+
+RISEx's own docs still generically reference a "RISE Testnet" environment, but the underlying L2 testnet (chain id 11155931) is private-beta / access-gated (builder form or Discord request) — not an open sandbox. There is currently no way to exercise the authenticated order-placement surface against a funds-free live environment. This changes the proof bar for this adapter relative to N1 (step 3's real paper soak) and Stub (step 7's real soak): both of those got a live soak test before being considered proven; RiseXAdapter's authenticated surface currently cannot get the same treatment.
+
+### Build plan
+
+1. `RiseXMarketDataSource` — public, unauthenticated REST/WS only (markets, orderbook, public trades, OHLCV, funding history). Built and soak-tested against real RISEx mainnet data — no funds or credentials involved, matching `RealN1MarketDataSource`'s structural guarantee of holding no private key.
+2. `RiseXPaperAdapter` — real market data feed plus fully local simulated positions/orders/fills/margin, same shape as `N1PaperAdapter`. This is the real proof of the abstraction against RISEx's actual market structure (tick/step sizing, real price action, real funding), run as a soak test the same way N1 and Stub were.
+3. `RiseXAdapter` (authenticated surface: placeOrder/cancelOrder/getOrderFills/positions/margin/getAccountVolume) — built against RISEx's documented REST schema, verified only via fixture/contract-level tests against documented request/response shapes. This is explicitly a lower proof bar than steps 1-2 and must never be reported or treated as equivalent to a live soak.
+
+### Design decisions locked for v1
+
+- **Margin**: RiseXAdapter operates cross-margin only. RISEx natively supports per-position isolated margin, which `NormalizedMarginStatus` (deliberately account-wide, Section 4.3) doesn't represent. Rather than extend the shared interface for this, v1 scopes to cross-margin and documents isolated-margin support as deferred future work — not a silent gap.
+- **Order types**: v1 supports market/limit + reduce-only only, mapped onto RISEx's orthogonal `order_type`/`time_in_force`/`post_only` fields entirely inside the adapter's own mapper layer — no `ExchangeAdapter` interface change required. RISEx's native TP/SL conditional-order subsystem is out of scope for v1.
+- **`getAccountVolume()`**: implemented by aggregating RISEx's Account Trade History endpoint (nanosecond timestamps, offset/page pagination) over the requested `since`/`until` window — the same approach `N1PaperAdapter.getAccountVolume()` already uses by precedent — rather than RISEx's dedicated Volume Stats endpoint, which only supports fixed relative windows (1h-2w max) and cannot serve an arbitrary-range query.
+- **Auth**: JWT bearer (one-time EIP-712 `Login` signature at `connect()`, refreshed periodically) is the default, not per-call EIP-712 permit signing. This fits the adapter's existing `connect()`/`disconnect()` lifecycle (matching how `N1Adapter` establishes its session once rather than signing per call), keeps private-key signing off the order-placement hot path, and keeps a single, auditable point where real credentials get exercised. RISEx also offers delegated Session Keys and OperatorHub spend-limited allowances, purpose-built for bots — worth revisiting as a future enhancement once this adapter is live, but out of scope for the initial implementation.
+
+### Live-readiness gate (do not skip)
+
+Fixture/contract tests passing against documented schemas prove RiseXAdapter sends and parses what the docs describe — they prove nothing about RISEx's actual matching behavior, fill timing, or error/edge cases under real conditions, which is exactly what N1's step-3 soak and Stub's step-7 soak were for. RiseXAdapter passing its test suite does **not** clear it for live use. Before any live trading on RISEx:
+
+(a) **Preferred** — obtain access to RISEx's gated testnet (builder form / Discord) and run a real soak there first, same discipline as N1's dev-vs-mainnet split.
+(b) **Fallback, only if (a) is not obtainable in reasonable time** — a human-operator-supervised, minimal-size, closely-watched first live session, restarted and re-verified after every fix rather than left running unattended, mirroring how the predecessor bots were run after incidents. This session is run by the human operator directly, on their own machine and schedule; per Section 9, an AI coding session never places live orders, regardless of test coverage.
