@@ -1,0 +1,83 @@
+import { z } from "zod";
+
+/**
+ * Market configuration shape (SPEC.md Section 2), extended with `exchangeSymbol`: the config's
+ * `symbol` is a logical/display symbol (e.g. "BTCUSD"); `exchangeSymbol` is the literal symbol
+ * string the exchange itself uses (e.g. N1's markets are quoted in USDC, not USD, so the real
+ * N1 symbol is something like "BTCUSDC"). Keeping this mapping explicit in config avoids the
+ * adapter having to guess or fuzzy-match symbols at connect time.
+ */
+export const riskLimitsSchema = z.object({
+  maxLongPosition: z.number().positive(),
+  maxShortPosition: z.number().positive(),
+  maxOrderSize: z.number().positive(),
+  maxOrderNotionalUsd: z.number().positive(),
+  maxOpenOrders: z.number().int().positive(),
+});
+
+export const spreadBpsSchema = z.object({
+  normal: z.number().positive(),
+  min: z.number().positive(),
+  max: z.number().positive(),
+});
+
+export const orderSizeSchema = z.object({
+  min: z.number().positive(),
+  max: z.number().positive(),
+});
+
+/**
+ * SPEC.md Section 5c only states these as prose ("45 seconds minimum hold, 5 minutes maximum
+ * ceiling") rather than as part of Section 2's config example — but per Section 6's "never leave
+ * a hardcoded literal alongside a configurable system" lesson, they belong here as real,
+ * overridable config, not a bare literal buried in engine code. Defaults are the proven values.
+ */
+export const reduceOnlyExitSchema = z.object({
+  minHoldMs: z.number().int().positive().default(45_000),
+  maxHoldMs: z.number().int().positive().default(300_000),
+});
+
+export const marketConfigSchema = z
+  .object({
+    symbol: z.string().min(1),
+    exchange: z.enum(["n1"]),
+    exchangeSymbol: z.string().min(1),
+    enabled: z.boolean(),
+    orderSize: orderSizeSchema,
+    spreadBps: spreadBpsSchema,
+    exitSpreadBps: z.number().positive(),
+    quoteLevels: z.number().int().positive(),
+    levelSpacingBps: z.array(z.number().positive()).min(1),
+    inventoryReductionThresholdBase: z.number().positive(),
+    riskLimits: riskLimitsSchema,
+    sessionLossCapUsd: z.number().positive(),
+    reduceOnlyExit: reduceOnlyExitSchema.default({}),
+    /** Normal (non-reduce-only) quote refresh cadence. SPEC.md Section 6 root cause for the 5c
+     * bug: this must be a named, overridable value, never a bare literal reused for reduce-only
+     * exits too. Default is the proven ~2s value. */
+    quoteMinimumLifetimeMs: z.number().int().positive().default(2_000),
+  })
+  .refine((m) => m.levelSpacingBps.length === m.quoteLevels, {
+    message: "levelSpacingBps length must match quoteLevels",
+    path: ["levelSpacingBps"],
+  })
+  .refine((m) => m.orderSize.min <= m.orderSize.max, {
+    message: "orderSize.min must be <= orderSize.max",
+    path: ["orderSize"],
+  })
+  .refine((m) => m.spreadBps.min <= m.spreadBps.normal && m.spreadBps.normal <= m.spreadBps.max, {
+    message: "spreadBps must satisfy min <= normal <= max",
+    path: ["spreadBps"],
+  })
+  .refine((m) => m.reduceOnlyExit.minHoldMs < m.reduceOnlyExit.maxHoldMs, {
+    message: "reduceOnlyExit.minHoldMs must be < reduceOnlyExit.maxHoldMs",
+    path: ["reduceOnlyExit"],
+  });
+
+export const marketsConfigSchema = z.object({
+  markets: z.array(marketConfigSchema).min(1),
+});
+
+export type RiskLimits = z.infer<typeof riskLimitsSchema>;
+export type MarketConfig = z.infer<typeof marketConfigSchema>;
+export type MarketsConfig = z.infer<typeof marketsConfigSchema>;

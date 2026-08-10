@@ -1,0 +1,47 @@
+# Example market configuration (SPEC.md Section 2). Copy to markets.yaml and adjust.
+# Values below (order sizes, spreads, risk limits) are the proven-in-production values from
+# SPEC.md — not starting guesses.
+#
+# exchangeSymbol is a TODO: confirm the real live N1 market symbols before connecting anything
+# (see .env.example — no live/testnet connection has been made yet, this is unverified).
+
+markets:
+  - symbol: BTCUSD
+    exchange: n1
+    exchangeSymbol: BTCUSDC # TODO(you): confirm against N1's real market list
+    enabled: true
+    orderSize: { min: 0.00155, max: 0.00232 }
+    spreadBps: { normal: 5, min: 4, max: 7.5 }
+    exitSpreadBps: 2.5
+    quoteLevels: 5
+    levelSpacingBps: [2, 3, 4, 7, 10]
+    inventoryReductionThresholdBase: 0.003
+    riskLimits:
+      {
+        maxLongPosition: 0.005,
+        maxShortPosition: 0.005,
+        maxOrderSize: 0.0025,
+        maxOrderNotionalUsd: 160,
+        maxOpenOrders: 12,
+      }
+    sessionLossCapUsd: 15
+
+  - symbol: ETHUSD
+    exchange: n1
+    exchangeSymbol: ETHUSDC # TODO(you): confirm against N1's real market list
+    enabled: true
+    orderSize: { min: 0.045, max: 0.068 }
+    spreadBps: { normal: 5, min: 4, max: 7.5 }
+    exitSpreadBps: 2.5
+    quoteLevels: 5
+    levelSpacingBps: [2, 3, 4, 7, 10]
+    inventoryReductionThresholdBase: 0.09
+    riskLimits:
+      {
+        maxLongPosition: 0.15,
+        maxShortPosition: 0.15,
+        maxOrderSize: 0.075,
+        maxOrderNotionalUsd: 160,
+        maxOpenOrders: 12,
+      }
+    sessionLossCapUsd: 6
