@@ -1,5 +1,6 @@
 import type { ExchangeAdapter, NormalizedFill } from "../adapters/ExchangeAdapter.js";
 import type { OrderRegistry } from "./OrderRegistry.js";
+import type { TradeLog } from "./TradeLog.js";
 import type { LocalOrder } from "./types.js";
 
 export interface ReconciliationAnomaly {
@@ -46,6 +47,7 @@ export class Reconciliation {
     private readonly adapter: ExchangeAdapter,
     private readonly registry: OrderRegistry,
     private readonly market: string,
+    private readonly tradeLog: TradeLog,
   ) {}
 
   getLastResult(): ReconciliationResult | undefined {
@@ -125,6 +127,13 @@ export class Reconciliation {
       }
       const filledSize = fills.reduce((sum, f) => sum + f.size, 0);
       if (filledSize > 0) {
+        for (const fill of fills) {
+          this.tradeLog.record(fill, {
+            isReduceOnly: order.isReduceOnly,
+            clientOrderId: order.clientOrderId,
+            source: "reconciliation",
+          });
+        }
         seeded.push({
           ...order,
           filledSize,
@@ -235,6 +244,14 @@ export class Reconciliation {
     if (filledSize <= 0) {
       // Vanished with zero fill evidence at all — genuinely unexplained, keep blocking.
       return false;
+    }
+
+    for (const fill of fills) {
+      this.tradeLog.record(fill, {
+        isReduceOnly: local.isReduceOnly,
+        clientOrderId: local.clientOrderId,
+        source: "reconciliation",
+      });
     }
 
     this.registry.upsert({

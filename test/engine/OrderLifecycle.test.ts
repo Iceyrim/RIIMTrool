@@ -1,20 +1,39 @@
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { OrderLifecycle } from "../../src/engine/OrderLifecycle.js";
 import { OrderRegistry } from "../../src/engine/OrderRegistry.js";
+import { TradeLog, type TradeLogEntry } from "../../src/engine/TradeLog.js";
 import type { LocalOrder } from "../../src/engine/types.js";
 import { FakeExchangeAdapter } from "./fakeAdapter.js";
+
+function tempTradeLogPath(): string {
+  const dir = mkdtempSync(join(tmpdir(), "riimtrool-lifecycle-tradelog-test-"));
+  return join(dir, "trades.jsonl");
+}
+
+function readTradeLog(path: string): TradeLogEntry[] {
+  return readFileSync(path, "utf-8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as TradeLogEntry);
+}
 
 const MARKET = "BTCUSD";
 
 describe("OrderLifecycle", () => {
   let adapter: FakeExchangeAdapter;
   let registry: OrderRegistry;
+  let tradeLog: TradeLog;
   let lifecycle: OrderLifecycle;
 
   beforeEach(() => {
     adapter = new FakeExchangeAdapter();
     registry = new OrderRegistry(MARKET, "/dev/null"); // never saved to disk in these tests
-    lifecycle = new OrderLifecycle(adapter, registry, MARKET);
+    tradeLog = new TradeLog("/dev/null");
+    lifecycle = new OrderLifecycle(adapter, registry, MARKET, tradeLog);
   });
 
   describe("placeQuote", () => {
@@ -190,6 +209,105 @@ describe("OrderLifecycle", () => {
       });
       const result = await lifecycle.cancelOrder(placeResult.order!.clientOrderId);
       expect(result).toBeNull();
+    });
+  });
+
+  describe("trade logging (SPEC 7)", () => {
+    it("logs a fill reported synchronously at placement, tagged with source and reduce-only status", async () => {
+      const tradeLogPath = tempTradeLogPath();
+      const loggingLifecycle = new OrderLifecycle(
+        adapter,
+        registry,
+        MARKET,
+        new TradeLog(tradeLogPath),
+      );
+      adapter.placeOrderResults.push({
+        success: true,
+        order: {
+          exchangeOrderId: "e-filled",
+          market: MARKET,
+          side: "buy",
+          price: 60000,
+          size: 0.01,
+          filledSize: 0.01,
+          remainingSize: 0,
+          isReduceOnly: false,
+          state: "filled",
+        },
+        fills: [
+          {
+            exchangeOrderId: "e-filled",
+            market: MARKET,
+            side: "buy",
+            price: 60000,
+            size: 0.01,
+            timestamp: 1_700_000_000_000,
+          },
+        ],
+      });
+
+      await loggingLifecycle.placeReduceOnlyExit({
+        side: "buy",
+        type: "postOnly",
+        size: 0.01,
+        price: 60000,
+      });
+
+      const entries = readTradeLog(tradeLogPath);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({
+        market: MARKET,
+        side: "buy",
+        size: 0.01,
+        price: 60000,
+        isReduceOnly: true,
+        source: "placement",
+      });
+    });
+
+    it("logs a fill discovered by the cancel-order race check, and does not log it twice on a repeated call", async () => {
+      const tradeLogPath = tempTradeLogPath();
+      const loggingLifecycle = new OrderLifecycle(
+        adapter,
+        registry,
+        MARKET,
+        new TradeLog(tradeLogPath),
+      );
+      const placeResult = await loggingLifecycle.placeQuote({
+        side: "buy",
+        type: "postOnly",
+        size: 0.01,
+        price: 60000,
+      });
+      const exchangeOrderId = placeResult.order!.exchangeOrderId!;
+      adapter.fillsByOrderId.set(exchangeOrderId, [
+        {
+          exchangeOrderId,
+          tradeId: "t-race",
+          market: MARKET,
+          side: "buy",
+          price: 60000,
+          size: 0.01,
+          timestamp: 1_700_000_000_000,
+        },
+      ]);
+
+      await loggingLifecycle.cancelOrder(placeResult.order!.clientOrderId);
+      // getOrderFills() reports full cumulative history on every call — calling cancelOrder again
+      // on the same (now-terminal) order re-fetches the same fill and must not re-log it.
+      await loggingLifecycle.cancelOrder(placeResult.order!.clientOrderId);
+
+      const entries = readTradeLog(tradeLogPath);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({
+        market: MARKET,
+        side: "buy",
+        size: 0.01,
+        price: 60000,
+        isReduceOnly: false,
+        source: "cancel_race_check",
+        tradeId: "t-race",
+      });
     });
   });
 });

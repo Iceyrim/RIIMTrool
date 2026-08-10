@@ -8,6 +8,7 @@ import { OrderRegistry } from "./OrderRegistry.js";
 import { Reconciliation, type ReconciliationResult } from "./Reconciliation.js";
 import { generateQuoteLadder, pickOrderSize } from "./QuoteLadder.js";
 import { RiskManager } from "./RiskManager.js";
+import { TradeLog } from "./TradeLog.js";
 import type { EngineMarketConfig } from "./types.js";
 
 export interface CycleSummary {
@@ -22,6 +23,13 @@ export interface CycleSummary {
   blockedReason?: string;
 }
 
+export interface MarketEngineOptions {
+  /** Per-market OrderRegistry snapshot file (SPEC.md Section 9.4). */
+  stateFilePath: string;
+  /** Per-market durable, append-only fill log (SPEC.md Section 7). */
+  tradeLogFilePath: string;
+}
+
 /**
  * Drives one market end-to-end against ExchangeAdapter: refresh -> runtime reconciliation ->
  * margin check -> inventory-triggered reduce-only exit management -> quote ladder management.
@@ -34,6 +42,7 @@ export class MarketEngine {
   readonly lifecycle: OrderLifecycle;
   readonly reconciliation: Reconciliation;
   readonly riskManager: RiskManager;
+  readonly tradeLog: TradeLog;
 
   private sessionRealizedPnlUsd = 0;
   private started = false;
@@ -41,11 +50,12 @@ export class MarketEngine {
   constructor(
     private readonly adapter: ExchangeAdapter,
     private readonly config: EngineMarketConfig,
-    stateFilePath: string,
+    options: MarketEngineOptions,
   ) {
-    this.registry = new OrderRegistry(config.symbol, stateFilePath);
-    this.lifecycle = new OrderLifecycle(adapter, this.registry, config.symbol);
-    this.reconciliation = new Reconciliation(adapter, this.registry, config.symbol);
+    this.registry = new OrderRegistry(config.symbol, options.stateFilePath);
+    this.tradeLog = new TradeLog(options.tradeLogFilePath);
+    this.lifecycle = new OrderLifecycle(adapter, this.registry, config.symbol, this.tradeLog);
+    this.reconciliation = new Reconciliation(adapter, this.registry, config.symbol, this.tradeLog);
     this.riskManager = new RiskManager(adapter);
   }
 
@@ -60,8 +70,10 @@ export class MarketEngine {
     return result;
   }
 
-  /** Placeholder for realized PnL accumulation until trade logging (SPEC.md Section 7) lands
-   * with proper fill-level accounting. Callers apply deltas as fills are processed. */
+  /** Session-delta placeholder for realized PnL accumulation. Fills are now durably logged
+   * (SPEC.md Section 7, see tradeLog) but this still isn't derived from that log — deriving
+   * proper fill-level PnL accounting from it is separate future work. Callers apply deltas as
+   * fills are processed. */
   recordRealizedPnl(deltaUsd: number): void {
     this.sessionRealizedPnlUsd += deltaUsd;
   }

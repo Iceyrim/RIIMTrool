@@ -6,6 +6,7 @@ import type {
   OrderType,
 } from "../adapters/ExchangeAdapter.js";
 import type { OrderRegistry } from "./OrderRegistry.js";
+import type { TradeLog } from "./TradeLog.js";
 import type { LocalOrder, ReduceOnlyExitConfig } from "./types.js";
 
 export interface PlaceQuoteResult {
@@ -33,6 +34,7 @@ export class OrderLifecycle {
     private readonly adapter: ExchangeAdapter,
     private readonly registry: OrderRegistry,
     private readonly market: string,
+    private readonly tradeLog: TradeLog,
   ) {}
 
   /** Normal two-sided quote placement — NOT reduce-only, no duplicate guard (the quote ladder
@@ -156,6 +158,17 @@ export class OrderLifecycle {
       updatedAt: now,
     };
     this.registry.upsert(local);
+
+    // Covers both a full fill and a partial fill reported synchronously at placement time —
+    // SPEC.md Section 7 requires every real fill logged, not just ones that reach FILLED.
+    for (const fill of result.fills) {
+      this.tradeLog.record(fill, {
+        isReduceOnly: options.localReduceOnly,
+        clientOrderId,
+        source: "placement",
+      });
+    }
+
     return { success: true, order: local };
   }
 
@@ -192,6 +205,14 @@ export class OrderLifecycle {
       fills = await this.adapter.getOrderFills(exchangeOrderId, this.market);
     } catch {
       failedOpen = true;
+    }
+
+    for (const fill of fills) {
+      this.tradeLog.record(fill, {
+        isReduceOnly: local.isReduceOnly,
+        clientOrderId,
+        source: "cancel_race_check",
+      });
     }
 
     // getOrderFills() reports the order's full fill history, not just "new since last check" —

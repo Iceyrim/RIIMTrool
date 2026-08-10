@@ -31,9 +31,12 @@ function testConfig(overrides: Partial<EngineMarketConfig> = {}): EngineMarketCo
   };
 }
 
-function tempStatePath(): string {
+function tempPaths(): { stateFilePath: string; tradeLogFilePath: string } {
   const dir = mkdtempSync(join(tmpdir(), "riimtrool-engine-test-"));
-  return join(dir, `orders-${MARKET}.json`);
+  return {
+    stateFilePath: join(dir, `orders-${MARKET}.json`),
+    tradeLogFilePath: join(dir, `trades-${MARKET}.jsonl`),
+  };
 }
 
 describe("MarketEngine", () => {
@@ -57,19 +60,19 @@ describe("MarketEngine", () => {
       state: "open",
     });
 
-    const engine = new MarketEngine(adapter, testConfig(), tempStatePath());
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
     const startResult = await engine.start();
     expect(startResult.healthy).toBe(true);
     expect(engine.registry.list()).toHaveLength(1);
   });
 
   it("throws if runCycle() is called before start()", async () => {
-    const engine = new MarketEngine(adapter, testConfig(), tempStatePath());
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
     await expect(engine.runCycle()).rejects.toThrow(/start\(\)/);
   });
 
   it("places quote-ladder orders on an empty book", async () => {
-    const engine = new MarketEngine(adapter, testConfig(), tempStatePath());
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
     await engine.start();
     const summary = await engine.runCycle();
 
@@ -80,7 +83,7 @@ describe("MarketEngine", () => {
   });
 
   it("does not re-place quotes that are still within their minimum lifetime", async () => {
-    const engine = new MarketEngine(adapter, testConfig(), tempStatePath());
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
     await engine.start();
     await engine.runCycle();
     const secondCycle = await engine.runCycle();
@@ -97,7 +100,7 @@ describe("MarketEngine", () => {
       openOrderCount: 0,
     });
 
-    const engine = new MarketEngine(adapter, testConfig(), tempStatePath());
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
     await engine.start();
     const summary = await engine.runCycle();
 
@@ -108,7 +111,7 @@ describe("MarketEngine", () => {
   });
 
   it("blocks all new placements while reconciliation is degraded, without touching the exchange", async () => {
-    const engine = new MarketEngine(adapter, testConfig(), tempStatePath());
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
     await engine.start();
 
     // Simulate a surprise exchange order appearing mid-run with no local record — a runtime
@@ -132,7 +135,7 @@ describe("MarketEngine", () => {
   });
 
   it("resumes quoting once reconciliation resolves filled orders via fill-replay, instead of staying blocked forever", async () => {
-    const engine = new MarketEngine(adapter, testConfig(), tempStatePath());
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
     await engine.start();
     const first = await engine.runCycle();
     expect(first.quotesPlaced).toBe(10);
@@ -173,8 +176,8 @@ describe("MarketEngine", () => {
   });
 
   it("persists a fill-replay-resolved order to disk even when the cycle stays blocked by a separate, unexplained anomaly", async () => {
-    const statePath = tempStatePath();
-    const engine = new MarketEngine(adapter, testConfig(), statePath);
+    const paths = tempPaths();
+    const engine = new MarketEngine(adapter, testConfig(), paths);
     await engine.start();
     await engine.runCycle();
 
@@ -211,7 +214,7 @@ describe("MarketEngine", () => {
     const second = await engine.runCycle();
     expect(second.blockedReason).toMatch(/degraded/);
 
-    const persisted = JSON.parse(readFileSync(statePath, "utf-8")) as Array<{
+    const persisted = JSON.parse(readFileSync(paths.stateFilePath, "utf-8")) as Array<{
       clientOrderId: string;
       state: string;
     }>;
@@ -223,7 +226,7 @@ describe("MarketEngine", () => {
 
   it("blocks all new placements when the account is at bankruptcy risk", async () => {
     adapter.marginStatus = { ...adapter.marginStatus, isAtBankruptcyRisk: true };
-    const engine = new MarketEngine(adapter, testConfig(), tempStatePath());
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
     await engine.start();
     const summary = await engine.runCycle();
     expect(summary.blockedReason).toMatch(/bankruptcy/);

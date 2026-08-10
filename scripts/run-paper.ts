@@ -88,11 +88,15 @@ async function main(): Promise<void> {
 
   const runnerMarkets: PaperRunnerMarket[] = enabled.map((marketConfig) => ({
     market: marketConfig.symbol,
-    engine: new MarketEngine(
-      paperAdapter,
-      toEngineMarketConfig(marketConfig),
-      join(process.cwd(), "state", "paper", `orders-${marketConfig.symbol}.json`),
-    ),
+    engine: new MarketEngine(paperAdapter, toEngineMarketConfig(marketConfig), {
+      stateFilePath: join(process.cwd(), "state", "paper", `orders-${marketConfig.symbol}.json`),
+      tradeLogFilePath: join(
+        process.cwd(),
+        "state",
+        "paper",
+        `trades-${marketConfig.symbol}.jsonl`,
+      ),
+    }),
     pnlSource: paperAdapter,
   }));
 

@@ -2,7 +2,10 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { buildDashboardStatus, type DashboardMarket } from "../../src/dashboard/DashboardService.js";
+import {
+  buildDashboardStatus,
+  type DashboardMarket,
+} from "../../src/dashboard/DashboardService.js";
 import { MarketEngine } from "../../src/engine/MarketEngine.js";
 import type { EngineMarketConfig } from "../../src/engine/types.js";
 import { FakeExchangeAdapter } from "../engine/fakeAdapter.js";
@@ -29,16 +32,16 @@ function testConfig(symbol: string): EngineMarketConfig {
   };
 }
 
-function tempStatePath(symbol: string): string {
+function tempPaths(symbol: string): { stateFilePath: string; tradeLogFilePath: string } {
   const dir = mkdtempSync(join(tmpdir(), "riimtrool-dashboard-test-"));
-  return join(dir, `orders-${symbol}.json`);
+  return {
+    stateFilePath: join(dir, `orders-${symbol}.json`),
+    tradeLogFilePath: join(dir, `trades-${symbol}.jsonl`),
+  };
 }
 
-async function buildMarket(
-  symbol: string,
-  adapter: FakeExchangeAdapter,
-): Promise<DashboardMarket> {
-  const engine = new MarketEngine(adapter, testConfig(symbol), tempStatePath(symbol));
+async function buildMarket(symbol: string, adapter: FakeExchangeAdapter): Promise<DashboardMarket> {
+  const engine = new MarketEngine(adapter, testConfig(symbol), tempPaths(symbol));
   await engine.start();
   return { market: symbol, engine, adapter };
 }

@@ -32,9 +32,12 @@ function testConfig(symbol: string): EngineMarketConfig {
   };
 }
 
-function tempStatePath(symbol: string): string {
+function tempPaths(symbol: string): { stateFilePath: string; tradeLogFilePath: string } {
   const dir = mkdtempSync(join(tmpdir(), "riimtrool-server-test-"));
-  return join(dir, `orders-${symbol}.json`);
+  return {
+    stateFilePath: join(dir, `orders-${symbol}.json`),
+    tradeLogFilePath: join(dir, `trades-${symbol}.jsonl`),
+  };
 }
 
 describe("createDashboardServer", () => {
@@ -46,7 +49,7 @@ describe("createDashboardServer", () => {
     adapter = new FakeExchangeAdapter();
     adapter.marketPrices.set("BTCUSD", { market: "BTCUSD", mark: 60000, index: 60000 });
 
-    const engine = new MarketEngine(adapter, testConfig("BTCUSD"), tempStatePath("BTCUSD"));
+    const engine = new MarketEngine(adapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
     await engine.start();
     const markets: DashboardMarket[] = [{ market: "BTCUSD", engine, adapter }];
 

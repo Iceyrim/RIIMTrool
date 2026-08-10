@@ -42,9 +42,12 @@ function testConfig(
   };
 }
 
-function tempStatePath(symbol: string): string {
+function tempPaths(symbol: string): { stateFilePath: string; tradeLogFilePath: string } {
   const dir = mkdtempSync(join(tmpdir(), "riimtrool-paperrunner-test-"));
-  return join(dir, `orders-${symbol}.json`);
+  return {
+    stateFilePath: join(dir, `orders-${symbol}.json`),
+    tradeLogFilePath: join(dir, `trades-${symbol}.jsonl`),
+  };
 }
 
 describe("PaperRunner", () => {
@@ -63,8 +66,8 @@ describe("PaperRunner", () => {
   });
 
   it("runOnce() calls start()-ed engines and logs one entry per market", async () => {
-    const btcEngine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempStatePath("BTCUSD"));
-    const ethEngine = new MarketEngine(ethAdapter, testConfig("ETHUSD"), tempStatePath("ETHUSD"));
+    const btcEngine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const ethEngine = new MarketEngine(ethAdapter, testConfig("ETHUSD"), tempPaths("ETHUSD"));
 
     const runner = new PaperRunner(
       [
@@ -90,7 +93,7 @@ describe("PaperRunner", () => {
     const engine = new MarketEngine(
       btcAdapter,
       testConfig("BTCUSD", { quoteMinimumLifetimeMs: 0 }),
-      tempStatePath("BTCUSD"),
+      tempPaths("BTCUSD"),
     );
     const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
       intervalMs: 1000,
@@ -111,8 +114,8 @@ describe("PaperRunner", () => {
   });
 
   it("isolates a market whose runCycle() throws — the other market's cycle still runs (SPEC 4.2)", async () => {
-    const btcEngine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempStatePath("BTCUSD"));
-    const ethEngine = new MarketEngine(ethAdapter, testConfig("ETHUSD"), tempStatePath("ETHUSD"));
+    const btcEngine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const ethEngine = new MarketEngine(ethAdapter, testConfig("ETHUSD"), tempPaths("ETHUSD"));
     await btcEngine.start();
     // ETH deliberately left un-start()-ed so its runCycle() throws.
 
@@ -133,8 +136,8 @@ describe("PaperRunner", () => {
   it("SPEC 4.2: a market whose cycle hangs forever does not block or delay the other market's independent live timer", async () => {
     vi.useFakeTimers();
     try {
-      const btcEngine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempStatePath("BTCUSD"));
-      const ethEngine = new MarketEngine(ethAdapter, testConfig("ETHUSD"), tempStatePath("ETHUSD"));
+      const btcEngine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+      const ethEngine = new MarketEngine(ethAdapter, testConfig("ETHUSD"), tempPaths("ETHUSD"));
       const dir = mkdtempSync(join(tmpdir(), "riimtrool-paperrunner-stuck-test-"));
       const logFilePath = join(dir, "cycles.jsonl");
 
@@ -174,8 +177,8 @@ describe("PaperRunner", () => {
   it("SPEC 4.2: a market degraded every cycle (but still resolving) does not block the other market's independent loop", async () => {
     vi.useFakeTimers();
     try {
-      const btcEngine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempStatePath("BTCUSD"));
-      const ethEngine = new MarketEngine(ethAdapter, testConfig("ETHUSD"), tempStatePath("ETHUSD"));
+      const btcEngine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+      const ethEngine = new MarketEngine(ethAdapter, testConfig("ETHUSD"), tempPaths("ETHUSD"));
       const dir = mkdtempSync(join(tmpdir(), "riimtrool-paperrunner-degraded-test-"));
       const logFilePath = join(dir, "cycles.jsonl");
 
@@ -230,7 +233,7 @@ describe("PaperRunner", () => {
   });
 
   it("writes an append-only JSON-lines log file when configured", async () => {
-    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempStatePath("BTCUSD"));
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
     const dir = mkdtempSync(join(tmpdir(), "riimtrool-paperrunner-log-"));
     const logFilePath = join(dir, "nested", "cycles.jsonl");
 
@@ -249,7 +252,7 @@ describe("PaperRunner", () => {
   });
 
   it("stop() produces a soak report totaling every cycle's placed/cancelled/anomaly counts", async () => {
-    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempStatePath("BTCUSD"));
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
     const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
       intervalMs: 1000,
     });

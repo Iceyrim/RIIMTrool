@@ -1,10 +1,27 @@
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Reconciliation } from "../../src/engine/Reconciliation.js";
 import { OrderRegistry } from "../../src/engine/OrderRegistry.js";
+import { TradeLog, type TradeLogEntry } from "../../src/engine/TradeLog.js";
 import type { LocalOrder } from "../../src/engine/types.js";
 import { FakeExchangeAdapter } from "./fakeAdapter.js";
 
 const MARKET = "BTCUSD";
+
+function tempTradeLogPath(): string {
+  const dir = mkdtempSync(join(tmpdir(), "riimtrool-reconciliation-tradelog-test-"));
+  return join(dir, "trades.jsonl");
+}
+
+function readTradeLog(path: string): TradeLogEntry[] {
+  return readFileSync(path, "utf-8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as TradeLogEntry);
+}
 
 function localOrder(overrides: Partial<LocalOrder> = {}): LocalOrder {
   return {
@@ -32,7 +49,7 @@ describe("Reconciliation.syncFromExchange (startup)", () => {
   beforeEach(() => {
     adapter = new FakeExchangeAdapter();
     registry = new OrderRegistry(MARKET, "/dev/null");
-    reconciliation = new Reconciliation(adapter, registry, MARKET);
+    reconciliation = new Reconciliation(adapter, registry, MARKET, new TradeLog("/dev/null"));
   });
 
   it("discards stale local content that disagrees with exchange truth", async () => {
@@ -89,6 +106,44 @@ describe("Reconciliation.syncFromExchange (startup)", () => {
     await reconciliation.syncFromExchange();
     expect(registry.get("c1")).toBeUndefined();
   });
+
+  it("logs the resolved fill to the trade log (SPEC 7), tagged with source and reduce-only status", async () => {
+    const tradeLogPath = tempTradeLogPath();
+    const loggingReconciliation = new Reconciliation(
+      adapter,
+      registry,
+      MARKET,
+      new TradeLog(tradeLogPath),
+    );
+    registry.upsert(
+      localOrder({ clientOrderId: "c1", exchangeOrderId: "e1", size: 0.01, isReduceOnly: true }),
+    );
+    adapter.fillsByOrderId.set("e1", [
+      {
+        exchangeOrderId: "e1",
+        tradeId: "t1",
+        market: MARKET,
+        side: "buy",
+        price: 60000,
+        size: 0.01,
+        timestamp: 1_700_000_000_000,
+      },
+    ]);
+
+    await loggingReconciliation.syncFromExchange();
+
+    const entries = readTradeLog(tradeLogPath);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      market: MARKET,
+      side: "buy",
+      size: 0.01,
+      price: 60000,
+      isReduceOnly: true,
+      source: "reconciliation",
+      tradeId: "t1",
+    });
+  });
 });
 
 describe("Reconciliation.checkAgainstExchange (runtime)", () => {
@@ -99,7 +154,7 @@ describe("Reconciliation.checkAgainstExchange (runtime)", () => {
   beforeEach(() => {
     adapter = new FakeExchangeAdapter();
     registry = new OrderRegistry(MARKET, "/dev/null");
-    reconciliation = new Reconciliation(adapter, registry, MARKET);
+    reconciliation = new Reconciliation(adapter, registry, MARKET, new TradeLog("/dev/null"));
   });
 
   it("is healthy when local and exchange state agree", async () => {
@@ -267,5 +322,41 @@ describe("Reconciliation.checkAgainstExchange (runtime)", () => {
     await reconciliation.checkAgainstExchange();
     expect(reconciliation.getHealthyStreak()).toBe(0);
     expect(reconciliation.getDegradedStreak()).toBe(1);
+  });
+
+  it("logs a fill resolved via resolveVanishedOrder to the trade log (SPEC 7)", async () => {
+    const tradeLogPath = tempTradeLogPath();
+    const loggingReconciliation = new Reconciliation(
+      adapter,
+      registry,
+      MARKET,
+      new TradeLog(tradeLogPath),
+    );
+    registry.upsert(localOrder({ clientOrderId: "c1", exchangeOrderId: "e1", size: 0.01 }));
+    adapter.fillsByOrderId.set("e1", [
+      {
+        exchangeOrderId: "e1",
+        tradeId: "t1",
+        market: MARKET,
+        side: "buy",
+        price: 60000,
+        size: 0.01,
+        timestamp: 1_700_000_000_000,
+      },
+    ]);
+
+    await loggingReconciliation.checkAgainstExchange();
+
+    const entries = readTradeLog(tradeLogPath);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      market: MARKET,
+      side: "buy",
+      size: 0.01,
+      price: 60000,
+      isReduceOnly: false,
+      source: "reconciliation",
+      tradeId: "t1",
+    });
   });
 });
