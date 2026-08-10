@@ -40,7 +40,11 @@ export const reduceOnlyExitSchema = z.object({
 export const marketConfigSchema = z
   .object({
     symbol: z.string().min(1),
-    exchange: z.enum(["n1"]),
+    // "stub" is not a real exchange — it exists only to validate the ExchangeAdapter boundary
+    // itself (SPEC.md Section 10 step 7, src/adapters/stub/StubAdapter.ts). Adding it here is the
+    // one expected, SPEC-sanctioned touchpoint outside the adapter's own directory; nothing in
+    // src/engine/, src/dashboard/, or src/paperRunner/ needs to know this literal exists.
+    exchange: z.enum(["n1", "stub"]),
     exchangeSymbol: z.string().min(1),
     enabled: z.boolean(),
     orderSize: orderSizeSchema,

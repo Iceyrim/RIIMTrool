@@ -1,0 +1,31 @@
+# Validation-only config for SPEC.md Section 10 step 7 (see scripts/run-stub-paper.ts).
+#
+# STUBUSD is not a real market on any real exchange — "stub" isn't a real exchange either
+# (src/adapters/stub/StubAdapter.ts). This file exists purely to drive a market through the exact
+# same MarketEngine/PaperRunner/DashboardService/TradeLog code the real N1 markets in
+# config/markets.yaml use, but against the stub adapter instead — proving the ExchangeAdapter
+# boundary holds for a second, genuinely different implementation. Never load this alongside a
+# real live-mode run; keep it isolated from config/markets.yaml.
+#
+# Numbers are arbitrary but internally consistent (order notional roughly matches
+# riskLimits.maxOrderNotionalUsd at StubAdapter's starting synthetic price of 100).
+markets:
+  - symbol: STUBUSD
+    exchange: stub
+    exchangeSymbol: STUBUSD
+    enabled: true
+    orderSize: { min: 0.8, max: 1.2 }
+    spreadBps: { normal: 5, min: 4, max: 7.5 }
+    exitSpreadBps: 2.5
+    quoteLevels: 5
+    levelSpacingBps: [2, 3, 4, 7, 10]
+    inventoryReductionThresholdBase: 3
+    riskLimits:
+      {
+        maxLongPosition: 5,
+        maxShortPosition: 5,
+        maxOrderSize: 2.5,
+        maxOrderNotionalUsd: 250,
+        maxOpenOrders: 12,
+      }
+    sessionLossCapUsd: 15

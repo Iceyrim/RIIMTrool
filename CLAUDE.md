@@ -23,7 +23,7 @@ Per SPEC.md Section 10 build order:
 - [x] Step 4 — Multi-market with tested isolation guarantees (independent per-market timers, fake-timer tests proving a hung/degraded market can't block another)
 - [x] Step 5 — Unified dashboard (live exposure calc from position data, not a session counter — this was a real bug in the old system, deliberately avoided here)
 - [x] Step 6 — Trade logging (durable JSONL, deduped by tradeId, wired into shared engine code so it works identically across adapters)
-- [ ] Step 7 — Validate the exchange abstraction by implementing a second adapter (even minimal/stub). This is the real test of whether the ExchangeAdapter boundary holds — any code needed outside the adapter itself is a sign the boundary was drawn wrong.
+- [x] Step 7 — Validated the exchange abstraction: `StubAdapter` (`src/adapters/stub/`), a second, independent, deliberately-differently-shaped adapter (dual long/short position legs instead of a signed scalar, seeded synthetic price-walk fill timing instead of real-tape replay, synchronous placeOrder() fills, divergent error shapes in getOrderFills()/cancelOrder(), no MarketRegistry-style id indirection). Ran a real soak (`scripts/run-stub-paper.ts`, 71 cycles, zero anomalies) through the unmodified MarketEngine/RiskManager/Reconciliation/OrderLifecycle/TradeLog/PaperRunner/DashboardService stack. `git diff` scoped to `src/engine/`, `src/dashboard/`, `src/paperRunner/` is empty — the literal SPEC.md acceptance bar. Only expected touchpoint outside the adapter's own directory: `"stub"` added to `src/config/schema.ts`'s exchange enum.
 
 ## Key architectural facts worth remembering
 
