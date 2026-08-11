@@ -151,11 +151,11 @@ describe("mapBalance / mapMarginStatus", () => {
     expect(mapBalance(raw)).toEqual({ token: "USDC", amount: 1234.5 });
   });
 
-  it("maps margin status fields to their normalized names", () => {
+  it("maps accountValue from omf and computes maintenance/initial margin fractions as ratios", () => {
     const raw: N1CachedMargins = {
-      omf: 1,
-      mf: 2,
-      imf: 3,
+      omf: 40,
+      mf: 20,
+      imf: 10,
       cmf: 4,
       mmf: 5,
       pon: 6,
@@ -163,9 +163,44 @@ describe("mapBalance / mapMarginStatus", () => {
       bankruptcy: false,
     };
     expect(mapMarginStatus(raw)).toEqual({
-      accountValue: 7,
-      maintenanceMarginFraction: 5,
-      initialMarginFraction: 3,
+      accountValue: 40,
+      maintenanceMarginFraction: 0.25, // mmf/mf = 5/20, matching N1 SDK's getPerpsCrossMarginRatio
+      initialMarginFraction: 0.25, // imf/omf = 10/40, matching N1 SDK's getAccountMarginUsageRatio
+      isAtBankruptcyRisk: false,
+    });
+  });
+
+  it("reads accountValue 0 for a flat account even when pn/pon are nonzero", () => {
+    // Regression case for the original bug: a flat account (no open position/orders) can still
+    // have pn/pon at some residual value while omf correctly reflects real idle balance.
+    const raw: N1CachedMargins = {
+      omf: 42.28,
+      mf: 42.28,
+      imf: 0,
+      cmf: 0,
+      mmf: 0,
+      pon: 0,
+      pn: 0,
+      bankruptcy: false,
+    };
+    expect(mapMarginStatus(raw).accountValue).toBe(42.28);
+  });
+
+  it("returns 0 fractions instead of dividing by zero when omf/mf are 0", () => {
+    const raw: N1CachedMargins = {
+      omf: 0,
+      mf: 0,
+      imf: 5,
+      cmf: 0,
+      mmf: 5,
+      pon: 0,
+      pn: 0,
+      bankruptcy: false,
+    };
+    expect(mapMarginStatus(raw)).toEqual({
+      accountValue: 0,
+      maintenanceMarginFraction: 0,
+      initialMarginFraction: 0,
       isAtBankruptcyRisk: false,
     });
   });

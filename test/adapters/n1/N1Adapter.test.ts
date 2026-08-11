@@ -175,12 +175,12 @@ describe("N1Adapter", () => {
         { accountId: ACCOUNT_ID, balance: 12345, symbol: "USDC" },
       ];
       fakeUser.margins[String(ACCOUNT_ID)] = {
-        omf: 0,
-        mf: 0,
-        imf: 0,
-        cmf: 0,
-        mmf: 0.1,
-        pon: 0,
+        omf: 50000,
+        mf: 45000,
+        imf: 5000,
+        cmf: 2500,
+        mmf: 900,
+        pon: 15000,
         pn: 20000,
         bankruptcy: false,
       };
@@ -204,9 +204,9 @@ describe("N1Adapter", () => {
       expect(adapter.getBalances()).toEqual([{ token: "USDC", amount: 12345 }]);
 
       expect(adapter.getMarginStatus()).toEqual({
-        accountValue: 20000,
-        maintenanceMarginFraction: 0.1,
-        initialMarginFraction: 0,
+        accountValue: 50000, // omf, not pn (pn/pon are position-notional, not account equity)
+        maintenanceMarginFraction: 0.02, // mmf/mf = 900/45000
+        initialMarginFraction: 5000 / 50000, // imf/omf = 5000/50000
         isAtBankruptcyRisk: false,
       });
     });

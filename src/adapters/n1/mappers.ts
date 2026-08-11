@@ -153,11 +153,22 @@ export function mapBalance(raw: N1CachedBalance): NormalizedBalance {
   return { token: raw.symbol, amount: raw.balance };
 }
 
+/**
+ * `omf`/`mf`/`imf`/`mmf` are USD-denominated per N1's real AccountMarginsView schema (see
+ * node_modules/@n1xyz/nord-ts/dist/gen/openapi.d.ts's doc comments), not fractions or account
+ * equity directly — `pn`/`pon` are position-notional-like and read ~0 whenever the account is
+ * flat, which is NOT account value. `omf` ("USD weighted value of account, its tokens and
+ * positive PnL; sub negative PnL, debt") is what actually corresponds to account equity.
+ * The two ratios below mirror N1's own SDK math utils exactly: `getAccountMarginUsageRatio()`
+ * computes imf/omf, and `getPerpsCrossMarginRatio()` computes mmf/mf — imf/cmf are paired with
+ * omf (order-placement gating) while mmf is paired with mf (position/liquidation gating); these
+ * are deliberately different denominators in N1's model, not duplicates.
+ */
 export function mapMarginStatus(raw: N1CachedMargins): NormalizedMarginStatus {
   return {
-    accountValue: raw.pn,
-    maintenanceMarginFraction: raw.mmf,
-    initialMarginFraction: raw.imf,
+    accountValue: raw.omf,
+    maintenanceMarginFraction: raw.mf !== 0 ? raw.mmf / raw.mf : 0,
+    initialMarginFraction: raw.omf !== 0 ? raw.imf / raw.omf : 0,
     isAtBankruptcyRisk: raw.bankruptcy,
   };
 }
