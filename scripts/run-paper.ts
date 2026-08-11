@@ -24,6 +24,10 @@
  *   PAPER_DURATION_MS                — default: unset (runs until Ctrl-C)
  *   DASHBOARD_PORT                   — default: 4000. Status-only HTTP server, bound to
  *                                      127.0.0.1 only (see src/dashboard/server.ts).
+ *   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID — optional, see .env.example. Alerts are tagged "[N1]"
+ *                                      so they're distinguishable from run-stub-paper.ts /
+ *                                      run-risex-paper.ts in a shared chat. Alerting is disabled
+ *                                      (logged once, non-fatal) if either is unset.
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -31,6 +35,7 @@ import { Nord } from "@n1xyz/nord-ts";
 import { Connection } from "@solana/web3.js";
 import { N1PaperAdapter } from "../src/adapters/n1/N1PaperAdapter.js";
 import { RealN1MarketDataSource } from "../src/adapters/n1/N1MarketDataSource.js";
+import { createAlertBusFromEnv } from "../src/alerting/createAlertBusFromEnv.js";
 import { loadMarketsConfig } from "../src/config/loadConfig.js";
 import { toEngineMarketConfig } from "../src/config/toEngineMarketConfig.js";
 import { createDashboardServer } from "../src/dashboard/server.js";
@@ -86,6 +91,8 @@ async function main(): Promise<void> {
   });
   await paperAdapter.connect();
 
+  const alertBus = createAlertBusFromEnv("N1");
+
   const runnerMarkets: PaperRunnerMarket[] = enabled.map((marketConfig) => ({
     market: marketConfig.symbol,
     engine: new MarketEngine(paperAdapter, toEngineMarketConfig(marketConfig), {
@@ -96,6 +103,15 @@ async function main(): Promise<void> {
         "paper",
         `trades-${marketConfig.symbol}.jsonl`,
       ),
+      onFillRecorded: (entry) =>
+        alertBus?.emit({
+          type: "fill",
+          market: entry.market,
+          side: entry.side,
+          size: entry.size,
+          price: entry.price,
+          isReduceOnly: entry.isReduceOnly,
+        }),
     }),
     pnlSource: paperAdapter,
   }));
@@ -118,7 +134,7 @@ async function main(): Promise<void> {
     `run-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`,
   );
 
-  const runner = new PaperRunner(runnerMarkets, { intervalMs, durationMs, logFilePath });
+  const runner = new PaperRunner(runnerMarkets, { intervalMs, durationMs, logFilePath, alertBus });
 
   const shutdown = (): void => {
     const report = runner.stop();

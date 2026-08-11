@@ -8,7 +8,7 @@ import { OrderRegistry } from "./OrderRegistry.js";
 import { Reconciliation, type ReconciliationResult } from "./Reconciliation.js";
 import { generateQuoteLadder, pickOrderSize } from "./QuoteLadder.js";
 import { RiskManager } from "./RiskManager.js";
-import { TradeLog } from "./TradeLog.js";
+import { TradeLog, type TradeLogEntry } from "./TradeLog.js";
 import type { EngineMarketConfig } from "./types.js";
 
 export interface CycleSummary {
@@ -28,6 +28,9 @@ export interface MarketEngineOptions {
   stateFilePath: string;
   /** Per-market durable, append-only fill log (SPEC.md Section 7). */
   tradeLogFilePath: string;
+  /** Forwarded straight into this market's TradeLog (see TradeLogOptions) — MarketEngine stays
+   * alerting-agnostic, this is just a pass-through callback. */
+  onFillRecorded?: (entry: TradeLogEntry) => void;
 }
 
 /**
@@ -53,7 +56,9 @@ export class MarketEngine {
     options: MarketEngineOptions,
   ) {
     this.registry = new OrderRegistry(config.symbol, options.stateFilePath);
-    this.tradeLog = new TradeLog(options.tradeLogFilePath);
+    this.tradeLog = new TradeLog(options.tradeLogFilePath, {
+      onFillRecorded: options.onFillRecorded,
+    });
     this.lifecycle = new OrderLifecycle(adapter, this.registry, config.symbol, this.tradeLog);
     this.reconciliation = new Reconciliation(adapter, this.registry, config.symbol, this.tradeLog);
     this.riskManager = new RiskManager(adapter);

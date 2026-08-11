@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import type { AlertBus } from "../alerting/AlertBus.js";
 import type { CycleSummary, MarketEngine } from "../engine/MarketEngine.js";
 
 /** Minimal structural interface PaperRunner needs from a paper adapter — deliberately narrower
@@ -24,6 +25,12 @@ export interface PaperRunnerConfig {
   durationMs?: number;
   /** Append-only JSON-lines log of every cycle, in addition to console output. */
   logFilePath?: string;
+  /** Optional operational alerting (src/alerting/AlertBus.ts). PaperRunner only emits the
+   * transition-edge events it's positioned to detect — reconciliation_degraded/recovered and
+   * halted/resumed — by comparing each cycle's CycleSummary against the previous one per market.
+   * Fills are wired separately, straight from TradeLog's onFillRecorded callback at the
+   * entrypoint-script level, since PaperRunner never sees individual fills itself. */
+  alertBus?: AlertBus;
 }
 
 export interface CycleLogEntry {
@@ -72,6 +79,10 @@ export class PaperRunner {
   private cycleCount = 0;
   private startedAt = 0;
   private readonly log: CycleLogEntry[] = [];
+  // Previous cycle's reconciliation-healthy / blocked state per market, for edge detection in
+  // detectTransitions() — undefined means "no prior cycle observed yet for this market".
+  private readonly prevHealthy = new Map<string, boolean>();
+  private readonly prevBlocked = new Map<string, boolean>();
 
   constructor(
     private readonly markets: readonly PaperRunnerMarket[],
@@ -141,6 +152,8 @@ export class PaperRunner {
       return undefined;
     }
 
+    if (this.config.alertBus) this.detectTransitions(this.config.alertBus, market, summary);
+
     const pnlDelta = pnlSource.drainRealizedPnlDeltaUsd(market);
     if (pnlDelta !== 0) engine.recordRealizedPnl(pnlDelta);
 
@@ -154,6 +167,37 @@ export class PaperRunner {
     this.log.push(logEntry);
     this.emitLogLine(logEntry);
     return logEntry;
+  }
+
+  /** Compares this cycle's CycleSummary against the previous one for this market and emits the
+   * corresponding edge event exactly once per transition — not once per cycle a market happens to
+   * spend degraded/halted, which would spam a Telegram chat every single tick. First-ever cycle
+   * for a market has no prior state (the Maps start empty): a market observed already
+   * degraded/halted on its very first cycle still alerts (there's no meaningful "previous healthy
+   * state" to require), but a market observed already healthy/unblocked on its first cycle does
+   * not spuriously fire "recovered"/"resumed" — there's nothing to have recovered from. */
+  private detectTransitions(alertBus: AlertBus, market: string, summary: CycleSummary): void {
+    const healthy = summary.reconciliation.healthy;
+    const prevHealthy = this.prevHealthy.get(market);
+    if (!healthy && prevHealthy !== false) {
+      alertBus.emit({
+        type: "reconciliation_degraded",
+        market,
+        anomalies: summary.reconciliation.anomalies,
+      });
+    } else if (healthy && prevHealthy === false) {
+      alertBus.emit({ type: "reconciliation_recovered", market });
+    }
+    this.prevHealthy.set(market, healthy);
+
+    const blocked = summary.blockedReason !== undefined;
+    const prevBlocked = this.prevBlocked.get(market);
+    if (blocked && prevBlocked !== true) {
+      alertBus.emit({ type: "halted", market, reason: summary.blockedReason! });
+    } else if (!blocked && prevBlocked === true) {
+      alertBus.emit({ type: "resumed", market });
+    }
+    this.prevBlocked.set(market, blocked);
   }
 
   private emitLogLine(entry: CycleLogEntry): void {

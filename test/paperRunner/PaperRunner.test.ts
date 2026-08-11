@@ -2,10 +2,18 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { AlertBus, type AlertEvent, type AlertSink } from "../../src/alerting/AlertBus.js";
 import { MarketEngine } from "../../src/engine/MarketEngine.js";
 import type { EngineMarketConfig } from "../../src/engine/types.js";
 import { PaperRunner, type RealizedPnlSource } from "../../src/paperRunner/PaperRunner.js";
 import { FakeExchangeAdapter } from "../engine/fakeAdapter.js";
+
+class FakeAlertSink implements AlertSink {
+  events: AlertEvent[] = [];
+  handle(event: AlertEvent): void {
+    this.events.push(event);
+  }
+}
 
 class FakePnlSource implements RealizedPnlSource {
   queued = 0;
@@ -264,5 +272,141 @@ describe("PaperRunner", () => {
     expect(report.cycles).toBe(2);
     expect(report.totalQuotesPlaced).toBeGreaterThan(0);
     expect(report.finalSessionRealizedPnlUsd).toEqual({ BTCUSD: 0 });
+  });
+});
+
+describe("PaperRunner alertBus transition detection", () => {
+  let btcAdapter: FakeExchangeAdapter;
+  let btcPnl: FakePnlSource;
+  let sink: FakeAlertSink;
+  let alertBus: AlertBus;
+
+  beforeEach(() => {
+    btcAdapter = new FakeExchangeAdapter();
+    btcAdapter.marketPrices.set("BTCUSD", { market: "BTCUSD", mark: 60000 });
+    btcPnl = new FakePnlSource();
+    sink = new FakeAlertSink();
+    alertBus = new AlertBus();
+    alertBus.subscribe(sink);
+  });
+
+  it("without an alertBus configured, no events are emitted and behavior is unaffected", async () => {
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+    });
+    await runner.start();
+    await runner.runOnce();
+
+    expect(sink.events).toHaveLength(0);
+  });
+
+  it("emits reconciliation_degraded on the first cycle already unhealthy, and does not repeat it while still degraded", async () => {
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+      alertBus,
+    });
+    await runner.start();
+
+    // A surprise exchange order with no local record — same anomaly setup as the SPEC 4.2
+    // "degraded every cycle" test above.
+    btcAdapter.openOrders.push({
+      exchangeOrderId: "surprise",
+      market: "BTCUSD",
+      side: "buy",
+      price: 59000,
+      size: 0.001,
+      filledSize: 0,
+      remainingSize: 0.001,
+      isReduceOnly: false,
+      state: "open",
+    });
+
+    await runner.runOnce();
+    await runner.runOnce();
+    await runner.runOnce();
+
+    const degradedEvents = sink.events.filter((e) => e.type === "reconciliation_degraded");
+    expect(degradedEvents).toHaveLength(1);
+    expect(degradedEvents[0]).toMatchObject({ market: "BTCUSD" });
+    expect(sink.events.filter((e) => e.type === "reconciliation_recovered")).toHaveLength(0);
+  });
+
+  it("emits reconciliation_recovered exactly once when a degraded market becomes healthy again", async () => {
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+      alertBus,
+    });
+    await runner.start();
+
+    btcAdapter.openOrders.push({
+      exchangeOrderId: "surprise",
+      market: "BTCUSD",
+      side: "buy",
+      price: 59000,
+      size: 0.001,
+      filledSize: 0,
+      remainingSize: 0.001,
+      isReduceOnly: false,
+      state: "open",
+    });
+    await runner.runOnce();
+    expect(sink.events.filter((e) => e.type === "reconciliation_degraded")).toHaveLength(1);
+
+    // The surprise order disappears from the exchange's own open-orders view — the next check
+    // sees no anomaly at all, so reconciliation genuinely recovers.
+    btcAdapter.openOrders.length = 0;
+    await runner.runOnce();
+    await runner.runOnce();
+
+    const recoveredEvents = sink.events.filter((e) => e.type === "reconciliation_recovered");
+    expect(recoveredEvents).toHaveLength(1);
+    expect(recoveredEvents[0]).toMatchObject({ market: "BTCUSD" });
+  });
+
+  it("emits halted on the first cycle already blocked, and resumed exactly once when unblocked", async () => {
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+      alertBus,
+    });
+    await runner.start();
+
+    btcAdapter.marginStatus.isAtBankruptcyRisk = true;
+    await runner.runOnce();
+    await runner.runOnce();
+
+    const haltedEvents = sink.events.filter((e) => e.type === "halted");
+    expect(haltedEvents).toHaveLength(1);
+    expect(haltedEvents[0]).toMatchObject({
+      market: "BTCUSD",
+      reason: expect.stringContaining("bankruptcy risk"),
+    });
+
+    btcAdapter.marginStatus.isAtBankruptcyRisk = false;
+    await runner.runOnce();
+    await runner.runOnce();
+
+    const resumedEvents = sink.events.filter((e) => e.type === "resumed");
+    expect(resumedEvents).toHaveLength(1);
+    expect(resumedEvents[0]).toMatchObject({ market: "BTCUSD" });
+  });
+
+  it("halted/resumed (margin) and reconciliation_degraded/recovered are independent signals", async () => {
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+      alertBus,
+    });
+    await runner.start();
+
+    // Margin blocked, but reconciliation itself is perfectly healthy (no exchange anomaly).
+    btcAdapter.marginStatus.isAtBankruptcyRisk = true;
+    await runner.runOnce();
+
+    expect(sink.events.filter((e) => e.type === "halted")).toHaveLength(1);
+    expect(sink.events.filter((e) => e.type === "reconciliation_degraded")).toHaveLength(0);
   });
 });

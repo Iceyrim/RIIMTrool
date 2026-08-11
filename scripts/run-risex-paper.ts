@@ -21,11 +21,16 @@
  *   PAPER_DURATION_MS           — default: unset (runs until Ctrl-C)
  *   DASHBOARD_PORT              — default: 4200 (distinct from run-paper.ts's 4000 and
  *                                 run-stub-paper.ts's 4100, so all three can run at once)
+ *   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID — optional, see .env.example. Alerts are tagged
+ *                                 "[RISEX]" so they're distinguishable from run-paper.ts /
+ *                                 run-stub-paper.ts in a shared chat. Alerting is disabled
+ *                                 (logged once, non-fatal) if either is unset.
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { RiseXPaperAdapter } from "../src/adapters/risex/RiseXPaperAdapter.js";
 import { RealRiseXMarketDataSource } from "../src/adapters/risex/RiseXMarketDataSource.js";
+import { createAlertBusFromEnv } from "../src/alerting/createAlertBusFromEnv.js";
 import { loadMarketsConfig } from "../src/config/loadConfig.js";
 import { toEngineMarketConfig } from "../src/config/toEngineMarketConfig.js";
 import { createDashboardServer } from "../src/dashboard/server.js";
@@ -65,6 +70,8 @@ async function main(): Promise<void> {
   });
   await paperAdapter.connect();
 
+  const alertBus = createAlertBusFromEnv("RISEX");
+
   const runnerMarkets: PaperRunnerMarket[] = enabled.map((marketConfig) => ({
     market: marketConfig.symbol,
     engine: new MarketEngine(paperAdapter, toEngineMarketConfig(marketConfig), {
@@ -75,6 +82,15 @@ async function main(): Promise<void> {
         "risex",
         `trades-${marketConfig.symbol}.jsonl`,
       ),
+      onFillRecorded: (entry) =>
+        alertBus?.emit({
+          type: "fill",
+          market: entry.market,
+          side: entry.side,
+          size: entry.size,
+          price: entry.price,
+          isReduceOnly: entry.isReduceOnly,
+        }),
     }),
     pnlSource: paperAdapter,
   }));
@@ -95,7 +111,7 @@ async function main(): Promise<void> {
     `run-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`,
   );
 
-  const runner = new PaperRunner(runnerMarkets, { intervalMs, durationMs, logFilePath });
+  const runner = new PaperRunner(runnerMarkets, { intervalMs, durationMs, logFilePath, alertBus });
 
   const shutdown = (): void => {
     const report = runner.stop();
