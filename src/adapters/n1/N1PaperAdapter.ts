@@ -21,7 +21,7 @@ import {
   simulateFills,
   type SimulatedRestingOrder,
   type TradeTapePrint,
-} from "./paperFillSimulator.js";
+} from "../shared/paperFillSimulator.js";
 
 interface SimOrder {
   exchangeOrderId: string;
@@ -53,7 +53,7 @@ export interface N1PaperAdapterConfig {
  * Section 1b's abstraction actually being exercised, not just asserted to hold).
  *
  * Fill simulation replays N1's real trade tape (via N1MarketDataSource) and crosses it against
- * our resting simulated orders (see paperFillSimulator.ts) — a resting order only fills when a
+ * our resting simulated orders (see ../shared/paperFillSimulator.ts) — a resting order only fills when a
  * real trade printed through its price, not merely when mark price moved past it. This means
  * getOrderFills() returns genuine simulated fills through the same method OrderLifecycle's
  * Section 5a cancel race-check calls, so that code path gets real exercise here, not just an

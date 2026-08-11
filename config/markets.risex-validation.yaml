@@ -1,0 +1,56 @@
+# Validation-only config for SPEC.md Section 11, build plan step 2 (see
+# scripts/run-risex-paper.ts). Drives BTCUSD/ETHUSD through the exact same MarketEngine/
+# PaperRunner/DashboardService/TradeLog code config/markets.yaml's real N1 markets use, but
+# against RiseXPaperAdapter instead — real RISEx mainnet market data (RiseXMarketDataSource),
+# fully simulated execution.
+#
+# exchangeSymbol values are RISEx's own market symbols, confirmed live against mainnet in Phase 1
+# (RealRiseXMarketDataSource, market_id 1 = "BTC/USDC", market_id 2 = "ETH/USDC" — matching this
+# bot's configured BTCUSD/ETHUSD). Order sizes/risk limits are seeded from config/markets.yaml's
+# already-proven N1 numbers, since real BTC/ETH price ranges are comparable across exchanges —
+# not independently re-tuned; the soak run is what validates they're sane against RISEx's real
+# step grid, not a claim that these are RISEx-optimal.
+#
+# Never load this alongside a real live-mode run; keep it isolated from config/markets.yaml.
+markets:
+  - symbol: BTCUSD
+    exchange: risex
+    exchangeSymbol: BTC/USDC
+    enabled: true
+    orderSize: { min: 0.00155, max: 0.00232 }
+    spreadBps: { normal: 5, min: 4, max: 7.5 }
+    exitSpreadBps: 2.5
+    quoteLevels: 5
+    levelSpacingBps: [2, 3, 4, 7, 10]
+    inventoryReductionThresholdBase: 0.003
+    riskLimits:
+      {
+        maxLongPosition: 0.005,
+        maxShortPosition: 0.005,
+        maxOrderSize: 0.0025,
+        maxOrderNotionalUsd: 160,
+        maxOpenOrders: 12,
+      }
+    sessionLossCapUsd: 15
+
+  - symbol: ETHUSD
+    exchange: risex
+    exchangeSymbol: ETH/USDC
+    enabled: true
+    orderSize: { min: 0.045, max: 0.068 }
+    spreadBps: { normal: 5, min: 4, max: 7.5 }
+    exitSpreadBps: 2.5
+    quoteLevels: 5
+    levelSpacingBps: [2, 3, 4, 7, 10]
+    inventoryReductionThresholdBase: 0.09
+    riskLimits:
+      {
+        maxLongPosition: 0.15,
+        maxShortPosition: 0.15,
+        maxOrderSize: 0.075,
+        maxOrderNotionalUsd: 160,
+        maxOpenOrders: 12,
+      }
+    # Deliberately tighter than BTC's, matching config/markets.yaml's same asymmetry (SPEC.md
+    # Section 2).
+    sessionLossCapUsd: 6

@@ -3,7 +3,7 @@ import {
   simulateFills,
   type SimulatedRestingOrder,
   type TradeTapePrint,
-} from "../../../src/adapters/n1/paperFillSimulator.js";
+} from "../../../src/adapters/shared/paperFillSimulator.js";
 
 function print(overrides: Partial<TradeTapePrint> = {}): TradeTapePrint {
   return { tradeId: "t1", price: 60000, size: 0.01, takerSide: "sell", timestamp: 1, ...overrides };
