@@ -40,3 +40,11 @@ Per SPEC.md Section 10 build order:
 ## When eventually going live
 
 Wallet to use: `2ZUbwKwirxbkSsWH8nFkCAEHtgR8QUpXYYB5p6yqyeDV` (same as the old BTC/ETH bots). This gets set manually in `.env` by the human, never by Claude Code, and only after step 7 and a real live-readiness review — not automatically once paper mode looks good.
+
+## Follow-up items (not urgent, don't lose track)
+
+- Audit sessionRealizedPnlUsd's accumulation path (MarketEngine.recordRealizedPnl(), 
+  called from PaperRunner.ts) with the same scrutiny applied to position/exposure 
+  during the Reconciliation invariant review. This is PnL tracking for the loss-cap 
+  risk gate, a different concern from position/exposure — flagged during that review 
+  but not audited, since it was out of scope for the four exposure invariants.
