@@ -93,6 +93,20 @@ export class N1Adapter implements ExchangeAdapter {
     await this.user.fetchInfo();
   }
 
+  /** Exposes the underlying connected Nord client and accountId — not part of ExchangeAdapter,
+   * N1-specific. Exists for callers that need N1 account-history endpoints beyond what
+   * ExchangeAdapter's normalized surface covers (currently only N1RealizedPnlSource, wired up in
+   * scripts/run-live.ts). */
+  getNordClient(): Nord {
+    this.assertConnected();
+    return this.nord!;
+  }
+
+  getAccountId(): number {
+    this.assertConnected();
+    return this.accountId!;
+  }
+
   async disconnect(): Promise<void> {
     // v1 is REST-polling only (no WebSocket subscriptions), so there is no live connection to
     // tear down. Kept as an explicit no-op so the interface stays symmetric for adapters (or a

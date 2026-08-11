@@ -195,8 +195,8 @@ describe("N1PaperAdapter", () => {
     await adapter.refreshAccountState();
 
     expect(adapter.getPositions(MARKET)[0]?.baseSize ?? 0).toBe(0);
-    expect(adapter.drainRealizedPnlDeltaUsd(MARKET)).toBeCloseTo(10);
-    expect(adapter.drainRealizedPnlDeltaUsd(MARKET)).toBe(0); // drained, resets to zero
+    await expect(adapter.drainRealizedPnlDeltaUsd(MARKET)).resolves.toBeCloseTo(10);
+    await expect(adapter.drainRealizedPnlDeltaUsd(MARKET)).resolves.toBe(0); // drained, resets to zero
   });
 
   it("keeps realized PnL isolated per market when one adapter instance is shared across markets (SPEC 4.3 shared account)", async () => {
@@ -245,8 +245,8 @@ describe("N1PaperAdapter", () => {
     await sharedAdapter.refreshAccountState();
 
     // Draining ETHUSD first must NOT steal BTCUSD's realized PnL.
-    expect(sharedAdapter.drainRealizedPnlDeltaUsd("ETHUSD")).toBe(0);
-    expect(sharedAdapter.drainRealizedPnlDeltaUsd("BTCUSD")).toBeCloseTo(10);
+    await expect(sharedAdapter.drainRealizedPnlDeltaUsd("ETHUSD")).resolves.toBe(0);
+    await expect(sharedAdapter.drainRealizedPnlDeltaUsd("BTCUSD")).resolves.toBeCloseTo(10);
   });
 
   it("getMarketPrice() pulls the real configured mark price and caches it for position mark-to-market", async () => {

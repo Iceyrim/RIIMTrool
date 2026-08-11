@@ -104,7 +104,7 @@ export class N1PaperAdapter implements ExchangeAdapter {
    * (the paper runner) drain this once per cycle per market and feed it to that market's
    * MarketEngine.recordRealizedPnl() so the session-loss-cap risk check gets exercised against
    * genuinely simulated fills. */
-  drainRealizedPnlDeltaUsd(market: string): number {
+  async drainRealizedPnlDeltaUsd(market: string): Promise<number> {
     const delta = this.accumulatedRealizedPnlUsd.get(market) ?? 0;
     this.accumulatedRealizedPnlUsd.set(market, 0);
     return delta;

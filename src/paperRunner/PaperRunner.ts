@@ -9,7 +9,11 @@ import type { CycleSummary, MarketEngine } from "../engine/MarketEngine.js";
  * instance is meant to be SHARED across every market in a run (SPEC.md Section 4.3's shared
  * cross-margin account), so PnL must be drained per-market, not as a single pooled value. */
 export interface RealizedPnlSource {
-  drainRealizedPnlDeltaUsd(market: string): number;
+  /** Async because a real implementation (N1RealizedPnlSource) makes a live network call — it
+   * must throw on failure, never resolve to 0 as a silent fallback (a real realized loss must
+   * never be masked as "no PnL this cycle"). Paper adapters implement this as a trivial async
+   * wrapper around their already-synchronous local simulation. */
+  drainRealizedPnlDeltaUsd(market: string): Promise<number>;
 }
 
 export interface PaperRunnerMarket {
@@ -83,6 +87,9 @@ export class PaperRunner {
   // detectTransitions() — undefined means "no prior cycle observed yet for this market".
   private readonly prevHealthy = new Map<string, boolean>();
   private readonly prevBlocked = new Map<string, boolean>();
+  // Previous cycle's PnL-drain-healthy state per market, for edge detection in drainPnl() — same
+  // "alert on the transition, not every cycle spent broken" rule as detectTransitions().
+  private readonly prevPnlHealthy = new Map<string, boolean>();
 
   constructor(
     private readonly markets: readonly PaperRunnerMarket[],
@@ -141,7 +148,7 @@ export class PaperRunner {
    * crashed market from whichever caller invoked this (runOnce()'s Promise.all, or this market's
    * own live timer). Returns undefined when the cycle threw, so callers can filter it out. */
   private async runMarketCycle(entry: PaperRunnerMarket): Promise<CycleLogEntry | undefined> {
-    const { market, engine, pnlSource } = entry;
+    const { market, engine } = entry;
     let summary: CycleSummary;
     try {
       summary = await engine.runCycle();
@@ -154,8 +161,7 @@ export class PaperRunner {
 
     if (this.config.alertBus) this.detectTransitions(this.config.alertBus, market, summary);
 
-    const pnlDelta = pnlSource.drainRealizedPnlDeltaUsd(market);
-    if (pnlDelta !== 0) engine.recordRealizedPnl(pnlDelta);
+    await this.drainPnl(entry);
 
     this.cycleCount++;
     const logEntry: CycleLogEntry = {
@@ -167,6 +173,37 @@ export class PaperRunner {
     this.log.push(logEntry);
     this.emitLogLine(logEntry);
     return logEntry;
+  }
+
+  /** Drains this market's realized-PnL delta and applies it to the engine, or — if the drain
+   * itself throws (a real N1RealizedPnlSource network/parse failure, never a paper adapter in
+   * practice) — marks the engine's session PnL unavailable so runCycle() blocks all new
+   * placement starting next cycle, instead of silently treating the failure as "$0 realized this
+   * cycle" (exactly the always-zero-stub gap this wiring replaces). Never lets the drain failure
+   * propagate: same isolation contract runMarketCycle already gives a thrown runCycle(). */
+  private async drainPnl(entry: PaperRunnerMarket): Promise<void> {
+    const { market, engine, pnlSource } = entry;
+    try {
+      const pnlDelta = await pnlSource.drainRealizedPnlDeltaUsd(market);
+      engine.confirmSessionPnlHealthy();
+      if (this.config.alertBus && this.prevPnlHealthy.get(market) === false) {
+        this.config.alertBus.emit({
+          type: "error",
+          market,
+          message: `[${market}] Session realized-PnL drain recovered`,
+        });
+      }
+      this.prevPnlHealthy.set(market, true);
+      if (pnlDelta !== 0) engine.recordRealizedPnl(pnlDelta);
+    } catch (err) {
+      const reason = `realized-PnL drain failed: ${String(err)}`;
+      console.error(`[PaperRunner:${market}] ${reason}`);
+      engine.markSessionPnlUnavailable(reason);
+      if (this.config.alertBus && this.prevPnlHealthy.get(market) !== false) {
+        this.config.alertBus.emit({ type: "error", market, message: `[${market}] ${reason}` });
+      }
+      this.prevPnlHealthy.set(market, false);
+    }
   }
 
   /** Compares this cycle's CycleSummary against the previous one for this market and emits the

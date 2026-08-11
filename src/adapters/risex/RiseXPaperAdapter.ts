@@ -110,7 +110,7 @@ export class RiseXPaperAdapter implements ExchangeAdapter {
   async disconnect(): Promise<void> {}
 
   /** Same drain-and-reset contract as N1PaperAdapter, same per-market reason. */
-  drainRealizedPnlDeltaUsd(market: string): number {
+  async drainRealizedPnlDeltaUsd(market: string): Promise<number> {
     const delta = this.accumulatedRealizedPnlUsd.get(market) ?? 0;
     this.accumulatedRealizedPnlUsd.set(market, 0);
     return delta;

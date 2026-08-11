@@ -232,4 +232,57 @@ describe("MarketEngine", () => {
     expect(summary.blockedReason).toMatch(/bankruptcy/);
     expect(summary.quotesPlaced).toBe(0);
   });
+
+  describe("session PnL availability gate", () => {
+    it("blocks all new placements, including a reduce-only exit, while session PnL is marked unavailable", async () => {
+      // Position exceeds inventoryReductionThresholdBase (0.003) — without the PnL gate this
+      // would otherwise place a reduce-only exit (see the SPEC 5c test above).
+      adapter.positions.push({
+        market: MARKET,
+        baseSize: 0.004,
+        markPrice: 60000,
+        unrealizedPnl: 0,
+        openOrderCount: 0,
+      });
+
+      const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+      await engine.start();
+      engine.markSessionPnlUnavailable("N1 getAccountPnl() request failed: network hiccup");
+
+      const summary = await engine.runCycle();
+
+      expect(summary.blockedReason).toMatch(/Session realized-PnL unavailable/);
+      expect(summary.blockedReason).toMatch(/network hiccup/);
+      expect(summary.quotesPlaced).toBe(0);
+      expect(summary.reduceOnlyAction).toBe("none");
+      expect(engine.registry.list().find((o) => o.isReduceOnly)).toBeUndefined();
+    });
+
+    it("resumes normal placement once confirmSessionPnlHealthy() is called after a prior failure", async () => {
+      const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+      await engine.start();
+      engine.markSessionPnlUnavailable("drain failed");
+
+      const blocked = await engine.runCycle();
+      expect(blocked.blockedReason).toMatch(/Session realized-PnL unavailable/);
+      expect(blocked.quotesPlaced).toBe(0);
+
+      engine.confirmSessionPnlHealthy();
+      const recovered = await engine.runCycle();
+      expect(recovered.blockedReason).toBeUndefined();
+      expect(recovered.quotesPlaced).toBeGreaterThan(0);
+    });
+
+    it("stays blocked across multiple cycles until explicitly confirmed healthy again", async () => {
+      const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+      await engine.start();
+      engine.markSessionPnlUnavailable("drain failed");
+
+      const first = await engine.runCycle();
+      const second = await engine.runCycle();
+      expect(first.blockedReason).toMatch(/Session realized-PnL unavailable/);
+      expect(second.blockedReason).toMatch(/Session realized-PnL unavailable/);
+      expect(second.quotesPlaced).toBe(0);
+    });
+  });
 });

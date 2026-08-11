@@ -10,29 +10,14 @@
  * has no public testnet, so RiseXAdapter has only ever been fixture-tested (SPEC.md Section 11's
  * live-readiness gate is not met). This script is N1-only.
  *
- * ============================================================================================
- * KNOWN GAP — session realized-PnL is NOT wired to a real N1 PnL source yet
- * ============================================================================================
- * RiskManager's per-market sessionLossCapUsd gate reads MarketEngine's sessionRealizedPnlUsd,
- * which PaperRunner only ever updates via a market's `RealizedPnlSource.drainRealizedPnlDeltaUsd()`
- * (see src/paperRunner/PaperRunner.ts). N1PaperAdapter implements that by simulating fills
- * locally. N1Adapter (the real adapter) has no equivalent today — there is no code anywhere in
- * this repo that derives realized PnL from N1's real account history. Rather than fabricate one
- * under time pressure for this script, LIVE_PNL_SOURCE below is an explicit always-zero stub, so
- * sessionRealizedPnlUsd stays at 0 for the whole run and RiskManager's session loss cap check
- * (`sessionRealizedPnlUsd > -sessionLossCapUsd`) can never trip — it is NOT a functioning safety
- * net for cumulative realized losses in this script yet, even though it looks identical to
- * paper mode's.
- *
- * Every OTHER RiskManager limit is unaffected and fully enforced: per-order size/notional caps,
- * max long/short position, max open orders, and the account-wide margin-bankruptcy check. Only
- * the cumulative *session realized loss* cap is silently inert.
- *
- * This is printed prominently at startup (STAGE 6, immediately before the confirmation prompt)
- * and sent as a one-time alert. Auditing sessionRealizedPnlUsd's accumulation path and wiring a
- * real N1 PnL source is a HARD PREREQUISITE before this script is used for real live trading —
- * not a background follow-up item. See CLAUDE.md's follow-up list.
- * ============================================================================================
+ * Session realized-PnL is wired to N1RealizedPnlSource (src/adapters/n1/N1RealizedPnlSource.ts),
+ * which sums N1's own authoritative getAccountPnl() trading-PnL ledger — replacing the
+ * always-zero stub this script used to carry (see git history / CLAUDE.md's now-resolved
+ * follow-up item). RiskManager's per-market sessionLossCapUsd gate is therefore live and
+ * functioning: MarketEngine.runCycle() blocks ALL new placement, including reduce-only exits,
+ * whenever a PnL drain fails (MarketEngine.markSessionPnlUnavailable()) rather than silently
+ * treating a broken feed as "$0 realized this cycle." Excludes settledFundingPnl, matching
+ * paper-mode semantics — see N1RealizedPnlSource's class doc comment.
  *
  * Usage (once .env has real values and you have deliberately decided to run live):
  *   date -u +%F > state/live/ARMED                         # same-day intent, single-use
@@ -45,17 +30,20 @@
  *   3. Config load (enabled n1 markets only)
  *   4. Construct N1Adapter (no network yet)
  *   5. adapter.connect() (real network — the only stage that talks to N1 before confirmation)
- *   6. Pre-flight snapshot print (positions/balances/margin/risk limits) + PnL-gap warning
- *   7. Human confirmation gate (typed phrase, real TTY required)
- *   8. Alerting (mode label "LIVE") + one-time PnL-gap alert
- *   9. Construct MarketEngines against the real adapter, state under state/live/
- *  10. Dashboard (127.0.0.1 only)
- *  11. PaperRunner (unmodified orchestrator — exchange-agnostic despite its name)
- *  12. Signal handlers
- *  13. Banner + runner.start() — the only call that begins live order placement
+ *   6. Construct + initialize() N1RealizedPnlSource (real network — live PnL probe; establishes
+ *      or loads the persisted session anchor at state/live/pnl-session-anchor.json)
+ *   7. Pre-flight snapshot print (positions/balances/margin/risk limits/PnL source status)
+ *   8. Human confirmation gate (typed phrase, real TTY required)
+ *   9. Alerting (mode label "LIVE")
+ *  10. Construct MarketEngines against the real adapter, state under state/live/
+ *  11. Dashboard (127.0.0.1 only)
+ *  12. PaperRunner (unmodified orchestrator — exchange-agnostic despite its name)
+ *  13. Signal handlers
+ *  14. Banner + runner.start() — the only call that begins live order placement
  *
- * No timer or order-placing loop starts before stage 7 succeeds. If any stage 0-6 throws, the
- * process exits nonzero and stage 7's prompt is never reached.
+ * No timer or order-placing loop starts before stage 8 succeeds. If any stage 0-7 throws
+ * (including N1RealizedPnlSource.initialize() at stage 6), the process exits nonzero and stage
+ * 8's confirmation prompt is never reached.
  *
  * Env vars:
  *   N1_WEB_SERVER_URL, N1_APP_ADDR   — required, see .env.example.
@@ -74,6 +62,7 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { N1Adapter } from "../src/adapters/n1/N1Adapter.js";
+import { N1RealizedPnlSource } from "../src/adapters/n1/N1RealizedPnlSource.js";
 import { createAlertBusFromEnv } from "../src/alerting/createAlertBusFromEnv.js";
 import { loadMarketsConfig } from "../src/config/loadConfig.js";
 import { toEngineMarketConfig } from "../src/config/toEngineMarketConfig.js";
@@ -81,13 +70,6 @@ import { createDashboardServer } from "../src/dashboard/server.js";
 import type { DashboardMarket } from "../src/dashboard/DashboardService.js";
 import { MarketEngine } from "../src/engine/MarketEngine.js";
 import { PaperRunner, type PaperRunnerMarket } from "../src/paperRunner/PaperRunner.js";
-
-const PNL_GAP_WARNING =
-  "Session realized-PnL is NOT wired to a real N1 PnL source in this script — " +
-  "RiskManager's sessionLossCapUsd cap will NOT engage this session, no matter how much " +
-  "realized loss actually accrues. Per-order/position/margin limits remain fully active. " +
-  "Auditing this is a hard prerequisite before real reliance on the loss cap — see this " +
-  "script's header comment and CLAUDE.md's follow-up list.";
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -129,7 +111,7 @@ function consumeArmFile(): void {
   }
 }
 
-/** STAGE 7 — the human-presence gate. Requires a real TTY (refuses any unattended/scripted
+/** STAGE 8 — the human-presence gate. Requires a real TTY (refuses any unattended/scripted
  * launch by construction) and an exact, case-sensitive phrase match. No default, no retry loop:
  * any mismatch aborts the whole process. */
 async function requireTypedConfirmation(expectedPhrase: string): Promise<void> {
@@ -190,12 +172,31 @@ async function main(): Promise<void> {
   });
   await adapter.connect();
 
-  // STAGE 6 — pre-flight snapshot, read-only. Printed before any confirmation is requested so
+  // STAGE 6 — real N1 realized-PnL source. Constructed and probed live now, before any
+  // confirmation is requested: RiskManager's sessionLossCapUsd gate is meaningless if session
+  // PnL isn't actually being tracked, so a broken/unreachable PnL feed must abort startup here,
+  // never degrade into a live run with a silently inert risk cap.
+  const pnlAnchorFilePath = join(process.cwd(), "state", "live", "pnl-session-anchor.json");
+  const pnlSource = new N1RealizedPnlSource({
+    nord: adapter.getNordClient(),
+    accountId: adapter.getAccountId(),
+    anchorFilePath: pnlAnchorFilePath,
+  });
+  await pnlSource.initialize(
+    enabled.map((m) => ({ symbol: m.symbol, exchangeSymbol: m.exchangeSymbol })),
+  );
+
+  // STAGE 7 — pre-flight snapshot, read-only. Printed before any confirmation is requested so
   // the human is deciding from real account state, not from what they assume it is.
   console.log("\n=== [LIVE] Pre-flight account snapshot (N1) ===");
   console.log(`Markets: ${enabled.map((m) => m.symbol).join(", ")}`);
   console.log(`Balances: ${JSON.stringify(adapter.getBalances())}`);
   console.log(`Margin: ${JSON.stringify(adapter.getMarginStatus())}`);
+  console.log(
+    `Session realized-PnL: live N1 source initialized OK (anchor: ${pnlAnchorFilePath}); ` +
+      "sessionLossCapUsd is active and will block all new placement, including reduce-only " +
+      "exits, if a PnL drain ever fails mid-session.",
+  );
   for (const marketConfig of enabled) {
     const positions = adapter.getPositions(marketConfig.symbol);
     console.log(`Position [${marketConfig.symbol}]: ${JSON.stringify(positions)}`);
@@ -209,22 +210,17 @@ async function main(): Promise<void> {
         `sessionLossCapUsd=${marketConfig.sessionLossCapUsd}`,
     );
   }
-  console.log("\n=== [LIVE] KNOWN GAP ===");
-  console.log(PNL_GAP_WARNING);
 
-  // STAGE 7 — the only place this process ever blocks waiting on a human.
+  // STAGE 8 — the only place this process ever blocks waiting on a human.
   const confirmPhrase = `CONFIRM LIVE ${enabled.map((m) => m.symbol).join(",")}`;
   await requireTypedConfirmation(confirmPhrase);
 
-  // STAGE 8
+  // STAGE 9
   const alertBus = createAlertBusFromEnv("LIVE");
-  alertBus?.emit({ type: "error", message: `[startup] ${PNL_GAP_WARNING}` });
 
-  // STAGE 9 — one shared N1Adapter across every configured market, matching N1's real single
-  // cross-margined account (SPEC.md Section 4.3), same as run-paper.ts. LIVE_PNL_SOURCE is the
-  // always-zero stub documented at the top of this file — see the KNOWN GAP section.
-  const LIVE_PNL_SOURCE = { drainRealizedPnlDeltaUsd: () => 0 };
-
+  // STAGE 10 — one shared N1Adapter across every configured market, matching N1's real single
+  // cross-margined account (SPEC.md Section 4.3), same as run-paper.ts. pnlSource is likewise
+  // one shared N1RealizedPnlSource instance, drained per-market (see its class doc comment).
   const runnerMarkets: PaperRunnerMarket[] = enabled.map((marketConfig) => ({
     market: marketConfig.symbol,
     engine: new MarketEngine(adapter, toEngineMarketConfig(marketConfig), {
@@ -245,10 +241,10 @@ async function main(): Promise<void> {
           isReduceOnly: entry.isReduceOnly,
         }),
     }),
-    pnlSource: LIVE_PNL_SOURCE,
+    pnlSource,
   }));
 
-  // STAGE 10
+  // STAGE 11
   const dashboardMarkets: DashboardMarket[] = runnerMarkets.map(({ market, engine }) => ({
     market,
     engine,
@@ -265,10 +261,10 @@ async function main(): Promise<void> {
     `run-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`,
   );
 
-  // STAGE 11
+  // STAGE 12
   const runner = new PaperRunner(runnerMarkets, { intervalMs, durationMs, logFilePath, alertBus });
 
-  // STAGE 12
+  // STAGE 13
   const shutdown = (): void => {
     const report = runner.stop();
     dashboardServer.close();
@@ -284,14 +280,13 @@ async function main(): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  // STAGE 13
+  // STAGE 14
   console.log(`\n[LIVE] Starting live run for markets: ${enabled.map((m) => m.symbol).join(", ")}`);
   console.log(
     `[LIVE] Cycle interval: ${intervalMs}ms${durationMs ? `, duration: ${durationMs}ms` : " (until Ctrl-C)"}`,
   );
   console.log(`[LIVE] Log file: ${logFilePath}`);
   console.log(`[LIVE] Dashboard: http://127.0.0.1:${dashboardPort}`);
-  console.log(`[LIVE] ${PNL_GAP_WARNING}`);
   await runner.start();
 }
 

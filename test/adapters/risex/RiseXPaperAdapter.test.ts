@@ -232,8 +232,8 @@ describe("RiseXPaperAdapter", () => {
     await adapter.refreshAccountState();
 
     expect(adapter.getPositions(MARKET)[0]?.baseSize ?? 0).toBeCloseTo(0);
-    expect(adapter.drainRealizedPnlDeltaUsd(MARKET)).toBeCloseTo(10);
-    expect(adapter.drainRealizedPnlDeltaUsd(MARKET)).toBe(0); // drained, resets to zero
+    await expect(adapter.drainRealizedPnlDeltaUsd(MARKET)).resolves.toBeCloseTo(10);
+    await expect(adapter.drainRealizedPnlDeltaUsd(MARKET)).resolves.toBe(0); // drained, resets to zero
   });
 
   it("cash-settles real RISEx funding history against the balance while a position is open", async () => {
@@ -260,7 +260,7 @@ describe("RiseXPaperAdapter", () => {
 
     const expectedFundingPaymentUsd = -0.01 * 60000 * 0.0001; // -0.06
     expect(adapter.getBalances()[0]?.amount).toBeCloseTo(balanceAfterOpen + expectedFundingPaymentUsd);
-    expect(adapter.drainRealizedPnlDeltaUsd(MARKET)).toBeCloseTo(expectedFundingPaymentUsd);
+    await expect(adapter.drainRealizedPnlDeltaUsd(MARKET)).resolves.toBeCloseTo(expectedFundingPaymentUsd);
 
     // Same funding record must not be applied twice on the next cycle.
     const balanceAfterFunding = adapter.getBalances()[0]!.amount;

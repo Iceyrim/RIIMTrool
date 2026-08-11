@@ -108,8 +108,8 @@ describe("StubAdapter", () => {
     await tickUntilResolved(adapter);
 
     expect(adapter.getPositions(MARKET)[0]?.baseSize ?? 0).toBeCloseTo(0);
-    expect(adapter.drainRealizedPnlDeltaUsd(MARKET)).toBeCloseTo(-5);
-    expect(adapter.drainRealizedPnlDeltaUsd(MARKET)).toBe(0); // drained, resets to zero
+    await expect(adapter.drainRealizedPnlDeltaUsd(MARKET)).resolves.toBeCloseTo(-5);
+    await expect(adapter.drainRealizedPnlDeltaUsd(MARKET)).resolves.toBe(0); // drained, resets to zero
   });
 
   it("is exactly reproducible from the same seed: two independently-run instances produce identical fills, positions, and balances", async () => {

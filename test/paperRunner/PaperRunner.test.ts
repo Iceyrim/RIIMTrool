@@ -17,7 +17,15 @@ class FakeAlertSink implements AlertSink {
 
 class FakePnlSource implements RealizedPnlSource {
   queued = 0;
-  drainRealizedPnlDeltaUsd(_market: string): number {
+  /** Set to make the next drain throw instead of resolving — self-clears after throwing once,
+   * so tests can model "one failed drain, then recovery" without extra bookkeeping. */
+  errorToThrow: Error | null = null;
+  async drainRealizedPnlDeltaUsd(_market: string): Promise<number> {
+    if (this.errorToThrow) {
+      const err = this.errorToThrow;
+      this.errorToThrow = null;
+      throw err;
+    }
     const value = this.queued;
     this.queued = 0;
     return value;
@@ -408,5 +416,109 @@ describe("PaperRunner alertBus transition detection", () => {
 
     expect(sink.events.filter((e) => e.type === "halted")).toHaveLength(1);
     expect(sink.events.filter((e) => e.type === "reconciliation_degraded")).toHaveLength(0);
+  });
+});
+
+describe("PaperRunner PnL-drain failure handling", () => {
+  let btcAdapter: FakeExchangeAdapter;
+  let btcPnl: FakePnlSource;
+
+  beforeEach(() => {
+    btcAdapter = new FakeExchangeAdapter();
+    btcAdapter.marketPrices.set("BTCUSD", { market: "BTCUSD", mark: 60000 });
+    btcPnl = new FakePnlSource();
+  });
+
+  it("marks session PnL unavailable when a drain throws, blocking the NEXT cycle's placement (including reduce-only exits)", async () => {
+    const engine = new MarketEngine(
+      btcAdapter,
+      testConfig("BTCUSD", { quoteMinimumLifetimeMs: 0 }),
+      tempPaths("BTCUSD"),
+    );
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+    });
+    await runner.start();
+
+    const baseline = await runner.runOnce();
+    expect(baseline[0]?.summary.blockedReason).toBeUndefined();
+    expect(baseline[0]?.summary.quotesPlaced).toBeGreaterThan(0);
+
+    btcPnl.errorToThrow = new Error("N1 getAccountPnl() request failed: network hiccup");
+    // This cycle's own runCycle() already ran (and was healthy) before its drain throws — the
+    // block only takes effect starting the cycle after, same one-cycle lag sessionRealizedPnlUsd
+    // itself already has.
+    await runner.runOnce();
+
+    const blockedCycle = await runner.runOnce();
+    expect(blockedCycle[0]?.summary.blockedReason).toMatch(/Session realized-PnL unavailable/);
+    expect(blockedCycle[0]?.summary.blockedReason).toMatch(/network hiccup/);
+    expect(blockedCycle[0]?.summary.quotesPlaced).toBe(0);
+  });
+
+  it("recovers once a subsequent drain succeeds after a prior failure", async () => {
+    const engine = new MarketEngine(
+      btcAdapter,
+      testConfig("BTCUSD", { quoteMinimumLifetimeMs: 0 }),
+      tempPaths("BTCUSD"),
+    );
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+    });
+    await runner.start();
+
+    btcPnl.errorToThrow = new Error("boom");
+    await runner.runOnce(); // this cycle's drain fails (errorToThrow self-clears after throwing)
+
+    const blockedCycle = await runner.runOnce();
+    expect(blockedCycle[0]?.summary.blockedReason).toMatch(/Session realized-PnL unavailable/);
+
+    const recoveredCycle = await runner.runOnce(); // drain succeeded again last cycle
+    expect(recoveredCycle[0]?.summary.blockedReason).toBeUndefined();
+    expect(recoveredCycle[0]?.summary.quotesPlaced).toBeGreaterThan(0);
+  });
+
+  it("never substitutes $0 for a failed drain — sessionRealizedPnlUsd is unchanged by the failure itself", async () => {
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+    });
+    await runner.start();
+
+    btcPnl.queued = 25;
+    await runner.runOnce();
+    expect(engine.getSessionRealizedPnlUsd()).toBeCloseTo(25);
+
+    btcPnl.errorToThrow = new Error("boom");
+    await runner.runOnce();
+    // A failed drain must never apply a $0 delta on top of a real prior realized loss/gain —
+    // session PnL stays exactly what it was before the failed drain.
+    expect(engine.getSessionRealizedPnlUsd()).toBeCloseTo(25);
+  });
+
+  it("alerts once on the failure edge and once on the recovery edge, not every cycle spent broken", async () => {
+    const sink = new FakeAlertSink();
+    const alertBus = new AlertBus();
+    alertBus.subscribe(sink);
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+      alertBus,
+    });
+    await runner.start();
+
+    btcPnl.errorToThrow = new Error("boom");
+    await runner.runOnce(); // fails once — errorToThrow self-clears
+    await runner.runOnce(); // recovers
+    await runner.runOnce(); // stays healthy — must not alert "recovered" again
+
+    const failureAlerts = sink.events.filter(
+      (e) => e.type === "error" && e.message.includes("boom"),
+    );
+    expect(failureAlerts).toHaveLength(1);
+    const recoveryAlerts = sink.events.filter(
+      (e) => e.type === "error" && e.message.includes("recovered"),
+    );
+    expect(recoveryAlerts).toHaveLength(1);
   });
 });

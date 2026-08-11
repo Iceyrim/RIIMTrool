@@ -148,7 +148,7 @@ export class StubAdapter implements ExchangeAdapter {
 
   /** Same drain-and-reset contract as N1PaperAdapter, kept per-market for the same SPEC.md
    * Section 4.3 reason (one adapter instance can be shared across every market on the account). */
-  drainRealizedPnlDeltaUsd(market: string): number {
+  async drainRealizedPnlDeltaUsd(market: string): Promise<number> {
     const delta = this.accumulatedRealizedPnlUsd.get(market) ?? 0;
     this.accumulatedRealizedPnlUsd.set(market, 0);
     return delta;

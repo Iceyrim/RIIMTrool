@@ -49,6 +49,11 @@ export class MarketEngine {
 
   private sessionRealizedPnlUsd = 0;
   private started = false;
+  // Defaults healthy: PaperRunner only ever calls markSessionPnlUnavailable() after a real
+  // drain attempt fails, and startup (run-live.ts) aborts before any cycle runs if the initial
+  // live PnL probe itself fails — so runCycle() is never reachable with this genuinely unknown.
+  private sessionPnlUnavailable = false;
+  private sessionPnlUnavailableReason?: string;
 
   constructor(
     private readonly adapter: ExchangeAdapter,
@@ -87,6 +92,25 @@ export class MarketEngine {
     return this.sessionRealizedPnlUsd;
   }
 
+  /** Called by PaperRunner when a cycle's RealizedPnlSource.drainRealizedPnlDeltaUsd() throws.
+   * RiskManager's sessionLossCapUsd check only means anything if sessionRealizedPnlUsd is
+   * actually current — trading on with a PnL feed known to be broken would let real losses
+   * accrue past the cap in silence, exactly the gap that made run-live.ts's always-zero stub
+   * unacceptable. Takes effect starting the NEXT runCycle() (this cycle has already run by the
+   * time PaperRunner drains PnL) — the same one-cycle lag sessionRealizedPnlUsd itself already
+   * has via recordRealizedPnl(). */
+  markSessionPnlUnavailable(reason: string): void {
+    this.sessionPnlUnavailable = true;
+    this.sessionPnlUnavailableReason = reason;
+  }
+
+  /** Called by PaperRunner once a drain succeeds again after a prior failure — clears the block
+   * so quoting/exits resume. A no-op when already healthy. */
+  confirmSessionPnlHealthy(): void {
+    this.sessionPnlUnavailable = false;
+    this.sessionPnlUnavailableReason = undefined;
+  }
+
   async runCycle(): Promise<CycleSummary> {
     if (!this.started) {
       throw new Error(
@@ -120,6 +144,19 @@ export class MarketEngine {
       summary.blockedReason =
         `Reconciliation degraded (streak ${this.reconciliation.getDegradedStreak()}); ` +
         `holding all new placements for ${this.config.symbol} this cycle`;
+      return summary;
+    }
+
+    // Session realized-PnL feeds RiskManager's sessionLossCapUsd check directly (see
+    // manageQuoteLadder's canPlaceOrder call below) — if the last drain attempt failed, that
+    // number is stale/unknown, so the loss cap can no longer be trusted to catch a real breach.
+    // Blocks reduce-only exits too, same as the reconciliation-degraded block above: a reduce-
+    // only exit is still a new placement, and there is no case where placing one is safer than
+    // holding while the risk gate itself is unconfirmed.
+    if (this.sessionPnlUnavailable) {
+      summary.blockedReason =
+        `Session realized-PnL unavailable for ${this.config.symbol} ` +
+        `(${this.sessionPnlUnavailableReason}); holding all new placements this cycle`;
       return summary;
     }
 
