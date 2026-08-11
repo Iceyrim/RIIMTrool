@@ -105,7 +105,10 @@ export interface RiseXMarketDataSource {
   ): Promise<RiseXFundingRecord[]>;
 }
 
-function decimal(s: string): number {
+/** Exported for reuse by RiseXAdapter's mappers (portfolio/details and related authenticated
+ * endpoints use the same plain-decimal-string convention as these public endpoints) — kept as a
+ * single source of truth for this parsing/error behavior rather than duplicating it. */
+export function decimal(s: string): number {
   const n = Number(s);
   if (Number.isNaN(n)) {
     throw new ExchangeAdapterError(`RISEx returned a non-numeric decimal string: "${s}"`);
@@ -114,8 +117,9 @@ function decimal(s: string): number {
 }
 
 /** RISEx timestamps are unix nanoseconds as strings (~1e18) — far past
- * Number.MAX_SAFE_INTEGER (~9e15) — so the ns->ms reduction must go through BigInt. */
-function nsStringToMs(ns: string): number {
+ * Number.MAX_SAFE_INTEGER (~9e15) — so the ns->ms reduction must go through BigInt. Exported for
+ * reuse by RiseXAdapter's mappers (trade-history's `time` field uses the same convention). */
+export function nsStringToMs(ns: string): number {
   return Number(BigInt(ns) / 1_000_000n);
 }
 
