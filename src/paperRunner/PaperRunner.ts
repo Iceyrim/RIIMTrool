@@ -44,6 +44,12 @@ export interface CycleLogEntry {
   sessionRealizedPnlUsd: number;
 }
 
+/** Consecutive fully-failed quote-ladder cycles (attempted &gt; 0, placed === 0) before
+ * detectPlacementFailures() alerts. A 100% placement failure rate is otherwise indistinguishable
+ * from "nothing to quote" at the log level — see MarketEngine's CycleSummary.quotesFailed doc
+ * comment. Threshold, not first-cycle, to avoid alerting on a single transient rejection. */
+const PLACEMENT_FAILURE_ALERT_THRESHOLD = 3;
+
 export interface SoakReport {
   startedAt: number;
   endedAt: number;
@@ -90,6 +96,10 @@ export class PaperRunner {
   // Previous cycle's PnL-drain-healthy state per market, for edge detection in drainPnl() — same
   // "alert on the transition, not every cycle spent broken" rule as detectTransitions().
   private readonly prevPnlHealthy = new Map<string, boolean>();
+  // Consecutive fully-failed quote-ladder cycles per market, and whether an alert has already
+  // fired for the current streak — see detectPlacementFailures().
+  private readonly placementFailureStreak = new Map<string, number>();
+  private readonly placementFailureAlerted = new Map<string, boolean>();
 
   constructor(
     private readonly markets: readonly PaperRunnerMarket[],
@@ -159,7 +169,10 @@ export class PaperRunner {
       return undefined;
     }
 
-    if (this.config.alertBus) this.detectTransitions(this.config.alertBus, market, summary);
+    if (this.config.alertBus) {
+      this.detectTransitions(this.config.alertBus, market, summary);
+      this.detectPlacementFailures(this.config.alertBus, market, summary);
+    }
 
     await this.drainPnl(entry);
 
@@ -235,6 +248,43 @@ export class PaperRunner {
       alertBus.emit({ type: "resumed", market });
     }
     this.prevBlocked.set(market, blocked);
+  }
+
+  /** Tracks consecutive fully-failed quote-ladder cycles (every attempt this cycle failed) per
+   * market and alerts once the streak crosses PLACEMENT_FAILURE_ALERT_THRESHOLD — independent of
+   * reconciliation health, which correctly stays "healthy" here (nothing ever reached the
+   * exchange to disagree about). A cycle with nothing attempted (all levels already covered, or
+   * new placement blocked upstream) neither extends nor breaks the streak — only cycles that
+   * actually tried to place something count. */
+  private detectPlacementFailures(alertBus: AlertBus, market: string, summary: CycleSummary): void {
+    if (summary.quotesAttempted === 0) return;
+
+    const fullyFailed = summary.quotesPlaced === 0;
+    const streak = fullyFailed ? (this.placementFailureStreak.get(market) ?? 0) + 1 : 0;
+    this.placementFailureStreak.set(market, streak);
+
+    const alreadyAlerted = this.placementFailureAlerted.get(market) === true;
+    if (streak >= PLACEMENT_FAILURE_ALERT_THRESHOLD && !alreadyAlerted) {
+      const reasons =
+        summary.quoteFailureMessages.length > 0
+          ? `; latest reason(s): ${summary.quoteFailureMessages.join("; ")}`
+          : "";
+      alertBus.emit({
+        type: "error",
+        market,
+        message:
+          `[${market}] Quote placement has failed on every attempt for ${streak} consecutive ` +
+          `cycles${reasons}`,
+      });
+      this.placementFailureAlerted.set(market, true);
+    } else if (!fullyFailed && alreadyAlerted) {
+      alertBus.emit({
+        type: "error",
+        market,
+        message: `[${market}] Quote placement recovered after repeated failures`,
+      });
+      this.placementFailureAlerted.set(market, false);
+    }
   }
 
   private emitLogLine(entry: CycleLogEntry): void {

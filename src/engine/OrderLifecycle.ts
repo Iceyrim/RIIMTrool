@@ -118,6 +118,11 @@ export class OrderLifecycle {
 
     if (!result.success) {
       if (result.reason === "UNRESOLVED_NOT_CONFIRMED") {
+        console.warn(
+          `[OrderLifecycle:${this.market}] placement UNRESOLVED_NOT_CONFIRMED ` +
+            `(${params.side} ${params.size}@${params.price}, clientOrderId=${clientOrderId}): ` +
+            `${result.message}`,
+        );
         // SPEC.md Section 5b: a resolved-but-unconfirmed placement must never be assumed
         // successful — but it also must not be silently dropped, since it may in fact have
         // landed. Recorded as UNKNOWN; only reconciliation against exchange truth resolves it.
@@ -139,7 +144,15 @@ export class OrderLifecycle {
         this.registry.upsert(local);
         return { success: false, message: result.message, order: local };
       }
-      // REJECTED: the exchange definitively refused the order. Nothing to track locally.
+      // REJECTED: the exchange definitively refused the order. Nothing to track locally — but the
+      // failure itself must still be visible (this was previously a fully silent drop: 340
+      // consecutive REJECTED placements in one real run produced zero console output and zero
+      // anomalies, indistinguishable from "nothing to quote").
+      console.error(
+        `[OrderLifecycle:${this.market}] placement REJECTED ` +
+          `(${params.side} ${params.size}@${params.price}, clientOrderId=${clientOrderId}): ` +
+          `${result.message}`,
+      );
       return { success: false, message: result.message };
     }
 

@@ -419,6 +419,121 @@ describe("PaperRunner alertBus transition detection", () => {
   });
 });
 
+describe("PaperRunner placement-failure alerting", () => {
+  let btcAdapter: FakeExchangeAdapter;
+  let btcPnl: FakePnlSource;
+  let sink: FakeAlertSink;
+  let alertBus: AlertBus;
+
+  beforeEach(() => {
+    btcAdapter = new FakeExchangeAdapter();
+    btcAdapter.marketPrices.set("BTCUSD", { market: "BTCUSD", mark: 60000 });
+    btcPnl = new FakePnlSource();
+    sink = new FakeAlertSink();
+    alertBus = new AlertBus();
+    alertBus.subscribe(sink);
+  });
+
+  // testConfig("BTCUSD") in this file configures quoteLevels: 2, levelSpacingBps: [2, 3] — 2 bid
+  // + 2 ask = 4 quote-ladder placement attempts per cycle.
+  function queueRejectedCycle(): void {
+    for (let i = 0; i < 4; i++) {
+      btcAdapter.placeOrderResults.push({
+        success: false,
+        reason: "REJECTED",
+        message: "Invalid or empty session ID. Please create or refresh your session.",
+      });
+    }
+  }
+
+  it("alerts once after 3 consecutive fully-failed cycles, not every cycle spent failing (regression: this is exactly the real run — 340/340 REJECTED, zero anomalies, zero alerts)", async () => {
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+      alertBus,
+    });
+    await runner.start();
+
+    queueRejectedCycle();
+    await runner.runOnce();
+    expect(sink.events.filter((e) => e.type === "error")).toHaveLength(0);
+
+    queueRejectedCycle();
+    await runner.runOnce();
+    expect(sink.events.filter((e) => e.type === "error")).toHaveLength(0);
+
+    queueRejectedCycle();
+    await runner.runOnce();
+
+    const errorEvents = sink.events.filter((e) => e.type === "error");
+    expect(errorEvents).toHaveLength(1);
+    expect(errorEvents[0]).toMatchObject({
+      market: "BTCUSD",
+      message: expect.stringContaining("3 consecutive"),
+    });
+
+    // Stays failing — must not repeat the alert every cycle.
+    queueRejectedCycle();
+    await runner.runOnce();
+    expect(sink.events.filter((e) => e.type === "error")).toHaveLength(1);
+  });
+
+  it("emits a recovery event once placement succeeds again after an alerted streak", async () => {
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+      alertBus,
+    });
+    await runner.start();
+
+    queueRejectedCycle();
+    queueRejectedCycle();
+    queueRejectedCycle();
+    await runner.runOnce();
+    await runner.runOnce();
+    await runner.runOnce();
+    expect(
+      sink.events.filter((e) => e.type === "error" && e.message.includes("consecutive")),
+    ).toHaveLength(1);
+
+    // Queue is empty now — FakeExchangeAdapter synthesizes a success for every placement.
+    await runner.runOnce();
+
+    const recoveryEvents = sink.events.filter(
+      (e) => e.type === "error" && e.message.includes("recovered"),
+    );
+    expect(recoveryEvents).toHaveLength(1);
+    expect(recoveryEvents[0]).toMatchObject({ market: "BTCUSD" });
+  });
+
+  it("a fully-blocked cycle (margin risk, zero attempted) does not break or extend the failure streak", async () => {
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+      alertBus,
+    });
+    await runner.start();
+
+    queueRejectedCycle();
+    queueRejectedCycle();
+    await runner.runOnce();
+    await runner.runOnce();
+
+    // A cycle blocked entirely upstream (margin risk) attempts nothing this cycle — must not
+    // reset (or advance) the placement-failure streak, since it says nothing about placement.
+    btcAdapter.marginStatus.isAtBankruptcyRisk = true;
+    await runner.runOnce();
+    btcAdapter.marginStatus.isAtBankruptcyRisk = false;
+
+    queueRejectedCycle();
+    await runner.runOnce();
+
+    // Two rejected cycles, one skipped (blocked), one more rejected: streak reaches 3 only if the
+    // blocked cycle didn't reset it.
+    expect(sink.events.filter((e) => e.type === "error")).toHaveLength(1);
+  });
+});
+
 describe("PaperRunner PnL-drain failure handling", () => {
   let btcAdapter: FakeExchangeAdapter;
   let btcPnl: FakePnlSource;

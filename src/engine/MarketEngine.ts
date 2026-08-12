@@ -17,6 +17,15 @@ export interface CycleSummary {
   quotesPlaced: number;
   quotesAttempted: number;
   quotesCancelled: number;
+  /** Count of this cycle's quote-ladder placement attempts that did not succeed (attempted minus
+   * placed). Exists specifically so a cycle where every attempt fails is visible in the same log
+   * line as quotesAttempted/quotesPlaced, rather than only inferable by comparing the two. */
+  quotesFailed: number;
+  /** Deduplicated, capped (max 5) failure messages from this cycle's failed placement attempts —
+   * OrderLifecycle already logs each one to the console, but a systemic failure (e.g. every
+   * attempt failing for the same reason) previously left zero trace in the per-cycle log file
+   * itself, the one artifact a completed run actually leaves behind. */
+  quoteFailureMessages: string[];
   reduceOnlyAction: "placed" | "repriced" | "held" | "skipped_duplicate" | "none";
   /** Set when the entire cycle skipped new placements (margin risk, degraded reconciliation) —
    * not just an individual order rejection. */
@@ -131,6 +140,8 @@ export class MarketEngine {
       quotesPlaced: 0,
       quotesAttempted: 0,
       quotesCancelled: 0,
+      quotesFailed: 0,
+      quoteFailureMessages: [],
       reduceOnlyAction: "none",
     };
 
@@ -169,13 +180,15 @@ export class MarketEngine {
       summary.reduceOnlyAction = await this.manageReduceOnlyExit(currentBaseSize);
     }
 
-    const { placed, attempted, cancelled } = await this.manageQuoteLadder(
+    const { placed, attempted, cancelled, failureMessages } = await this.manageQuoteLadder(
       position,
       reconciliationResult,
     );
     summary.quotesPlaced = placed;
     summary.quotesAttempted = attempted;
     summary.quotesCancelled = cancelled;
+    summary.quotesFailed = attempted - placed;
+    summary.quoteFailureMessages = failureMessages;
 
     this.registry.save();
     return summary;
@@ -243,7 +256,7 @@ export class MarketEngine {
   private async manageQuoteLadder(
     position: NormalizedPosition | undefined,
     reconciliationResult: ReconciliationResult,
-  ): Promise<{ placed: number; attempted: number; cancelled: number }> {
+  ): Promise<{ placed: number; attempted: number; cancelled: number; failureMessages: string[] }> {
     const now = Date.now();
     const restingQuotes = this.registry.listByState("RESTING").filter((o) => !o.isReduceOnly);
 
@@ -272,6 +285,8 @@ export class MarketEngine {
 
     let placed = 0;
     let attempted = 0;
+    const failureMessages: string[] = [];
+    const MAX_FAILURE_MESSAGES = 5;
 
     for (const level of ladder) {
       const alreadyCovered = stillResting.some(
@@ -301,9 +316,17 @@ export class MarketEngine {
         size: level.size,
         price: level.price,
       });
-      if (result.success) placed++;
+      if (result.success) {
+        placed++;
+      } else if (
+        result.message !== undefined &&
+        !failureMessages.includes(result.message) &&
+        failureMessages.length < MAX_FAILURE_MESSAGES
+      ) {
+        failureMessages.push(result.message);
+      }
     }
 
-    return { placed, attempted, cancelled };
+    return { placed, attempted, cancelled, failureMessages };
   }
 }

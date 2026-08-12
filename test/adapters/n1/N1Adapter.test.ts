@@ -40,6 +40,7 @@ interface FakeNordInstance {
   getOrderTrades: ReturnType<typeof vi.fn>;
   getMarketStats: ReturnType<typeof vi.fn>;
   getAccountVolume: ReturnType<typeof vi.fn>;
+  getTimestamp: ReturnType<typeof vi.fn>;
 }
 
 interface FakeNordUserInstance {
@@ -52,7 +53,13 @@ interface FakeNordUserInstance {
   fetchInfo: ReturnType<typeof vi.fn>;
   placeOrder: ReturnType<typeof vi.fn>;
   cancelOrder: ReturnType<typeof vi.fn>;
+  refreshSession: ReturnType<typeof vi.fn>;
 }
+
+// Arbitrary fixed "now" (server-clock unix seconds) for session-expiry math in tests, and the
+// SDK's real default session TTL (30 days) so expiry math below mirrors production behavior.
+const FAKE_NOW_SEC = 1_000_000n;
+const SESSION_TTL_SEC = 60n * 60n * 24n * 30n;
 
 function makeFakeNord(overrides: Partial<FakeNordInstance> = {}): FakeNordInstance {
   return {
@@ -61,6 +68,7 @@ function makeFakeNord(overrides: Partial<FakeNordInstance> = {}): FakeNordInstan
     getOrderTrades: vi.fn(),
     getMarketStats: vi.fn(),
     getAccountVolume: vi.fn(),
+    getTimestamp: vi.fn().mockResolvedValue(FAKE_NOW_SEC),
     ...overrides,
   };
 }
@@ -76,6 +84,11 @@ function makeFakeNordUser(overrides: Partial<FakeNordUserInstance> = {}): FakeNo
     fetchInfo: vi.fn().mockResolvedValue(undefined),
     placeOrder: vi.fn(),
     cancelOrder: vi.fn(),
+    refreshSession: vi.fn().mockResolvedValue({
+      sessionId: 123n,
+      expiry: FAKE_NOW_SEC + SESSION_TTL_SEC,
+      refreshDeadline: undefined,
+    }),
     ...overrides,
   };
 }
@@ -102,12 +115,13 @@ describe("N1Adapter", () => {
   });
 
   describe("connect", () => {
-    it("resolves markets, derives accountId, and fetches initial account state", async () => {
+    it("resolves markets, derives accountId, establishes a session, and fetches initial account state", async () => {
       const adapter = new N1Adapter(baseConfig());
       await adapter.connect();
 
       expect(fakeNord.fetchNordInfo).toHaveBeenCalledTimes(1);
       expect(fakeUser.updateAccountId).toHaveBeenCalledTimes(1);
+      expect(fakeUser.refreshSession).toHaveBeenCalledTimes(1);
       expect(fakeUser.fetchInfo).toHaveBeenCalledTimes(1);
       // Getters work post-connect, proving accountId was actually captured.
       expect(() => adapter.getPositions()).not.toThrow();
@@ -128,6 +142,57 @@ describe("N1Adapter", () => {
       const adapter = new N1Adapter(baseConfig());
 
       await expect(adapter.connect()).rejects.toThrow(/no market with symbol "BTCUSDC"/);
+    });
+
+    it("throws and never calls fetchInfo() if session establishment fails — must abort startup, never run with an adapter that can read but never place", async () => {
+      fakeUser.refreshSession.mockRejectedValue(new Error("wallet signature rejected"));
+      const adapter = new N1Adapter(baseConfig());
+
+      await expect(adapter.connect()).rejects.toThrow(/wallet signature rejected/);
+      expect(fakeUser.fetchInfo).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("session renewal", () => {
+    it("refreshAccountState() does not re-establish the session when the tracked expiry is far away", async () => {
+      const adapter = new N1Adapter(baseConfig());
+      await adapter.connect();
+      expect(fakeUser.refreshSession).toHaveBeenCalledTimes(1);
+
+      await adapter.refreshAccountState();
+      expect(fakeUser.refreshSession).toHaveBeenCalledTimes(1);
+    });
+
+    it("refreshAccountState() proactively renews the session once it comes within the safety margin of expiry", async () => {
+      const adapter = new N1Adapter(baseConfig());
+      await adapter.connect();
+      expect(fakeUser.refreshSession).toHaveBeenCalledTimes(1);
+
+      // Advance server time to inside the 1-hour renewal margin of the session established at
+      // connect() (FAKE_NOW_SEC + 30-day TTL).
+      fakeNord.getTimestamp.mockResolvedValue(FAKE_NOW_SEC + SESSION_TTL_SEC - 60n);
+      await adapter.refreshAccountState();
+
+      expect(fakeUser.refreshSession).toHaveBeenCalledTimes(2);
+    });
+
+    it("placeOrder() also proactively renews an about-to-expire session (defense in depth, independent of refreshAccountState)", async () => {
+      fakeUser.placeOrder.mockResolvedValue({ actionId: 1n, orderId: 42n, fills: [] });
+      const adapter = new N1Adapter(baseConfig());
+      await adapter.connect();
+      expect(fakeUser.refreshSession).toHaveBeenCalledTimes(1);
+
+      fakeNord.getTimestamp.mockResolvedValue(FAKE_NOW_SEC + SESSION_TTL_SEC - 60n);
+      await adapter.placeOrder({
+        market: MARKET,
+        side: "buy",
+        type: "postOnly",
+        size: 0.01,
+        price: 59000,
+        isReduceOnly: false,
+      });
+
+      expect(fakeUser.refreshSession).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -367,6 +432,29 @@ describe("N1Adapter", () => {
         message: "network hiccup",
       });
     });
+
+    it("flattens a wrapped SDK error's .cause chain into the message, instead of just the outer wrapper's generic text — mirrors nord-ts's own NordError('Failed to place order', { cause })", async () => {
+      const innerCause = new Error("Invalid or empty session ID. Please create or refresh your session.");
+      const outerError = new Error("Failed to place order", { cause: innerCause });
+      fakeUser.placeOrder.mockRejectedValue(outerError);
+      const adapter = new N1Adapter(baseConfig());
+      await adapter.connect();
+
+      const result = await adapter.placeOrder({
+        market: MARKET,
+        side: "buy",
+        type: "postOnly",
+        size: 0.01,
+        price: 59000,
+        isReduceOnly: false,
+      });
+
+      expect(result.success).toBe(false);
+      if (result.success) throw new Error("expected failure");
+      expect(result.message).toBe(
+        "Failed to place order: caused by: Invalid or empty session ID. Please create or refresh your session.",
+      );
+    });
   });
 
   describe("cancelOrder", () => {
@@ -493,5 +581,71 @@ describe("N1Adapter", () => {
         expect.objectContaining({ marketId: undefined, marketIds: [] }),
       );
     });
+  });
+});
+
+/**
+ * Every other test in this file mocks NordUser.placeOrder as a bare `vi.fn()` — which structurally
+ * cannot catch a regression where N1Adapter.connect() stops establishing a session, because a bare
+ * mock has no notion of "session required" to begin with; it would resolve identically either way.
+ * This suite closes that specific gap with a fake that actually enforces the real SDK's contract:
+ * NordUser.placeOrder() throws (mirroring the real checkSessionValidity()) unless refreshSession()
+ * was called first. It is still not a real network test — no live/authenticated call is made here
+ * or anywhere in this file — but unlike the bare mocks above, it fails if connect()'s call to
+ * ensureSession() (and therefore refreshSession()) is ever deleted.
+ */
+describe("session lifecycle contract (fake enforces real SDK session gating, not just a bare mock)", () => {
+  function makeSessionEnforcingNordUser(): FakeNordUserInstance {
+    let sessionEstablished = false;
+    return {
+      accountIds: [ACCOUNT_ID],
+      positions: {},
+      orders: {},
+      balances: {},
+      margins: {},
+      updateAccountId: vi.fn().mockResolvedValue(undefined),
+      fetchInfo: vi.fn().mockResolvedValue(undefined),
+      cancelOrder: vi.fn(),
+      refreshSession: vi.fn().mockImplementation(async () => {
+        sessionEstablished = true;
+        return {
+          sessionId: 123n,
+          expiry: FAKE_NOW_SEC + SESSION_TTL_SEC,
+          refreshDeadline: undefined,
+        };
+      }),
+      // Mirrors NordUser.checkSessionValidity(): throws unless a session has been established.
+      placeOrder: vi.fn().mockImplementation(async () => {
+        if (!sessionEstablished) {
+          throw new Error("Invalid or empty session ID. Please create or refresh your session.");
+        }
+        return { actionId: 1n, orderId: 42n, fills: [] };
+      }),
+    };
+  }
+
+  it("sanity check: the fake itself rejects placeOrder() before any session has been established", async () => {
+    const fake = makeSessionEnforcingNordUser();
+    await expect(fake.placeOrder()).rejects.toThrow(/Invalid or empty session ID/);
+  });
+
+  it("N1Adapter.connect() establishes the session before placeOrder() becomes usable", async () => {
+    const fake = makeSessionEnforcingNordUser();
+    nordNew.mockReset().mockResolvedValue(makeFakeNord() as unknown as Nord);
+    nordUserFromPrivateKey.mockReset().mockReturnValue(fake as unknown as NordUser);
+
+    const adapter = new N1Adapter(baseConfig());
+    await adapter.connect();
+
+    const result = await adapter.placeOrder({
+      market: MARKET,
+      side: "buy",
+      type: "postOnly",
+      size: 0.01,
+      price: 59000,
+      isReduceOnly: false,
+    });
+
+    expect(result.success).toBe(true);
   });
 });

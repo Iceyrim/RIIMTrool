@@ -82,6 +82,27 @@ describe("MarketEngine", () => {
     expect(summary.quotesPlaced).toBe(10);
   });
 
+  it("surfaces placement failures in quotesFailed/quoteFailureMessages instead of dropping them (regression: a real live run had 340/340 REJECTED placements and zero visibility)", async () => {
+    for (let i = 0; i < 10; i++) {
+      adapter.placeOrderResults.push({
+        success: false,
+        reason: "REJECTED",
+        message: "Invalid or empty session ID. Please create or refresh your session.",
+      });
+    }
+
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+    await engine.start();
+    const summary = await engine.runCycle();
+
+    expect(summary.quotesAttempted).toBe(10);
+    expect(summary.quotesPlaced).toBe(0);
+    expect(summary.quotesFailed).toBe(10);
+    expect(summary.quoteFailureMessages).toEqual([
+      "Invalid or empty session ID. Please create or refresh your session.",
+    ]);
+  });
+
   it("does not re-place quotes that are still within their minimum lifetime", async () => {
     const engine = new MarketEngine(adapter, testConfig(), tempPaths());
     await engine.start();

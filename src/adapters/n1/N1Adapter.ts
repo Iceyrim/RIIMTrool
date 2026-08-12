@@ -37,6 +37,30 @@ export interface N1AdapterConfig {
   markets: ConfiguredMarket[];
 }
 
+/** How far ahead of a session's tracked expiry ensureSession() proactively renews it. The SDK's
+ * own default session TTL is 30 days (SESSION_TTL), so this margin is deliberately generous
+ * relative to it — renewal is cheap (one signed action) and checked every cycle via
+ * refreshAccountState(), so there is no cost to erring on the early side. */
+const SESSION_REFRESH_MARGIN_SEC = 3600n;
+
+/** Walks an Error's `.cause` chain (bounded depth) and joins every message into one string, so a
+ * doubly-wrapped SDK error (e.g. nord-ts's own `NordError("Failed to place order", { cause })`)
+ * surfaces its real underlying reason instead of just the outer wrapper's generic message. */
+function describeError(err: unknown, maxDepth = 5): string {
+  const parts: string[] = [];
+  let current: unknown = err;
+  for (let depth = 0; depth < maxDepth && current !== undefined; depth++) {
+    if (current instanceof Error) {
+      parts.push(current.message);
+      current = current.cause;
+    } else {
+      parts.push(String(current));
+      break;
+    }
+  }
+  return parts.join(": caused by: ");
+}
+
 /**
  * N1 (Nord) implementation of ExchangeAdapter. This is the ONLY file (along with mappers.ts and
  * marketRegistry.ts in this directory) permitted to import `@n1xyz/nord-ts` — SPEC.md Section 1b.
@@ -54,6 +78,10 @@ export class N1Adapter implements ExchangeAdapter {
   private nord?: Nord;
   private user?: NordUser;
   private accountId?: number;
+  /** Server-clock (nord.getTimestamp()) unix-seconds expiry of the currently established
+   * session, or undefined if no session has ever been established yet. Tracked so ensureSession()
+   * can decide when to proactively renew without re-deriving it from the SDK each time. */
+  private sessionExpiresAtSec?: bigint;
 
   constructor(private readonly config: N1AdapterConfig) {
     this.registry = new MarketRegistry(config.markets);
@@ -63,6 +91,21 @@ export class N1Adapter implements ExchangeAdapter {
     if (!this.nord || !this.user || this.accountId === undefined) {
       throw new ExchangeAdapterError("N1Adapter.connect() must be called before use");
     }
+  }
+
+  /** Establishes a session on first call (SPEC.md line 223: one-time signature at connect()) and
+   * proactively renews it once the tracked expiry comes within SESSION_REFRESH_MARGIN_SEC —
+   * called every cycle via refreshAccountState() and defensively again in placeOrder() itself, so
+   * a long-running live process never silently starts failing every placement again just because
+   * its session aged out mid-run. Every signed session action (placeOrder, cancelOrder, ...)
+   * requires this to have run first — the SDK's own checkSessionValidity() throws otherwise. */
+  private async ensureSession(): Promise<void> {
+    const now = await this.nord!.getTimestamp();
+    if (this.sessionExpiresAtSec !== undefined && now + SESSION_REFRESH_MARGIN_SEC < this.sessionExpiresAtSec) {
+      return;
+    }
+    const result = await this.user!.refreshSession();
+    this.sessionExpiresAtSec = result.expiry;
   }
 
   async connect(): Promise<void> {
@@ -90,6 +133,11 @@ export class N1Adapter implements ExchangeAdapter {
     }
     this.accountId = accountId;
 
+    // Establishes the signed session real order placement needs — a failure here must abort
+    // startup, same as every other stage 4-7 failure in scripts/run-live.ts, never leave the
+    // process running with an adapter that can read state but can never place an order.
+    await this.ensureSession();
+
     await this.user.fetchInfo();
   }
 
@@ -115,6 +163,7 @@ export class N1Adapter implements ExchangeAdapter {
 
   async refreshAccountState(): Promise<void> {
     this.assertConnected();
+    await this.ensureSession();
     await this.user!.fetchInfo();
   }
 
@@ -170,6 +219,10 @@ export class N1Adapter implements ExchangeAdapter {
     }
 
     try {
+      // Defense in depth: refreshAccountState() already renews the session once per cycle, but
+      // placeOrder() re-checks here too so the money-critical path never depends on that having
+      // run first in the same cycle.
+      await this.ensureSession();
       const result = await this.user!.placeOrder({
         marketId,
         side: orderSideToN1Side(params.side) === "bid" ? Side.Bid : Side.Ask,
@@ -236,7 +289,10 @@ export class N1Adapter implements ExchangeAdapter {
       return {
         success: false,
         reason: "REJECTED",
-        message: err instanceof Error ? err.message : String(err),
+        // Flattens the .cause chain so a doubly-wrapped SDK error (e.g. nord-ts's own generic
+        // "Failed to place order" wrapping a specific "Invalid or empty session ID..." cause)
+        // surfaces the real underlying reason here, not just the outer wrapper's message.
+        message: describeError(err),
         raw: err,
       };
     }

@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OrderLifecycle } from "../../src/engine/OrderLifecycle.js";
 import { OrderRegistry } from "../../src/engine/OrderRegistry.js";
 import { TradeLog, type TradeLogEntry } from "../../src/engine/TradeLog.js";
@@ -81,6 +81,42 @@ describe("OrderLifecycle", () => {
       });
       expect(result.success).toBe(false);
       expect(registry.list()).toHaveLength(0);
+    });
+
+    it("logs a REJECTED placement to console.error — not tracked locally is not the same as invisible (regression: this was previously a fully silent drop)", async () => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        adapter.placeOrderResults.push({
+          success: false,
+          reason: "REJECTED",
+          message: "insufficient margin",
+        });
+        await lifecycle.placeQuote({ side: "buy", type: "postOnly", size: 0.01, price: 60000 });
+
+        expect(errorSpy).toHaveBeenCalledTimes(1);
+        expect(errorSpy.mock.calls[0]?.[0]).toContain("insufficient margin");
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it("logs an UNRESOLVED_NOT_CONFIRMED placement to console.warn", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        adapter.placeOrderResults.push({
+          success: false,
+          reason: "UNRESOLVED_NOT_CONFIRMED",
+          message: "N1 placeOrder() resolved without an orderId or any fills",
+        });
+        await lifecycle.placeQuote({ side: "buy", type: "postOnly", size: 0.01, price: 60000 });
+
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(warnSpy.mock.calls[0]?.[0]).toContain(
+          "N1 placeOrder() resolved without an orderId or any fills",
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
   });
 
