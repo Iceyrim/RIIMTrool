@@ -34,6 +34,10 @@ describe("buildSyntheticDashboardStatus", () => {
     ]);
     expect(status.markets.map(({ operations }) => operations?.exitState)).toEqual(["held", "placed", "blocked", "no_position"]);
     expect(status.markets.some(({ operations }) => (operations?.riskSkippedLevels.openOrderCapacity ?? 0) > 0)).toBe(true);
+    expect(status.accounts.some(({ sessionRealizedPnlUsd }) => sessionRealizedPnlUsd < 0)).toBe(true);
+    expect(status.accounts.some(({ volumes }) => volumes["30d"].available && volumes["30d"].value.stale)).toBe(true);
+    expect(status.markets.flatMap(({ openOrders }) => openOrders).map(({ state }) => state)).toEqual(expect.arrayContaining(["RESTING", "PENDING_CANCEL", "UNKNOWN"]));
+    expect(status.markets.flatMap(({ openOrders }) => openOrders).some(({ state }) => state === "CANCELLED" || state === "FILLED")).toBe(false);
     expect(status.unavailableTelemetry.join(" ")).toContain("Synthetic preview only");
   });
 

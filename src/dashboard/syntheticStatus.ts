@@ -63,17 +63,21 @@ export function buildSyntheticDashboardStatus(): DashboardStatus {
   const accounts: DashboardStatus["accounts"] = [
     { exchangeId: "synthetic-n1-live", venue: "N1", mode: "LIVE", label: "N1 LIVE (SYNTHETIC)", scale: 1 },
     { exchangeId: "synthetic-risex-paper", venue: "RISEx", mode: "PAPER", label: "RISEx PAPER (SYNTHETIC)", scale: 0.6 },
-  ].map(({ exchangeId, venue, mode, label, scale }) => ({
+  ].map(({ exchangeId, venue, mode, label, scale }, accountIndex) => ({
     exchangeId, venue: venue as "N1" | "RISEx", mode: mode as "LIVE" | "PAPER", label,
     balances: { available: true, value: [{ token: "USD", amount: 10_000 * scale }, { token: "USDC", amount: 2_500 * scale }] },
     margin: { available: true, value: { accountValue: 12_500 * scale, maintenanceMarginFraction: 0.08, initialMarginFraction: 0.16, isAtBankruptcyRisk: false } },
-    healthy: true,
-    healthDetails: ["Synthetic preview telemetry is healthy"],
+    healthy: accountIndex === 0,
+    healthDetails: accountIndex === 0 ? ["Synthetic preview telemetry is healthy"] : ["Synthetic preview warning state"],
     uptimeMs: { available: true, value: 6 * HOUR },
-    sessionRealizedPnlUsd: scale * 2,
+    sessionRealizedPnlUsd: accountIndex === 0 ? scale * 2 : -scale * 2,
     sessionLossCapUsd: 6,
     pnlAvailable: true,
-    volumes: volumes(exchangeId, scale),
+    volumes: accountIndex === 0 ? volumes(exchangeId, scale) : {
+      ...volumes(exchangeId, scale),
+      "30d": { available: true, value: { ...volumes(exchangeId, scale)["30d"].value!, stale: true, error: "Synthetic preview stale-cache warning" } },
+      allTime: { available: true, value: { available: false, value: null, stale: false, sourceNeeded: "Synthetic preview: authoritative all-time paper history is unavailable." } },
+    },
     history: history(exchangeId, scale),
     alertHealth: { available: true, value: { enabled: true, attempted: 8, delivered: 7, failed: 1, pending: 0, lastAttemptAt: SYNTHETIC_NOW - 30_000, lastSuccessAt: SYNTHETIC_NOW - 60_000, lastFailureAt: SYNTHETIC_NOW - HOUR, lastErrorCategory: "network" } },
   }));
@@ -101,7 +105,24 @@ export function buildSyntheticDashboardStatus(): DashboardStatus {
         anomalies: anomaly ? [{ kind: "LOCAL_ORDER_NOT_ON_EXCHANGE", exchangeOrderId: "synthetic-missing-order", detail: "Synthetic preview anomaly" }] : [],
       },
       position: exitState === "no_position" ? null : { baseSize: market === "BTCUSD" ? 0.01 : -0.2, markPrice: market === "BTCUSD" ? 42_000 : 2_250, unrealizedPnl: offset / 10, notionalUsd: 420 + offset },
-      openOrders: [],
+      openOrders: [
+        {
+          clientOrderId: `synthetic-${exchangeId}-${market}-resting`, exchangeOrderId: `resting-${offset}`,
+          market, side: "buy" as const, type: "postOnly" as const, price: market === "BTCUSD" ? 41_980 : 2_245,
+          size: market === "BTCUSD" ? 0.002 : 0.04, filledSize: 0, isReduceOnly: false,
+          state: "RESTING" as const, placedAt: SYNTHETIC_NOW - offset * 60_000, updatedAt: SYNTHETIC_NOW - offset * 60_000,
+        },
+        ...(offset === 5 ? [{
+          clientOrderId: "synthetic-pending", exchangeOrderId: "pending-1", market, side: "sell" as const,
+          type: "postOnly" as const, price: 42_040, size: 0.002, filledSize: 0, isReduceOnly: true,
+          state: "PENDING_CANCEL" as const, placedAt: SYNTHETIC_NOW - 12 * 60_000, updatedAt: SYNTHETIC_NOW - 30_000,
+        }, {
+          clientOrderId: "synthetic-unknown", exchangeOrderId: null, market, side: "buy" as const,
+          type: "postOnly" as const, price: 41_950, size: 0.001, filledSize: 0, isReduceOnly: false,
+          state: "UNKNOWN" as const, placedAt: SYNTHETIC_NOW - 4 * 60_000, updatedAt: SYNTHETIC_NOW - 20_000,
+          note: "Synthetic preview: confirmation unavailable",
+        }] : []),
+      ],
       fills: { available: true, value: { label: "current session + durable history", entries: [fill(exchangeId, market, offset), fill(exchangeId, market, offset + 120)] } },
       operations: {
         positionBaseSize: exitState === "no_position" ? 0 : market === "BTCUSD" ? 0.01 : -0.2,

@@ -133,6 +133,20 @@ describe("buildDashboardStatus", () => {
     expect(status.markets[0]?.openOrders.length).toBeGreaterThan(0);
   });
 
+  it("excludes terminal registry entries from open-order telemetry", async () => {
+    const market = await buildMarket("BTCUSD", adapter);
+    const base = { market: "BTCUSD", side: "buy" as const, type: "postOnly" as const, price: 60_000, size: 0.001, filledSize: 0, isReduceOnly: false, placedAt: 1, updatedAt: 2 };
+    market.engine.registry.upsert({ ...base, clientOrderId: "resting", exchangeOrderId: "r", state: "RESTING" });
+    market.engine.registry.upsert({ ...base, clientOrderId: "pending", exchangeOrderId: "p", state: "PENDING_CANCEL" });
+    market.engine.registry.upsert({ ...base, clientOrderId: "unknown", exchangeOrderId: null, state: "UNKNOWN" });
+    market.engine.registry.upsert({ ...base, clientOrderId: "filled", exchangeOrderId: "f", state: "FILLED" });
+    market.engine.registry.upsert({ ...base, clientOrderId: "cancelled", exchangeOrderId: "c", state: "CANCELLED" });
+
+    expect(buildDashboardStatus([market]).markets[0]?.openOrders.map(({ state }) => state)).toEqual([
+      "RESTING", "PENDING_CANCEL", "UNKNOWN",
+    ]);
+  });
+
   it("marks fill and volume windows unavailable with their exact authoritative sources", async () => {
     const market = await buildMarket("BTCUSD", adapter);
     const status = buildDashboardStatus([market]);

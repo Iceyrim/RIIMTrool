@@ -142,7 +142,9 @@ function buildMarketStatus({ market, engine, adapter, telemetry }: DashboardMark
           notionalUsd: Math.abs(rawPosition.baseSize) * rawPosition.markPrice,
         }
       : null,
-    openOrders: engine.registry.list(),
+    openOrders: engine.registry.list().filter(({ state }) =>
+      state === "RESTING" || state === "PENDING_CANCEL" || state === "UNKNOWN"
+    ),
     fills: telemetry ? { available: true, value: { label: "current session + durable history", entries: telemetry.snapshot().fills.filter((fill) => fill.market === market) } } : unavailable(
       `An in-memory, deduplicated TradeLog fill snapshot for ${market}; placements and cancellations are not volume/fill sources.`,
     ),

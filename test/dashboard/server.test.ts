@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -12,6 +12,27 @@ import type { DashboardMarket } from "../../src/dashboard/DashboardService.js";
 import { MarketEngine } from "../../src/engine/MarketEngine.js";
 import type { EngineMarketConfig } from "../../src/engine/types.js";
 import { FakeExchangeAdapter } from "../engine/fakeAdapter.js";
+
+describe("dashboard static safety", () => {
+  const source = readFileSync(new URL("../../src/dashboard/dashboard.html", import.meta.url), "utf8");
+
+  it("uses only the approved cached venue filters and no unsafe HTML interpolation", () => {
+    expect(source.match(/<option value="(?:n1-live|risex-paper)">/g)).toHaveLength(2);
+    expect(source).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
+  });
+
+  it("implements locked controls as accessible disabled elements", () => {
+    expect(source).toContain("disabled aria-describedby=\"bot-lock-help\"");
+    expect(source).toContain("button.disabled=true");
+    expect(source).toContain("dashboard is read only");
+  });
+
+  it("renders distinct pending and unknown order warning states", () => {
+    expect(source).toContain("state-pending");
+    expect(source).toContain("state-unknown");
+    expect(source).toContain('x.state!=="FILLED"&&x.state!=="CANCELLED"');
+  });
+});
 
 function testConfig(symbol: string): EngineMarketConfig {
   return {
