@@ -1,0 +1,21 @@
+[Unit]
+Description=RIIMTrool read-only dashboard sidecar
+After=local-fs.target
+
+[Service]
+Type=simple
+User=riim-dashboard
+Group=riim-dashboard
+WorkingDirectory=/opt/riim-dashboard
+ExecStart=/usr/bin/node /opt/riim-dashboard/run-dashboard-sidecar.js
+Restart=on-failure
+RestartSec=5s
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/riim-dashboard/state/dashboard/snapshots
+
+[Install]
+WantedBy=multi-user.target

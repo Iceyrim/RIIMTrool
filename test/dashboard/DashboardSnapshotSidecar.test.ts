@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -7,6 +7,7 @@ import {
   aggregateDashboardSnapshots,
   DashboardSnapshotPublisher,
   SNAPSHOT_MAX_FILES_PER_EXCHANGE,
+  SNAPSHOT_FILE_MODE,
   type DashboardSessionSnapshot,
 } from "../../src/dashboard/DashboardSnapshotSidecar.js";
 
@@ -29,6 +30,7 @@ describe("dashboard snapshot sidecar", () => {
     const files = readdirSync(directory);
     expect(files).toEqual(["n1-paper--one.json"]);
     expect(JSON.parse(readFileSync(join(directory, files[0]!), "utf8"))).toMatchObject({ lifecycle: "stopped", sessionId: "one" });
+    expect(statSync(join(directory, files[0]!)).mode & 0o777).toBe(SNAPSHOT_FILE_MODE);
   });
 
   it("allows a newer running session to supersede a stopped predecessor", () => {

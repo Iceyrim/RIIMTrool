@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -30,6 +31,8 @@ export interface DashboardSidecarStatus extends DashboardStatus {
 export const SNAPSHOT_PUBLISH_INTERVAL_MS = 2_000;
 export const SNAPSHOT_FRESH_MS = 10_000;
 export const SNAPSHOT_MAX_FILES_PER_EXCHANGE = 20;
+export const SNAPSHOT_FILE_MODE = 0o640;
+export const SNAPSHOT_DIRECTORY_MODE = 0o2770;
 
 function safePart(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -77,7 +80,7 @@ export class DashboardSnapshotPublisher {
 
   publish(lifecycle: SnapshotLifecycle, now = Date.now()): void {
     try {
-      mkdirSync(this.directory, { recursive: true });
+      mkdirSync(this.directory, { recursive: true, mode: SNAPSHOT_DIRECTORY_MODE });
       const snapshot: DashboardSessionSnapshot = {
         version: 1,
         sessionId: this.sessionId,
@@ -88,7 +91,8 @@ export class DashboardSnapshotPublisher {
         status: this.readStatus(),
       };
       const temporary = `${this.filePath}.${process.pid}.tmp`;
-      writeFileSync(temporary, JSON.stringify(snapshot), { encoding: "utf8", mode: 0o600 });
+      writeFileSync(temporary, JSON.stringify(snapshot), { encoding: "utf8", mode: SNAPSHOT_FILE_MODE });
+      chmodSync(temporary, SNAPSHOT_FILE_MODE);
       renameSync(temporary, this.filePath);
       this.prune();
     } catch (error) {
