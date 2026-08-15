@@ -66,6 +66,10 @@ describe("buildDashboardStatus", () => {
     expect(status.totalExposureUsd).toBe(0);
     expect(status.accountSessionRealizedPnlUsd).toBe(0);
     expect(status.accountSessionLossCapUsd).toBe(15);
+    expect(status.accounts).toHaveLength(1);
+    expect(status.accounts[0]?.balances).toEqual({ available: true, value: [] });
+    expect(status.accounts[0]?.margin).toEqual({ available: true, value: adapter.marginStatus });
+    expect(status.accounts[0]?.uptimeMs.available).toBe(false);
     expect(status.markets[0]).not.toHaveProperty("sessionRealizedPnlUsd");
   });
 
@@ -129,11 +133,23 @@ describe("buildDashboardStatus", () => {
     expect(status.markets[0]?.openOrders.length).toBeGreaterThan(0);
   });
 
-  it("always includes the not-yet-implemented TODO items", async () => {
+  it("marks fill and volume windows unavailable with their exact authoritative sources", async () => {
     const market = await buildMarket("BTCUSD", adapter);
     const status = buildDashboardStatus([market]);
-    expect(status.todo.length).toBeGreaterThan(0);
-    expect(status.todo.some((t) => t.includes("volume"))).toBe(true);
+    expect(status.markets[0]?.fills.available).toBe(false);
+    expect(status.markets[0]?.fills.sourceNeeded).toContain("TradeLog fill snapshot");
+    expect(status.accounts[0]?.volumes["24h"].sourceNeeded).toContain("getAccountVolume");
+    expect(status.accounts[0]?.volumes.allTime.sourceNeeded).toContain("confirmed fills only");
+  });
+
+  it("surfaces quote refresh, risk skips, and reduction/exit status from the last cycle", async () => {
+    const market = await buildMarket("BTCUSD", adapter);
+    await market.engine.runCycle();
+    const operations = buildDashboardStatus([market]).markets[0]?.operations;
+    expect(operations).toBeDefined();
+    expect(operations?.riskSkippedLevels).toBeDefined();
+    expect(operations?.reduceOnlyAction).toBeDefined();
+    expect(operations?.exitState).toBeDefined();
   });
 
   it("stamps generatedAt on every call, not once at construction", async () => {

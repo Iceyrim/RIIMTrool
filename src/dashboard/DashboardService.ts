@@ -1,20 +1,30 @@
-import type { ExchangeAdapter } from "../adapters/ExchangeAdapter.js";
+import type {
+  ExchangeAdapter,
+  NormalizedBalance,
+  NormalizedMarginStatus,
+} from "../adapters/ExchangeAdapter.js";
 import type { ReconciliationAnomaly } from "../engine/Reconciliation.js";
 import type { CycleSummary, MarketEngine } from "../engine/MarketEngine.js";
 import type { LocalOrder } from "../engine/types.js";
 
-/**
- * One running market's engine + the adapter it trades through. Deliberately pairs them (rather
- * than reading the adapter off the engine) because MarketEngine keeps its adapter private, and in
- * both paper and live modes one adapter instance is shared across every market on the account
- * (SPEC.md Section 4.3) — the caller already has this pairing from wherever it constructed the
- * engines (see scripts/run-paper.ts), so no new engine API is needed to expose it here.
- */
 export interface DashboardMarket {
   market: string;
   engine: MarketEngine;
   adapter: ExchangeAdapter;
 }
+
+export interface UnavailableMetric {
+  available: false;
+  value: null;
+  sourceNeeded: string;
+}
+
+export interface AvailableMetric<T> {
+  available: true;
+  value: T;
+}
+
+export type DashboardMetric<T> = AvailableMetric<T> | UnavailableMetric;
 
 export interface MarketReconciliationStatus {
   healthy: boolean;
@@ -28,96 +38,205 @@ export interface MarketPositionStatus {
   baseSize: number;
   markPrice: number;
   unrealizedPnl: number;
-  /** |baseSize| * markPrice — this market's contribution to totalExposureUsd below. */
   notionalUsd: number;
 }
 
 export interface MarketStatus {
   market: string;
+  exchangeId: string;
   reconciliation: MarketReconciliationStatus;
   position: MarketPositionStatus | null;
   openOrders: LocalOrder[];
-  operations?: Pick<CycleSummary, "positionBaseSize" | "inventoryReductionThresholdBase" | "reductionMode" | "reductionModeCancellation" | "exitState" | "exitDetails" | "quoteRefreshReason" | "quotesCancelled" | "pnlOutageCancellation">;
+  fills: UnavailableMetric;
+  operations?: Pick<CycleSummary,
+    | "positionBaseSize"
+    | "inventoryReductionThresholdBase"
+    | "reductionMode"
+    | "reductionModeCancellation"
+    | "reduceOnlyAction"
+    | "exitState"
+    | "exitDetails"
+    | "quoteRefreshReason"
+    | "quotesCancelled"
+    | "riskSkippedLevels"
+    | "riskSkipMessages"
+    | "blockedReason"
+    | "pnlOutageCancellation"
+  >;
+}
+
+export interface DashboardAccountStatus {
+  exchangeId: string;
+  venue: "N1" | "RISEx" | "Unknown";
+  mode: "LIVE" | "PAPER" | "UNKNOWN";
+  label: string;
+  balances: DashboardMetric<NormalizedBalance[]>;
+  margin: DashboardMetric<NormalizedMarginStatus>;
+  healthy: boolean;
+  healthDetails: string[];
+  uptimeMs: UnavailableMetric;
+  sessionRealizedPnlUsd: number;
+  sessionLossCapUsd: number;
+  pnlAvailable: boolean;
+  volumes: Record<"24h" | "7d" | "30d" | "allTime", UnavailableMetric>;
 }
 
 export interface DashboardStatus {
   generatedAt: number;
-  /**
-   * SPEC.md Section 8: the old aggregator computed this from a per-session trade counter that
-   * reset on every restart and could silently show $0.00 despite real open positions. This sums
-   * |position.baseSize * position.markPrice| straight from each adapter's live NormalizedPosition
-   * snapshot, recomputed on every call — there is no accumulator or counter anywhere in this
-   * value, so a restart (or a session PnL reset) cannot desync it from reality.
-   */
   totalExposureUsd: number;
   accountSessionRealizedPnlUsd: number;
   accountSessionLossCapUsd: number;
   accountPnlAvailable: boolean;
+  accounts: DashboardAccountStatus[];
   markets: MarketStatus[];
-  /** Section 8 also calls for real N1 volume (Nord.getAccountVolume()) and live control actions
-   * (pause/shutdown, per-market and all-markets). Both are live-account features with nothing to
-   * validate against yet (this repo currently runs paper-mode only, no live .env configured) — so
-   * they're deliberately left out of this status payload rather than surfaced with placeholder or
-   * simulated numbers. TODO: once a live account exists, add a volume section here backed by
-   * adapter.getAccountVolume() (already implemented for live N1 in N1Adapter), and add control
-   * actions once MarketEngine/PaperRunner grow a pause/stop primitive to call into.
-   */
-  todo: readonly string[];
+  unavailableTelemetry: string[];
 }
 
-const TODOS = [
-  "Real N1 volume data (Nord.getAccountVolume()) — pending a live account to validate against.",
-  "Control actions (pause/shutdown, per-market and all-markets) — pending a live account and an " +
-    "engine-level pause/stop primitive to call into.",
-] as const;
+function unavailable(sourceNeeded: string): UnavailableMetric {
+  return { available: false, value: null, sourceNeeded };
+}
+
+function cachedMetric<T>(read: () => T, source: string): DashboardMetric<T> {
+  try {
+    return { available: true, value: read() };
+  } catch (error) {
+    return unavailable(`${source}; cached read failed: ${String(error)}`);
+  }
+}
+
+function venueMode(exchangeId: string): Pick<DashboardAccountStatus, "venue" | "mode" | "label"> {
+  if (exchangeId === "n1") return { venue: "N1", mode: "LIVE", label: "N1 LIVE" };
+  if (exchangeId === "n1-paper") return { venue: "N1", mode: "PAPER", label: "N1 PAPER" };
+  if (exchangeId === "risex") return { venue: "RISEx", mode: "LIVE", label: "RISEx LIVE" };
+  if (exchangeId === "risex-paper") {
+    return { venue: "RISEx", mode: "PAPER", label: "RISEx PAPER" };
+  }
+  return { venue: "Unknown", mode: "UNKNOWN", label: exchangeId };
+}
 
 function buildMarketStatus({ market, engine, adapter }: DashboardMarket): MarketStatus {
-  const reconciliationResult = engine.reconciliation.getLastResult();
-  const reconciliation: MarketReconciliationStatus = {
-    healthy: reconciliationResult?.healthy ?? false,
-    healthyStreak: engine.reconciliation.getHealthyStreak(),
-    degradedStreak: engine.reconciliation.getDegradedStreak(),
-    checkedAt: reconciliationResult?.checkedAt,
-    anomalies: reconciliationResult?.anomalies ?? [],
-  };
-
+  const result = engine.reconciliation.getLastResult();
   const rawPosition = adapter.getPositions(market)[0];
-  const position: MarketPositionStatus | null = rawPosition
-    ? {
-        baseSize: rawPosition.baseSize,
-        markPrice: rawPosition.markPrice,
-        unrealizedPnl: rawPosition.unrealizedPnl,
-        notionalUsd: Math.abs(rawPosition.baseSize) * rawPosition.markPrice,
-      }
-    : null;
-
   return {
     market,
-    reconciliation,
-    position,
+    exchangeId: adapter.exchangeId,
+    reconciliation: {
+      healthy: result?.healthy ?? false,
+      healthyStreak: engine.reconciliation.getHealthyStreak(),
+      degradedStreak: engine.reconciliation.getDegradedStreak(),
+      checkedAt: result?.checkedAt,
+      anomalies: result?.anomalies ?? [],
+    },
+    position: rawPosition
+      ? {
+          baseSize: rawPosition.baseSize,
+          markPrice: rawPosition.markPrice,
+          unrealizedPnl: rawPosition.unrealizedPnl,
+          notionalUsd: Math.abs(rawPosition.baseSize) * rawPosition.markPrice,
+        }
+      : null,
     openOrders: engine.registry.list(),
+    fills: unavailable(
+      `An in-memory, deduplicated TradeLog fill snapshot for ${market}; placements and cancellations are not volume/fill sources.`,
+    ),
     operations: engine.getLastCycleSummary(),
   };
 }
 
-/** Builds the full multi-market status snapshot. Reads only in-memory state each market's engine
- * cycle already populated (registry, last reconciliation result, adapter's cached account
- * snapshot) — never issues a new exchange call itself, so calling this is always safe/free to
- * poll from an HTTP handler. */
-export function buildDashboardStatus(markets: readonly DashboardMarket[]): DashboardStatus {
-  const marketStatuses = markets.map(buildMarketStatus);
-  const totalExposureUsd = marketStatuses.reduce(
-    (sum, m) => sum + (m.position?.notionalUsd ?? 0),
-    0,
+function buildAccountStatus(
+  exchangeId: string,
+  accountMarkets: readonly DashboardMarket[],
+  marketStatuses: readonly MarketStatus[],
+): DashboardAccountStatus {
+  const adapter = accountMarkets[0]!.adapter;
+  const engine = accountMarkets[0]!.engine;
+  const balances = cachedMetric(() => adapter.getBalances(), "adapter.getBalances() cached snapshot");
+  const margin = cachedMetric(
+    () => adapter.getMarginStatus(),
+    "adapter.getMarginStatus() cached snapshot",
   );
+  const relevantMarkets = marketStatuses.filter((market) => market.exchangeId === exchangeId);
+  const healthDetails = relevantMarkets
+    .filter((market) => !market.reconciliation.healthy)
+    .map((market) => `${market.market} reconciliation degraded`);
+  if (margin.available && margin.value.isAtBankruptcyRisk) healthDetails.push("Bankruptcy risk");
+  if (!margin.available) healthDetails.push("Margin unavailable");
+  const volumeSource = (window: string) =>
+    unavailable(
+      `Cached account-trade volume from adapter.getAccountVolume({ since, until }) for the ${window} window, aggregated from confirmed fills only.`,
+    );
+  const risk = engine.getAccountRiskState();
+
+  return {
+    exchangeId,
+    ...venueMode(exchangeId),
+    balances,
+    margin,
+    healthy: healthDetails.length === 0,
+    healthDetails,
+    uptimeMs: unavailable(
+      "The owning runner's monotonic startedAt timestamp supplied to DashboardService.",
+    ),
+    sessionRealizedPnlUsd: engine.getSessionRealizedPnlUsd(),
+    sessionLossCapUsd: risk.sessionLossCapUsd,
+    pnlAvailable: risk.pnlAvailable,
+    volumes: {
+      "24h": volumeSource("trailing 24h"),
+      "7d": volumeSource("trailing 7d"),
+      "30d": volumeSource("trailing 30d"),
+      allTime: volumeSource("account lifetime"),
+    },
+  };
+}
+
+/** Builds a status snapshot using cached/in-memory telemetry only. Every adapter read is
+ * synchronous and no exchange method capable of I/O is called. */
+export function buildDashboardStatus(markets: readonly DashboardMarket[]): DashboardStatus {
+  const marketStatuses = markets.map((market) => {
+    try {
+      return buildMarketStatus(market);
+    } catch {
+      return {
+        market: market.market,
+        exchangeId: market.adapter.exchangeId,
+        reconciliation: {
+          healthy: false,
+          healthyStreak: 0,
+          degradedStreak: 0,
+          anomalies: [],
+        },
+        position: null,
+        openOrders: [],
+        fills: unavailable(`An in-memory, deduplicated TradeLog fill snapshot for ${market.market}.`),
+      } satisfies MarketStatus;
+    }
+  });
+  const groups = new Map<string, DashboardMarket[]>();
+  for (const market of markets) {
+    const group = groups.get(market.adapter.exchangeId) ?? [];
+    group.push(market);
+    groups.set(market.adapter.exchangeId, group);
+  }
+  const accounts = [...groups].map(([exchangeId, accountMarkets]) =>
+    buildAccountStatus(exchangeId, accountMarkets, marketStatuses),
+  );
+  const first = accounts[0];
 
   return {
     generatedAt: Date.now(),
-    totalExposureUsd,
-    accountSessionRealizedPnlUsd: markets[0]?.engine.getSessionRealizedPnlUsd() ?? 0,
-    accountSessionLossCapUsd: markets[0]?.engine.getAccountRiskState().sessionLossCapUsd ?? 0,
-    accountPnlAvailable: markets[0]?.engine.getAccountRiskState().pnlAvailable ?? false,
+    totalExposureUsd: marketStatuses.reduce(
+      (sum, market) => sum + (market.position?.notionalUsd ?? 0),
+      0,
+    ),
+    accountSessionRealizedPnlUsd: first?.sessionRealizedPnlUsd ?? 0,
+    accountSessionLossCapUsd: first?.sessionLossCapUsd ?? 0,
+    accountPnlAvailable: first?.pnlAvailable ?? false,
+    accounts,
     markets: marketStatuses,
-    todo: TODOS,
+    unavailableTelemetry: [
+      "Uptime: owning runner monotonic startedAt timestamp.",
+      "Fills: in-memory deduplicated TradeLog fill snapshot.",
+      "24h/7d/30d/all-time volume: cached adapter.getAccountVolume results from confirmed fills.",
+    ],
   };
 }

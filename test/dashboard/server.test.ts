@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDashboardServer } from "../../src/dashboard/server.js";
 import type { DashboardMarket } from "../../src/dashboard/DashboardService.js";
 import { MarketEngine } from "../../src/engine/MarketEngine.js";
@@ -44,6 +44,7 @@ describe("createDashboardServer", () => {
   let adapter: FakeExchangeAdapter;
   let server: Server;
   let baseUrl: string;
+  let markets: DashboardMarket[];
 
   beforeEach(async () => {
     adapter = new FakeExchangeAdapter();
@@ -51,7 +52,7 @@ describe("createDashboardServer", () => {
 
     const engine = new MarketEngine(adapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
     await engine.start();
-    const markets: DashboardMarket[] = [{ market: "BTCUSD", engine, adapter }];
+    markets = [{ market: "BTCUSD", engine, adapter }];
 
     server = createDashboardServer(markets, { port: 0 });
     await new Promise<void>((resolve) => server.once("listening", resolve));
@@ -66,6 +67,20 @@ describe("createDashboardServer", () => {
   it("only binds to 127.0.0.1 by default", () => {
     const { address } = server.address() as AddressInfo;
     expect(address).toBe("127.0.0.1");
+  });
+
+  it("contains status-building failures instead of throwing into the owning process", async () => {
+    vi.spyOn(markets[0]!.engine, "getSessionRealizedPnlUsd").mockImplementation(() => {
+      throw new Error("telemetry failure");
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const res = await fetch(`${baseUrl}/api/status`);
+
+    expect(res.status).toBe(503);
+    await expect(res.json()).resolves.toEqual({ error: "Dashboard unavailable" });
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("telemetry failure"));
+    error.mockRestore();
   });
 
   it("serves the dashboard HTML at /", async () => {

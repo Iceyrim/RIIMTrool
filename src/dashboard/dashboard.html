@@ -2,240 +2,72 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>RIIMTrool — Status</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>RIIMTrool Operator</title>
     <style>
-      :root {
-        color-scheme: dark;
-        --bg: #0b0e14;
-        --panel: #131722;
-        --border: #232838;
-        --text: #e6e9f0;
-        --muted: #8b92a5;
-        --green: #3ddc84;
-        --red: #ff5c5c;
-        --yellow: #ffb84d;
-      }
-      * {
-        box-sizing: border-box;
-      }
-      body {
-        margin: 0;
-        padding: 24px;
-        background: var(--bg);
-        color: var(--text);
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-      }
-      h1 {
-        font-size: 20px;
-        margin: 0 0 4px;
-      }
-      .subhead {
-        color: var(--muted);
-        font-size: 13px;
-        margin-bottom: 20px;
-      }
-      .summary {
-        display: flex;
-        gap: 16px;
-        margin-bottom: 24px;
-        flex-wrap: wrap;
-      }
-      .stat {
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 12px 16px;
-        min-width: 160px;
-      }
-      .stat .label {
-        font-size: 11px;
-        color: var(--muted);
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-      }
-      .stat .value {
-        font-size: 22px;
-        font-weight: 600;
-        margin-top: 4px;
-      }
-      table {
-        width: 100%;
-        border-collapse: collapse;
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        overflow: hidden;
-        margin-bottom: 20px;
-      }
-      th,
-      td {
-        text-align: left;
-        padding: 10px 14px;
-        border-bottom: 1px solid var(--border);
-        font-size: 13px;
-        white-space: nowrap;
-      }
-      th {
-        color: var(--muted);
-        font-weight: 500;
-        text-transform: uppercase;
-        font-size: 11px;
-        letter-spacing: 0.04em;
-      }
-      tr:last-child td {
-        border-bottom: none;
-      }
-      .pill {
-        display: inline-block;
-        padding: 2px 8px;
-        border-radius: 999px;
-        font-size: 12px;
-        font-weight: 600;
-      }
-      .pill.healthy {
-        background: rgba(61, 220, 132, 0.15);
-        color: var(--green);
-      }
-      .pill.degraded {
-        background: rgba(255, 92, 92, 0.15);
-        color: var(--red);
-      }
-      .pnl-pos {
-        color: var(--green);
-      }
-      .pnl-neg {
-        color: var(--red);
-      }
-      .anomalies {
-        color: var(--yellow);
-        font-size: 12px;
-      }
-      .todo {
-        color: var(--muted);
-        font-size: 12px;
-        line-height: 1.6;
-      }
-      #error {
-        display: none;
-        background: rgba(255, 92, 92, 0.12);
-        border: 1px solid var(--red);
-        color: var(--red);
-        border-radius: 8px;
-        padding: 10px 14px;
-        margin-bottom: 20px;
-        font-size: 13px;
-      }
+      :root { color-scheme: dark; --bg:#080b10; --panel:#111720; --panel2:#151d28; --line:#263141; --text:#f2f5f8; --muted:#8e9bab; --cyan:#3ddbd9; --green:#53df91; --red:#ff6474; --amber:#ffbf5a; }
+      * { box-sizing:border-box } body { margin:0; background:radial-gradient(circle at 85% 0,#123042 0,transparent 32rem),var(--bg); color:var(--text); font:14px/1.45 Inter,ui-sans-serif,system-ui,sans-serif }
+      main { width:min(1500px,100%); margin:auto; padding:24px } header { display:flex; align-items:end; justify-content:space-between; gap:16px; margin-bottom:22px }
+      h1,h2,h3,p { margin:0 } h1 { font-size:clamp(22px,4vw,34px); letter-spacing:-.04em } h2 { font-size:18px } h3 { font-size:14px }
+      .eyebrow,.label { color:var(--muted); font-size:11px; font-weight:700; letter-spacing:.1em; text-transform:uppercase }
+      .updated { color:var(--muted); text-align:right } .grid { display:grid; gap:14px } .venues { grid-template-columns:repeat(2,minmax(0,1fr)); margin-bottom:14px }
+      .card { min-width:0; background:linear-gradient(145deg,rgba(21,29,40,.96),rgba(13,18,26,.96)); border:1px solid var(--line); border-radius:16px; box-shadow:0 18px 50px rgba(0,0,0,.18); overflow:hidden }
+      .card-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px 18px; border-bottom:1px solid var(--line) }
+      .body { padding:16px 18px } .stats { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px }
+      .stat { padding:12px; border:1px solid var(--line); background:rgba(255,255,255,.02); border-radius:11px } .value { display:block; margin-top:5px; font-size:19px; font-weight:750; letter-spacing:-.025em; overflow-wrap:anywhere }
+      .pill { display:inline-flex; align-items:center; gap:6px; padding:5px 9px; border-radius:999px; font-size:11px; font-weight:800; letter-spacing:.05em }
+      .pill::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor }.ok { color:var(--green); background:rgba(83,223,145,.12) }.bad { color:var(--red); background:rgba(255,100,116,.12) }.warn { color:var(--amber); background:rgba(255,191,90,.12) }
+      .unavailable { color:var(--muted); font-size:12px } .reason { display:block; margin-top:4px; color:#718094; font-size:11px; line-height:1.35 }
+      .markets { grid-template-columns:repeat(2,minmax(0,1fr)) } .market-title { display:flex; align-items:center; gap:10px }.market-title strong { font-size:18px }
+      .rows { display:grid; gap:0 }.row { display:grid; grid-template-columns:150px minmax(0,1fr); gap:16px; padding:10px 0; border-bottom:1px solid rgba(38,49,65,.7) }.row:last-child { border:0 }.row > :last-child { text-align:right; overflow-wrap:anywhere }
+      .orders { display:grid; gap:7px; margin-top:7px }.order { display:grid; grid-template-columns:45px 1fr 1fr auto; gap:8px; padding:8px 10px; background:#0b1017; border-radius:8px; font-size:12px }.buy { color:var(--green) }.sell { color:var(--red) }
+      .anomaly { margin-top:6px; padding:7px 9px; border-left:2px solid var(--amber); background:rgba(255,191,90,.07); color:var(--amber); text-align:left }
+      .footer-card { margin-top:14px }.sources { display:grid; gap:7px; padding-left:18px; color:var(--muted) }
+      #error { display:none; margin-bottom:14px; padding:12px 14px; border:1px solid var(--red); border-radius:10px; background:rgba(255,100,116,.1); color:var(--red) }
+      @media(max-width:1000px){ .stats { grid-template-columns:repeat(2,minmax(0,1fr)) }.markets { grid-template-columns:1fr } }
+      @media(max-width:680px){ main { padding:15px } header { align-items:start; flex-direction:column }.updated { text-align:left }.venues { grid-template-columns:1fr }.stats { grid-template-columns:1fr 1fr }.row { grid-template-columns:110px minmax(0,1fr) }.order { grid-template-columns:40px 1fr }.order span:nth-child(n+3){ text-align:right } }
     </style>
   </head>
   <body>
-    <h1>RIIMTrool — Multi-Market Status</h1>
-    <div class="subhead" id="updated">Loading…</div>
-    <div id="error"></div>
-
-    <div class="summary">
-      <div class="stat">
-        <div class="label">Total exposure (USD)</div>
-        <div class="value" id="totalExposure">—</div>
-      </div>
-      <div class="stat">
-        <div class="label">Markets</div>
-        <div class="value" id="marketCount">—</div>
-      </div>
-      <div class="stat">
-        <div class="label">Account session PnL / $ cap</div>
-        <div class="value" id="accountPnl">—</div>
-      </div>
-    </div>
-
-    <table>
-      <thead>
-        <tr>
-          <th>Market</th>
-          <th>Reconciliation</th>
-          <th>Streak</th>
-          <th>Exit state</th>
-          <th>Position</th>
-          <th>Notional (USD)</th>
-          <th>Open Orders</th>
-        </tr>
-      </thead>
-      <tbody id="marketRows"></tbody>
-    </table>
-
-    <div id="todoSection"></div>
-
+    <main>
+      <header><div><div class="eyebrow">Read-only telemetry</div><h1>Operator Dashboard</h1></div><div class="updated" id="updated">Loading authoritative state…</div></header>
+      <div id="error"></div><section class="grid venues" id="venues"></section><section class="grid markets" id="markets"></section>
+      <section class="card footer-card"><div class="card-head"><h2>Unavailable telemetry</h2><span class="pill warn">SOURCE REQUIRED</span></div><div class="body"><ul class="sources" id="sources"></ul></div></section>
+    </main>
     <script>
-      const POLL_INTERVAL_MS = 5000;
-
-      function fmtUsd(n) {
-        return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      "use strict";
+      const POLL_MS = 5000;
+      const $ = (id) => document.getElementById(id);
+      const node = (tag, className, text) => { const el=document.createElement(tag); if(className) el.className=className; if(text !== undefined) el.textContent=String(text); return el; };
+      const money = (value) => Number.isFinite(value) ? new Intl.NumberFormat(undefined,{style:"currency",currency:"USD"}).format(value) : "Unavailable";
+      const number = (value, digits=4) => Number.isFinite(value) ? Number(value).toLocaleString(undefined,{maximumFractionDigits:digits}) : "Unavailable";
+      function metric(parent,label,value,reason){ const box=node("div","stat"); box.append(node("span","label",label),node("strong","value",value)); if(reason) box.append(node("span","reason",reason)); parent.append(box); }
+      function row(parent,label,value,className){ const el=node("div","row"); el.append(node("span","label",label),node("span",className,value)); parent.append(el); return el.lastChild; }
+      function unavailableReason(metric){ return metric && !metric.available ? metric.sourceNeeded : undefined; }
+      function renderVenue(status,label,match){
+        const account=status.accounts.find(match); const card=node("article","card"); const head=node("div","card-head"); head.append(node("h2","",label),node("span",account ? `pill ${account.healthy ? "ok":"bad"}`:"pill warn",account ? (account.healthy ? "HEALTHY":"DEGRADED") : "UNAVAILABLE")); card.append(head);
+        const body=node("div","body"), stats=node("div","stats"); body.append(stats); card.append(body);
+        if(!account){ metric(stats,"Balance","Unavailable","No matching account adapter is present in this process."); metric(stats,"Margin","Unavailable","No cached account margin snapshot."); metric(stats,"Uptime","Unavailable","Owning runner startedAt is required."); metric(stats,"Account PnL / $6 cap","Unavailable","Account risk state is required."); return card; }
+        const balances=account.balances.available ? account.balances.value.map(b=>`${number(b.amount,2)} ${b.token}`).join(", ") || "None" : "Unavailable";
+        const margin=account.margin.available ? `${money(account.margin.value.accountValue)} · ${(account.margin.value.initialMarginFraction*100).toFixed(2)}% initial` : "Unavailable";
+        metric(stats,"Balance",balances,unavailableReason(account.balances)); metric(stats,"Margin / account value",margin,unavailableReason(account.margin)); metric(stats,"Uptime","Unavailable",account.uptimeMs.sourceNeeded); metric(stats,"Account PnL / cap",`${account.pnlAvailable ? money(account.sessionRealizedPnlUsd):"Unavailable"} / ${money(account.sessionLossCapUsd)}`);
+        for(const key of ["24h","7d","30d","allTime"]){ const volume=account.volumes[key]; metric(stats,`Volume ${key === "allTime" ? "all time":key}`,"Unavailable",volume.sourceNeeded); }
+        return card;
       }
-
-      function pnlClass(n) {
-        return n >= 0 ? "pnl-pos" : "pnl-neg";
+      function renderMarket(m){
+        const card=node("article","card"); const head=node("div","card-head"), title=node("div","market-title"); title.append(node("strong","",m.market),node("span","eyebrow",m.exchangeId)); head.append(title,node("span",`pill ${m.reconciliation.healthy ? "ok":"bad"}`,m.reconciliation.healthy ? "RECONCILED":"DEGRADED")); card.append(head);
+        const rows=node("div","body rows"); card.append(rows); const pos=m.position;
+        row(rows,"Position",pos ? `${number(pos.baseSize)} @ ${money(pos.markPrice)}`:"Flat"); row(rows,"Exposure",pos ? money(pos.notionalUsd):money(0)); row(rows,"Unrealized PnL",pos ? money(pos.unrealizedPnl):money(0),pos && pos.unrealizedPnl < 0 ? "sell":"buy");
+        const orderWrap=row(rows,"Open orders",String(m.openOrders.length)); if(m.openOrders.length){ const list=node("div","orders"); for(const o of m.openOrders){ const item=node("div","order"); item.append(node("b",o.side,o.side.toUpperCase()),node("span","",`${number(o.size)} @ ${money(o.price)}`),node("span","",o.isReduceOnly ? "REDUCE ONLY":"QUOTE"),node("span","",o.state)); list.append(item); } orderWrap.append(list); }
+        row(rows,"Fills","Unavailable","unavailable").append(node("span","reason",m.fills.sourceNeeded));
+        const rec=row(rows,"Reconciliation",`${m.reconciliation.healthyStreak} healthy / ${m.reconciliation.degradedStreak} degraded`); for(const a of m.reconciliation.anomalies){ rec.append(node("div","anomaly",`${a.kind}: ${a.detail}`)); }
+        const op=m.operations; row(rows,"Quote refresh",op?.quoteRefreshReason ?? "Unavailable",op?.quoteRefreshReason ? "":"unavailable"); const skips=op ? Object.values(op.riskSkippedLevels).reduce((a,b)=>a+b,0):null; row(rows,"Risk skips",skips === null ? "Unavailable":String(skips),skips === null ? "unavailable":""); row(rows,"Reduction / exit",op ? `${op.reductionMode ? "ACTIVE":"INACTIVE"} · ${op.reduceOnlyAction} · ${op.exitState}`:"Unavailable",op ? "":"unavailable"); if(op?.blockedReason) row(rows,"Cycle blocked",op.blockedReason,"sell");
+        return card;
       }
-
-      function render(status) {
-        document.getElementById("updated").textContent =
-          "Last updated: " + new Date(status.generatedAt).toLocaleString();
-        document.getElementById("totalExposure").textContent = fmtUsd(status.totalExposureUsd);
-        document.getElementById("marketCount").textContent = status.markets.length;
-        const accountPnl = document.getElementById("accountPnl");
-        accountPnl.textContent = `${fmtUsd(status.accountSessionRealizedPnlUsd)} / ${fmtUsd(status.accountSessionLossCapUsd)}`;
-        accountPnl.className = `value ${pnlClass(status.accountSessionRealizedPnlUsd)}`;
-
-        const rows = status.markets
-          .map((m) => {
-            const rec = m.reconciliation;
-            const pillClass = rec.healthy ? "healthy" : "degraded";
-            const pillLabel = rec.healthy ? "HEALTHY" : "DEGRADED";
-            const streak = rec.healthy
-              ? `${rec.healthyStreak} healthy`
-              : `${rec.degradedStreak} degraded`;
-            const position = m.position
-              ? `${m.position.baseSize} @ ${fmtUsd(m.position.markPrice)}`
-              : "flat";
-            const notional = m.position ? fmtUsd(m.position.notionalUsd) : "—";
-            const anomalies = rec.anomalies.length
-              ? `<div class="anomalies">${rec.anomalies.map((a) => a.detail).join("<br/>")}</div>`
-              : "";
-
-            return `<tr>
-              <td>${m.market}</td>
-              <td><span class="pill ${pillClass}">${pillLabel}</span>${anomalies}</td>
-              <td>${streak}</td>
-              <td>${m.operations?.exitState ?? "—"}</td>
-              <td>${position}</td>
-              <td>${notional}</td>
-              <td>${m.openOrders.length}</td>
-            </tr>`;
-          })
-          .join("");
-        document.getElementById("marketRows").innerHTML = rows;
-
-        const todoSection = document.getElementById("todoSection");
-        todoSection.innerHTML = status.todo.length
-          ? `<div class="todo"><strong>Not yet implemented:</strong><br/>${status.todo.join("<br/>")}</div>`
-          : "";
-
-        document.getElementById("error").style.display = "none";
-      }
-
-      async function poll() {
-        try {
-          const res = await fetch("/api/status");
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          render(await res.json());
-        } catch (err) {
-          const el = document.getElementById("error");
-          el.textContent = "Failed to fetch status: " + err.message;
-          el.style.display = "block";
-        }
-      }
-
-      poll();
-      setInterval(poll, POLL_INTERVAL_MS);
+      function render(status){ $("updated").textContent=`Updated ${new Date(status.generatedAt).toLocaleString()} · Total exposure ${money(status.totalExposureUsd)}`; const venues=$("venues"); venues.replaceChildren(renderVenue(status,"N1 LIVE",a=>a.venue==="N1"&&a.mode==="LIVE"),renderVenue(status,"RISEx PAPER",a=>a.venue==="RISEx"&&a.mode==="PAPER")); $("markets").replaceChildren(...status.markets.map(renderMarket)); const sources=$("sources"); sources.replaceChildren(...status.unavailableTelemetry.map(s=>node("li","",s))); $("error").style.display="none"; }
+      async function poll(){ try { const response=await fetch("/api/status",{cache:"no-store"}); if(!response.ok) throw new Error(`HTTP ${response.status}`); render(await response.json()); } catch(error){ const el=$("error"); el.textContent=`Dashboard unavailable: ${error instanceof Error ? error.message:"Unknown error"}`; el.style.display="block"; } }
+      poll(); setInterval(poll,POLL_MS);
     </script>
   </body>
 </html>
