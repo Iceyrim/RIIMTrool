@@ -199,7 +199,9 @@ async function main(): Promise<void> {
   );
   for (const marketConfig of enabled) {
     const positions = adapter.getPositions(marketConfig.symbol);
+    const openOrders = adapter.getOpenOrders(marketConfig.symbol);
     console.log(`Position [${marketConfig.symbol}]: ${JSON.stringify(positions)}`);
+    console.log(`Open orders [${marketConfig.symbol}]: ${JSON.stringify(openOrders)}`);
     console.log(
       `Risk limits [${marketConfig.symbol}]: ` +
         `maxOrderSize=${marketConfig.riskLimits.maxOrderSize} ` +
