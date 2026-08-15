@@ -18,8 +18,8 @@ function testConfig(overrides: Partial<EngineMarketConfig> = {}): EngineMarketCo
     levelSpacingBps: [2, 3, 4, 7, 10],
     inventoryReductionThresholdBase: 0.003,
     riskLimits: {
-      maxLongPosition: 0.005,
-      maxShortPosition: 0.005,
+      maxLongPosition: 0.05,
+      maxShortPosition: 0.05,
       maxOrderSize: 0.0025,
       maxOrderNotionalUsd: 160,
       maxOpenOrders: 12,
@@ -101,6 +101,162 @@ describe("MarketEngine", () => {
     expect(summary.quoteFailureMessages).toEqual([
       "Invalid or empty session ID. Please create or refresh your session.",
     ]);
+  });
+
+  it("starting with 5/12 market orders allows at most 7 successful additions", async () => {
+    for (let i = 0; i < 5; i++) {
+      adapter.openOrders.push({
+        exchangeOrderId: `existing-${i}`,
+        market: MARKET,
+        side: i % 2 === 0 ? "buy" : "sell",
+        price: 50_000 + i,
+        size: 0.001,
+        filledSize: 0,
+        remainingSize: 0.001,
+        isReduceOnly: false,
+        state: "open",
+      });
+    }
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+    await engine.start();
+    const summary = await engine.runCycle();
+
+    expect(summary.quotesPlaced).toBe(7);
+    expect(adapter.getOpenOrders(MARKET)).toHaveLength(12);
+    expect(summary.riskSkippedLevels.openOrderCapacity).toBe(3);
+    expect(summary.riskSkipMessages.some((message) => message.includes("capacity"))).toBe(true);
+  });
+
+  it("increments capacity for successes but not rejected placements", async () => {
+    for (let i = 0; i < 5; i++) {
+      adapter.openOrders.push({
+        exchangeOrderId: `existing-${i}`,
+        market: MARKET,
+        side: "buy",
+        price: 50_000 + i,
+        size: 0.001,
+        filledSize: 0,
+        remainingSize: 0.001,
+        isReduceOnly: false,
+        state: "open",
+      });
+    }
+    adapter.placeOrderResults.push(
+      { success: false, reason: "REJECTED", message: "offline rejection 1" },
+      { success: false, reason: "REJECTED", message: "offline rejection 2" },
+      { success: false, reason: "REJECTED", message: "offline rejection 3" },
+    );
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+    await engine.start();
+    const summary = await engine.runCycle();
+
+    expect(summary.quotesPlaced).toBe(7);
+    expect(summary.quotesFailed).toBe(3);
+    expect(summary.quotesAttempted).toBe(10);
+  });
+
+  it("uses aggregate market-scoped same-side exposure and does not net opposing orders", async () => {
+    adapter.openOrders.push(
+      {
+        exchangeOrderId: "btc-buy",
+        market: MARKET,
+        side: "buy",
+        price: 50_000,
+        size: 0.004,
+        filledSize: 0,
+        remainingSize: 0.004,
+        isReduceOnly: false,
+        state: "open",
+      },
+      {
+        exchangeOrderId: "btc-sell",
+        market: MARKET,
+        side: "sell",
+        price: 70_000,
+        size: 1,
+        filledSize: 0,
+        remainingSize: 1,
+        isReduceOnly: false,
+        state: "open",
+      },
+      {
+        exchangeOrderId: "eth-buy",
+        market: "ETHUSD",
+        side: "buy",
+        price: 3_000,
+        size: 100,
+        filledSize: 0,
+        remainingSize: 100,
+        isReduceOnly: false,
+        state: "open",
+      },
+    );
+    const engine = new MarketEngine(
+      adapter,
+      testConfig({
+        orderSize: { min: 0.001, max: 0.001 },
+        riskLimits: { ...testConfig().riskLimits, maxLongPosition: 0.005, maxShortPosition: 2 },
+      }),
+      tempPaths(),
+    );
+    await engine.start();
+    const summary = await engine.runCycle();
+
+    expect(summary.riskSkippedLevels.aggregateLongExposure).toBe(4);
+    expect(summary.quotesPlaced).toBe(6);
+    expect(adapter.placeOrderCalls.filter((call) => call.side === "buy")).toHaveLength(1);
+    expect(adapter.placeOrderCalls.filter((call) => call.side === "sell")).toHaveLength(5);
+  });
+
+  it("does not let another market's orders consume this market's capacity", async () => {
+    for (let i = 0; i < 20; i++) {
+      adapter.openOrders.push({
+        exchangeOrderId: `eth-${i}`,
+        market: "ETHUSD",
+        side: "buy",
+        price: 3_000,
+        size: 1,
+        filledSize: 0,
+        remainingSize: 1,
+        isReduceOnly: false,
+        state: "open",
+      });
+    }
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+    await engine.start();
+    const summary = await engine.runCycle();
+
+    expect(summary.reconciliation.openOrderCount).toBe(0);
+    expect(summary.quotesPlaced).toBe(10);
+    expect(summary.riskSkippedLevels.openOrderCapacity).toBe(0);
+  });
+
+  it("counts an exit slot and preserves capacity for it", async () => {
+    adapter.positions.push({
+      market: MARKET,
+      baseSize: 0.004,
+      markPrice: 60_000,
+      unrealizedPnl: 0,
+      openOrderCount: 0,
+    });
+    const engine = new MarketEngine(
+      adapter,
+      testConfig({
+        quoteLevels: 2,
+        levelSpacingBps: [2, 3],
+        orderSize: { min: 0.001, max: 0.001 },
+        riskLimits: { ...testConfig().riskLimits, maxOpenOrders: 5 },
+      }),
+      tempPaths(),
+    );
+    await engine.start();
+    const summary = await engine.runCycle();
+
+    expect(summary.reduceOnlyAction).toBe("placed");
+    expect(summary.quotesPlaced).toBe(4);
+    expect(adapter.getOpenOrders(MARKET)).toHaveLength(5);
+    expect(adapter.placeOrderCalls[0]?.isReduceOnly).toBe(true);
+    expect(adapter.placeOrderCalls.slice(1).every((call) => !call.isReduceOnly)).toBe(true);
   });
 
   it("does not re-place quotes that are still within their minimum lifetime", async () => {
@@ -252,6 +408,24 @@ describe("MarketEngine", () => {
     const summary = await engine.runCycle();
     expect(summary.blockedReason).toMatch(/bankruptcy/);
     expect(summary.quotesPlaced).toBe(0);
+  });
+
+  it("shared account bankruptcy state blocks both market engines", async () => {
+    adapter.marketPrices.set("ETHUSD", { market: "ETHUSD", mark: 3_000, index: 3_000 });
+    adapter.marginStatus = { ...adapter.marginStatus, isAtBankruptcyRisk: true };
+    const btcEngine = new MarketEngine(adapter, testConfig(), tempPaths());
+    const ethEngine = new MarketEngine(
+      adapter,
+      testConfig({ symbol: "ETHUSD" }),
+      tempPaths(),
+    );
+    await btcEngine.start();
+    await ethEngine.start();
+
+    const [btc, eth] = await Promise.all([btcEngine.runCycle(), ethEngine.runCycle()]);
+    expect(btc.blockedReason).toMatch(/bankruptcy/);
+    expect(eth.blockedReason).toMatch(/bankruptcy/);
+    expect(adapter.placeOrderCalls).toHaveLength(0);
   });
 
   describe("session PnL availability gate", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RiskManager } from "../../src/engine/RiskManager.js";
+import { RiskManager, type RiskCheckContext } from "../../src/engine/RiskManager.js";
 import type { ReconciliationResult } from "../../src/engine/Reconciliation.js";
 import type { RiskLimitsConfig } from "../../src/engine/types.js";
 import { FakeExchangeAdapter } from "./fakeAdapter.js";
@@ -18,7 +18,7 @@ function healthyReconciliation(openOrderCount = 0): ReconciliationResult {
   return { market: MARKET, healthy: true, openOrderCount, anomalies: [], checkedAt: Date.now() };
 }
 
-function baseCtx(overrides: Partial<Parameters<RiskManager["canPlaceOrder"]>[0]> = {}) {
+function baseCtx(overrides: Partial<RiskCheckContext> = {}): RiskCheckContext {
   return {
     market: MARKET,
     side: "buy" as const,
@@ -27,6 +27,9 @@ function baseCtx(overrides: Partial<Parameters<RiskManager["canPlaceOrder"]>[0]>
     limits,
     currentPosition: undefined,
     lastReconciliation: healthyReconciliation(),
+    progressiveOpenOrderCount: 0,
+    openBuyQuantity: 0,
+    openSellQuantity: 0,
     sessionRealizedPnlUsd: 0,
     sessionLossCapUsd: 15,
     ...overrides,
@@ -57,12 +60,15 @@ describe("RiskManager.canPlaceOrder", () => {
 
   it("SPEC 6: trusts a HEALTHY reconciliation's open-order count for the capacity check rather than re-deriving it", () => {
     const rm = new RiskManager(new FakeExchangeAdapter());
-    const atCapacity = rm.canPlaceOrder(baseCtx({ lastReconciliation: healthyReconciliation(12) }));
+    const atCapacity = rm.canPlaceOrder(baseCtx({
+      lastReconciliation: healthyReconciliation(12),
+      progressiveOpenOrderCount: 12,
+    }));
     expect(atCapacity.allowed).toBe(false);
     expect(atCapacity.reason).toMatch(/maxOpenOrders/);
 
     const underCapacity = rm.canPlaceOrder(
-      baseCtx({ lastReconciliation: healthyReconciliation(11) }),
+      baseCtx({ lastReconciliation: healthyReconciliation(11), progressiveOpenOrderCount: 11 }),
     );
     expect(underCapacity.allowed).toBe(true);
   });
@@ -116,6 +122,34 @@ describe("RiskManager.canPlaceOrder", () => {
     );
     expect(result.allowed).toBe(false);
     expect(result.reason).toMatch(/maxShortPosition/);
+  });
+
+  it("includes resting same-side quantity without netting opposing orders", () => {
+    const rm = new RiskManager(new FakeExchangeAdapter());
+    const buy = rm.canPlaceOrder(baseCtx({
+      size: 0.001,
+      openBuyQuantity: 0.0045,
+      openSellQuantity: 100,
+    }));
+    expect(buy.allowed).toBe(false);
+    expect(buy.deniedBy).toBe("aggregateLongExposure");
+
+    const sell = rm.canPlaceOrder(baseCtx({
+      side: "sell",
+      size: 0.001,
+      openSellQuantity: 0.0045,
+    }));
+    expect(sell.allowed).toBe(false);
+    expect(sell.deniedBy).toBe("aggregateShortExposure");
+  });
+
+  it("allows exact size, notional, and aggregate exposure boundaries but rejects just-over values", () => {
+    const rm = new RiskManager(new FakeExchangeAdapter());
+    expect(rm.canPlaceOrder(baseCtx({ size: 0.0025, price: 64_000 })).allowed).toBe(true);
+    expect(rm.canPlaceOrder(baseCtx({ size: 0.002500001 })).deniedBy).toBe("orderSize");
+    expect(rm.canPlaceOrder(baseCtx({ size: 0.0025, price: 64_000.01 })).deniedBy).toBe("orderNotional");
+    expect(rm.canPlaceOrder(baseCtx({ size: 0.001, openBuyQuantity: 0.004 })).allowed).toBe(true);
+    expect(rm.canPlaceOrder(baseCtx({ size: 0.001000001, openBuyQuantity: 0.004 })).deniedBy).toBe("aggregateLongExposure");
   });
 
   it("blocks once the session loss cap is reached", () => {

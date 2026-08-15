@@ -55,6 +55,11 @@ markets:
     expect(() => loadMarketsConfig(writeTempConfig(mismatched))).toThrow(/levelSpacingBps/);
   });
 
+  it("rejects a two-sided ladder plus exit slot that exceeds maxOpenOrders", () => {
+    const overCapacity = validYaml.replace("maxOpenOrders: 12", "maxOpenOrders: 4");
+    expect(() => loadMarketsConfig(writeTempConfig(overCapacity))).toThrow(/permitted exit slot/);
+  });
+
   it("throws loudly on malformed YAML rather than silently merging values", () => {
     const corrupted = "markets: [this is not valid: yaml: at all: [[[";
     expect(() => loadMarketsConfig(writeTempConfig(corrupted))).toThrow();

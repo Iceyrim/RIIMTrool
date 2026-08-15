@@ -111,10 +111,7 @@ export interface PlaceOrderParams {
   type: OrderType;
   size: number;
   price: number;
-  /** See SPEC.md Section 5c: exchange-enforced reduce-only is a deliberately separate decision
-   * from local reduceOnly bookkeeping. This field exists so the adapter is ready when that
-   * decision is made, but v1 engine logic should not assume passing true here changes exchange
-   * behavior in a way it hasn't explicitly tested. */
+  /** Exchange-enforced reduce-only intent. Genuine exits pass true; normal quotes pass false. */
   isReduceOnly: boolean;
   clientOrderId?: string;
 }

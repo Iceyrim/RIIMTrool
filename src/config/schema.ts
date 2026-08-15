@@ -77,6 +77,10 @@ export const marketConfigSchema = z
   .refine((m) => m.reduceOnlyExit.minHoldMs < m.reduceOnlyExit.maxHoldMs, {
     message: "reduceOnlyExit.minHoldMs must be < reduceOnlyExit.maxHoldMs",
     path: ["reduceOnlyExit"],
+  })
+  .refine((m) => m.quoteLevels * 2 + 1 <= m.riskLimits.maxOpenOrders, {
+    message: "two-sided quoteLevels plus one permitted exit slot must not exceed maxOpenOrders",
+    path: ["riskLimits", "maxOpenOrders"],
   });
 
 export const marketsConfigSchema = z.object({

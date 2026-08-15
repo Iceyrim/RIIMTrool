@@ -142,14 +142,14 @@ describe("OrderLifecycle", () => {
   });
 
   describe("placeReduceOnlyExit", () => {
-    it("sends isReduceOnly: false to the exchange but records isReduceOnly: true locally", async () => {
+    it("sends isReduceOnly: true to the exchange and records it locally", async () => {
       await lifecycle.placeReduceOnlyExit({
         side: "sell",
         type: "postOnly",
         size: 0.01,
         price: 60100,
       });
-      expect(adapter.placeOrderCalls[0]?.isReduceOnly).toBe(false);
+      expect(adapter.placeOrderCalls[0]?.isReduceOnly).toBe(true);
       expect(registry.list()[0]?.isReduceOnly).toBe(true);
     });
 

@@ -284,6 +284,25 @@ describe("N1Adapter", () => {
   });
 
   describe("placeOrder", () => {
+    it.each([true, false])("passes isReduceOnly=%s through to the N1 SDK", async (isReduceOnly) => {
+      fakeUser.placeOrder.mockResolvedValue({ actionId: 1n, orderId: 42n, fills: [] });
+      const adapter = new N1Adapter(baseConfig());
+      await adapter.connect();
+
+      await adapter.placeOrder({
+        market: MARKET,
+        side: "sell",
+        type: "postOnly",
+        size: 0.01,
+        price: 60_100,
+        isReduceOnly,
+      });
+
+      expect(fakeUser.placeOrder).toHaveBeenCalledWith(
+        expect.objectContaining({ isReduceOnly }),
+      );
+    });
+
     it.each(["not-an-integer", "1.5", "-1", "0", (2n ** 63n).toString()])(
       "returns REJECTED without calling the SDK for invalid clientOrderId %s",
       async (clientOrderId) => {

@@ -18,6 +18,9 @@ export interface PlaceQuoteResult {
 export interface CancelResult {
   finalState: "CANCELLED" | "FILLED";
   fillsApplied: NormalizedFill[];
+  /** True only when the adapter explicitly confirmed cancellation. Capacity accounting must not
+   * assume a failed-open local CANCELLED transition removed the exchange order. */
+  cancellationConfirmed: boolean;
   /** True if the getOrderFills() race-check lookup itself errored and we proceeded anyway
    * (SPEC.md Section 5a: fail open, never let this check become a new stuck-order mode). */
   failedOpen: boolean;
@@ -63,12 +66,9 @@ export class OrderLifecycle {
    * Places a reduce-only exit order. Two SPEC.md Section 5c behaviors live here:
    *  - duplicate-placement guard: refuses to place a second reduce-only exit while one is
    *    already open for this market
-   *  - `isReduceOnly` sent to the exchange is deliberately `false`: exchange-enforced reduce-only
-   *    is called out in Section 5c as its own separate decision requiring dedicated testing, not
-   *    bundled into this fix. This order behaves as reduce-only purely through local bookkeeping
-   *    (the duplicate guard above, and the caller only ever requesting a size that reduces the
-   *    current position) — `isReduceOnly: true` is recorded locally so the rest of the engine
-   *    (refresh cadence, hold-time logic below) can identify and specially handle it.
+   *  - `isReduceOnly: true` is sent to the exchange and recorded locally, so the exchange itself
+   *    prevents an exit from increasing or reversing exposure while the engine retains its
+   *    duplicate guard and dedicated refresh behavior.
    */
   async placeReduceOnlyExit(params: {
     side: OrderSide;
@@ -83,7 +83,7 @@ export class OrderLifecycle {
           "A reduce-only exit order is already open for this market; skipping duplicate placement",
       };
     }
-    return this.placeOrderInternal(params, { exchangeReduceOnly: false, localReduceOnly: true });
+    return this.placeOrderInternal(params, { exchangeReduceOnly: true, localReduceOnly: true });
   }
 
   hasOpenReduceOnlyExit(): boolean {
@@ -215,8 +215,10 @@ export class OrderLifecycle {
     local.updatedAt = Date.now();
     this.registry.upsert(local);
 
+    let cancellationConfirmed = false;
     try {
-      await this.adapter.cancelOrder(exchangeOrderId, this.market);
+      const cancellation = await this.adapter.cancelOrder(exchangeOrderId, this.market);
+      cancellationConfirmed = cancellation.success;
     } catch {
       // The cancel call itself failing (e.g. "already filled/gone" on the exchange side) is not
       // fatal here — the fill-replay check below is what actually determines the correct final
@@ -259,6 +261,6 @@ export class OrderLifecycle {
       : undefined;
     this.registry.upsert(local);
 
-    return { finalState, fillsApplied: fills, failedOpen };
+    return { finalState, fillsApplied: fills, cancellationConfirmed, failedOpen };
   }
 }

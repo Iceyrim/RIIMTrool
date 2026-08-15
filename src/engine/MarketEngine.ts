@@ -26,6 +26,15 @@ export interface CycleSummary {
    * attempt failing for the same reason) previously left zero trace in the per-cycle log file
    * itself, the one artifact a completed run actually leaves behind. */
   quoteFailureMessages: string[];
+  riskSkippedLevels: {
+    openOrderCapacity: number;
+    aggregateLongExposure: number;
+    aggregateShortExposure: number;
+    orderSize: number;
+    orderNotional: number;
+  };
+  /** Deduplicated, capped reasons explaining ladder levels denied before placement. */
+  riskSkipMessages: string[];
   reduceOnlyAction: "placed" | "repriced" | "held" | "skipped_duplicate" | "none";
   /** Set when the entire cycle skipped new placements (margin risk, degraded reconciliation) —
    * not just an individual order rejection. */
@@ -270,6 +279,14 @@ export class MarketEngine {
       quotesCancelled: 0,
       quotesFailed: 0,
       quoteFailureMessages: [],
+      riskSkippedLevels: {
+        openOrderCapacity: 0,
+        aggregateLongExposure: 0,
+        aggregateShortExposure: 0,
+        orderSize: 0,
+        orderNotional: 0,
+      },
+      riskSkipMessages: [],
       reduceOnlyAction: "none",
     };
 
@@ -301,22 +318,45 @@ export class MarketEngine {
 
     const position = this.adapter.getPositions(this.config.symbol)[0];
     const currentBaseSize = position?.baseSize ?? 0;
+    const exchangeOpenOrders = this.adapter.getOpenOrders(this.config.symbol);
+    let progressiveOpenOrderCount = reconciliationResult.openOrderCount;
+    let openBuyQuantity = exchangeOpenOrders
+      .filter((order) => order.side === "buy")
+      .reduce((sum, order) => sum + order.remainingSize, 0);
+    let openSellQuantity = exchangeOpenOrders
+      .filter((order) => order.side === "sell")
+      .reduce((sum, order) => sum + order.remainingSize, 0);
+    const exitRequired = Math.abs(currentBaseSize) > this.config.inventoryReductionThresholdBase;
+    const existingExit = this.lifecycle.hasOpenReduceOnlyExit();
+    let reserveExitSlot = exitRequired && !existingExit;
 
     // SPEC.md Section 5c: inventory management is a dedicated reduce-only exit, not a skew
     // applied to the normal ladder below.
-    if (Math.abs(currentBaseSize) > this.config.inventoryReductionThresholdBase) {
-      summary.reduceOnlyAction = await this.manageReduceOnlyExit(currentBaseSize);
+    if (exitRequired) {
+      const exit = await this.manageReduceOnlyExit(currentBaseSize, progressiveOpenOrderCount);
+      summary.reduceOnlyAction = exit.action;
+      if (exit.placedOrder) {
+        progressiveOpenOrderCount++;
+        if (exit.placedOrder.side === "buy") openBuyQuantity += exit.placedOrder.size;
+        else openSellQuantity += exit.placedOrder.size;
+        reserveExitSlot = false;
+      }
     }
 
-    const { placed, attempted, cancelled, failureMessages } = await this.manageQuoteLadder(
-      position,
-      reconciliationResult,
-    );
+    const { placed, attempted, cancelled, failureMessages, riskSkippedLevels, riskSkipMessages } =
+      await this.manageQuoteLadder(position, reconciliationResult, {
+        progressiveOpenOrderCount,
+        openBuyQuantity,
+        openSellQuantity,
+        reserveExitSlot,
+      });
     summary.quotesPlaced = placed;
     summary.quotesAttempted = attempted;
     summary.quotesCancelled = cancelled;
     summary.quotesFailed = attempted - placed;
     summary.quoteFailureMessages = failureMessages;
+    summary.riskSkippedLevels = riskSkippedLevels;
+    summary.riskSkipMessages = riskSkipMessages;
 
     this.registry.save();
     return summary;
@@ -333,7 +373,8 @@ export class MarketEngine {
 
   private async manageReduceOnlyExit(
     currentBaseSize: number,
-  ): Promise<CycleSummary["reduceOnlyAction"]> {
+    progressiveOpenOrderCount: number,
+  ): Promise<{ action: CycleSummary["reduceOnlyAction"]; placedOrder?: { side: OrderSide; size: number } }> {
     const existing = this.registry
       .list()
       .find((o) => o.isReduceOnly && (o.state === "RESTING" || o.state === "PENDING_CANCEL"));
@@ -343,7 +384,7 @@ export class MarketEngine {
         existing,
         this.config.reduceOnlyExit,
       );
-      if (decision === "hold") return "held";
+      if (decision === "hold") return { action: "held" };
 
       if (decision === "eligible") {
         // SPEC.md Section 5c specifies the min/max hold times exactly but not a fixed
@@ -353,7 +394,7 @@ export class MarketEngine {
         const marketPrice = await this.adapter.getMarketPrice(this.config.symbol);
         const target = this.computeExitPrice(currentBaseSize, marketPrice.mark);
         const driftBps = (Math.abs(target - existing.price) / existing.price) * 10_000;
-        if (driftBps < this.config.exitSpreadBps) return "held";
+        if (driftBps < this.config.exitSpreadBps) return { action: "held" };
       }
 
       // "forced" (past the max-hold ceiling) always reprices; "eligible" reprices only on
@@ -361,7 +402,11 @@ export class MarketEngine {
       await this.lifecycle.cancelOrder(existing.clientOrderId);
       // Deliberately one action per cycle: placement of the replacement happens next cycle, once
       // manageReduceOnlyExit sees no existing order. Keeps each cycle's action observable/simple.
-      return "repriced";
+      return { action: "repriced" };
+    }
+
+    if (progressiveOpenOrderCount >= this.config.riskLimits.maxOpenOrders) {
+      return { action: "none" };
     }
 
     const marketPrice = await this.adapter.getMarketPrice(this.config.symbol);
@@ -369,7 +414,7 @@ export class MarketEngine {
     const side: OrderSide = currentBaseSize > 0 ? "sell" : "buy";
     const size = Math.min(Math.abs(currentBaseSize), this.config.riskLimits.maxOrderSize);
 
-    if (this.quiescing) return "none";
+    if (this.quiescing) return { action: "none" };
     const result = await this.lifecycle.placeReduceOnlyExit({
       side,
       type: "postOnly",
@@ -377,15 +422,30 @@ export class MarketEngine {
       price: exitPrice,
     });
     if (!result.success) {
-      return result.message?.includes("already open") ? "skipped_duplicate" : "none";
+      return {
+        action: result.message?.includes("already open") ? "skipped_duplicate" : "none",
+      };
     }
-    return "placed";
+    return { action: "placed", placedOrder: { side, size } };
   }
 
   private async manageQuoteLadder(
     position: NormalizedPosition | undefined,
     reconciliationResult: ReconciliationResult,
-  ): Promise<{ placed: number; attempted: number; cancelled: number; failureMessages: string[] }> {
+    riskState: {
+      progressiveOpenOrderCount: number;
+      openBuyQuantity: number;
+      openSellQuantity: number;
+      reserveExitSlot: boolean;
+    },
+  ): Promise<{
+    placed: number;
+    attempted: number;
+    cancelled: number;
+    failureMessages: string[];
+    riskSkippedLevels: CycleSummary["riskSkippedLevels"];
+    riskSkipMessages: string[];
+  }> {
     const now = Date.now();
     const restingQuotes = this.registry.listByState("RESTING").filter((o) => !o.isReduceOnly);
 
@@ -394,8 +454,16 @@ export class MarketEngine {
       (o) => now - o.placedAt >= this.config.quoteMinimumLifetimeMs,
     );
     for (const order of stale) {
+      const remainingBeforeCancel = Math.max(0, order.size - order.filledSize);
       const result = await this.lifecycle.cancelOrder(order.clientOrderId);
-      if (result) cancelled++;
+      if (result) {
+        cancelled++;
+        if (result.cancellationConfirmed || result.finalState === "FILLED") {
+          riskState.progressiveOpenOrderCount = Math.max(0, riskState.progressiveOpenOrderCount - 1);
+          if (order.side === "buy") riskState.openBuyQuantity = Math.max(0, riskState.openBuyQuantity - remainingBeforeCancel);
+          else riskState.openSellQuantity = Math.max(0, riskState.openSellQuantity - remainingBeforeCancel);
+        }
+      }
     }
 
     // Re-read what's still resting after cancellation so we don't double up on levels that are
@@ -416,6 +484,15 @@ export class MarketEngine {
     let attempted = 0;
     const failureMessages: string[] = [];
     const MAX_FAILURE_MESSAGES = 5;
+    const riskSkippedLevels: CycleSummary["riskSkippedLevels"] = {
+      openOrderCapacity: 0,
+      aggregateLongExposure: 0,
+      aggregateShortExposure: 0,
+      orderSize: 0,
+      orderNotional: 0,
+    };
+    const riskSkipMessages: string[] = [];
+    const MAX_RISK_MESSAGES = 5;
 
     for (const level of ladder) {
       const alreadyCovered = stillResting.some(
@@ -425,6 +502,15 @@ export class MarketEngine {
       );
       if (alreadyCovered) continue;
 
+      const ladderCapacity =
+        this.config.riskLimits.maxOpenOrders - (riskState.reserveExitSlot ? 1 : 0);
+      if (riskState.progressiveOpenOrderCount >= ladderCapacity) {
+        riskSkippedLevels.openOrderCapacity++;
+        const reason = `Reserved open-order capacity prevents ${level.side} ladder level ${level.size}@${level.price}; progressive count ${riskState.progressiveOpenOrderCount}, ladder capacity ${ladderCapacity}`;
+        if (!riskSkipMessages.includes(reason) && riskSkipMessages.length < MAX_RISK_MESSAGES) riskSkipMessages.push(reason);
+        continue;
+      }
+
       const riskCheck = this.riskManager.canPlaceOrder({
         market: this.config.symbol,
         side: level.side,
@@ -433,10 +519,21 @@ export class MarketEngine {
         limits: this.config.riskLimits,
         currentPosition: position,
         lastReconciliation: reconciliationResult,
+        progressiveOpenOrderCount: riskState.progressiveOpenOrderCount,
+        openBuyQuantity: riskState.openBuyQuantity,
+        openSellQuantity: riskState.openSellQuantity,
         sessionRealizedPnlUsd: this.sessionRealizedPnlUsd,
         sessionLossCapUsd: this.config.sessionLossCapUsd,
       });
-      if (!riskCheck.allowed) continue;
+      if (!riskCheck.allowed) {
+        if (riskCheck.deniedBy === "openOrderCapacity") riskSkippedLevels.openOrderCapacity++;
+        else if (riskCheck.deniedBy === "aggregateLongExposure") riskSkippedLevels.aggregateLongExposure++;
+        else if (riskCheck.deniedBy === "aggregateShortExposure") riskSkippedLevels.aggregateShortExposure++;
+        else if (riskCheck.deniedBy === "orderSize") riskSkippedLevels.orderSize++;
+        else if (riskCheck.deniedBy === "orderNotional") riskSkippedLevels.orderNotional++;
+        if (riskCheck.reason && !riskSkipMessages.includes(riskCheck.reason) && riskSkipMessages.length < MAX_RISK_MESSAGES) riskSkipMessages.push(riskCheck.reason);
+        continue;
+      }
       if (this.quiescing) break;
 
       attempted++;
@@ -448,6 +545,9 @@ export class MarketEngine {
       });
       if (result.success) {
         placed++;
+        riskState.progressiveOpenOrderCount++;
+        if (level.side === "buy") riskState.openBuyQuantity += level.size;
+        else riskState.openSellQuantity += level.size;
       } else if (
         result.message !== undefined &&
         !failureMessages.includes(result.message) &&
@@ -457,6 +557,6 @@ export class MarketEngine {
       }
     }
 
-    return { placed, attempted, cancelled, failureMessages };
+    return { placed, attempted, cancelled, failureMessages, riskSkippedLevels, riskSkipMessages };
   }
 }

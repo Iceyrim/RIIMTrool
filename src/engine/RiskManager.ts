@@ -17,6 +17,13 @@ export interface RiskCheckContext {
    * result must be trusted for capacity/state decisions, not re-derived from a fresh raw count
    * that could race against an in-flight cancel/replace. */
   lastReconciliation: ReconciliationResult;
+  /** Progressive, market-scoped count: reconciled open orders adjusted for confirmed in-cycle
+   * cancellations and successful placements. */
+  progressiveOpenOrderCount: number;
+  /** Remaining market-scoped quantities already capable of filling on each side, including
+   * successful placements earlier in this cycle. Opposing sides are deliberately not netted. */
+  openBuyQuantity: number;
+  openSellQuantity: number;
   /** Caller-computed running total for this market's session (negative = net loss). This is
    * intentionally simple for now — proper realized-PnL accounting arrives with trade logging
    * (SPEC.md Section 7, a later build step); until then this is whatever the engine sums from
@@ -28,6 +35,7 @@ export interface RiskCheckContext {
 export interface RiskCheckResult {
   allowed: boolean;
   reason?: string;
+  deniedBy?: "openOrderCapacity" | "orderSize" | "orderNotional" | "aggregateLongExposure" | "aggregateShortExposure" | "sessionLoss" | "reconciliation";
 }
 
 /**
@@ -50,12 +58,14 @@ export class RiskManager {
       return {
         allowed: false,
         reason: `Reconciliation for ${ctx.market} is degraded (streak irrelevant, current cycle unhealthy); refusing new placements until healthy`,
+        deniedBy: "reconciliation",
       };
     }
-    if (ctx.lastReconciliation.openOrderCount >= ctx.limits.maxOpenOrders) {
+    if (ctx.progressiveOpenOrderCount >= ctx.limits.maxOpenOrders) {
       return {
         allowed: false,
-        reason: `At maxOpenOrders (${ctx.limits.maxOpenOrders}) for ${ctx.market} per last healthy reconciliation`,
+        reason: `At maxOpenOrders (${ctx.limits.maxOpenOrders}) for ${ctx.market} using progressive in-cycle count ${ctx.progressiveOpenOrderCount}`,
+        deniedBy: "openOrderCapacity",
       };
     }
 
@@ -63,6 +73,7 @@ export class RiskManager {
       return {
         allowed: false,
         reason: `Order size ${ctx.size} exceeds maxOrderSize ${ctx.limits.maxOrderSize} for ${ctx.market}`,
+        deniedBy: "orderSize",
       };
     }
 
@@ -71,21 +82,25 @@ export class RiskManager {
       return {
         allowed: false,
         reason: `Order notional $${notionalUsd.toFixed(2)} exceeds maxOrderNotionalUsd $${ctx.limits.maxOrderNotionalUsd} for ${ctx.market}`,
+        deniedBy: "orderNotional",
       };
     }
 
     const currentBaseSize = ctx.currentPosition?.baseSize ?? 0;
-    const projected = ctx.side === "buy" ? currentBaseSize + ctx.size : currentBaseSize - ctx.size;
-    if (projected > ctx.limits.maxLongPosition) {
+    const worstCaseLong = currentBaseSize + ctx.openBuyQuantity + (ctx.side === "buy" ? ctx.size : 0);
+    const worstCaseShort = currentBaseSize - ctx.openSellQuantity - (ctx.side === "sell" ? ctx.size : 0);
+    if (worstCaseLong > ctx.limits.maxLongPosition) {
       return {
         allowed: false,
-        reason: `Order would bring ${ctx.market} position to ${projected}, exceeding maxLongPosition ${ctx.limits.maxLongPosition}`,
+        reason: `Order would bring ${ctx.market} worst-case long exposure to ${worstCaseLong}, exceeding maxLongPosition ${ctx.limits.maxLongPosition}`,
+        deniedBy: "aggregateLongExposure",
       };
     }
-    if (projected < -ctx.limits.maxShortPosition) {
+    if (worstCaseShort < -ctx.limits.maxShortPosition) {
       return {
         allowed: false,
-        reason: `Order would bring ${ctx.market} position to ${projected}, exceeding maxShortPosition ${ctx.limits.maxShortPosition}`,
+        reason: `Order would bring ${ctx.market} worst-case short exposure to ${worstCaseShort}, exceeding maxShortPosition ${ctx.limits.maxShortPosition}`,
+        deniedBy: "aggregateShortExposure",
       };
     }
 
@@ -93,6 +108,7 @@ export class RiskManager {
       return {
         allowed: false,
         reason: `Session loss cap of $${ctx.sessionLossCapUsd} reached for ${ctx.market} ($${(-ctx.sessionRealizedPnlUsd).toFixed(2)} realized loss)`,
+        deniedBy: "sessionLoss",
       };
     }
 
