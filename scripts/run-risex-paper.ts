@@ -36,6 +36,7 @@ import { toEngineMarketConfig } from "../src/config/toEngineMarketConfig.js";
 import { createDashboardServer } from "../src/dashboard/server.js";
 import type { DashboardMarket } from "../src/dashboard/DashboardService.js";
 import { DashboardTelemetry } from "../src/dashboard/DashboardTelemetry.js";
+import { DashboardHistoryStore } from "../src/dashboard/DashboardHistoryStore.js";
 import { MarketEngine } from "../src/engine/MarketEngine.js";
 import { PaperRunner, type PaperRunnerMarket } from "../src/paperRunner/PaperRunner.js";
 
@@ -72,7 +73,8 @@ async function main(): Promise<void> {
   await paperAdapter.connect();
 
   const alertBus = createAlertBusFromEnv("RISEX");
-  const telemetry = new DashboardTelemetry(paperAdapter, false);
+  const history = new DashboardHistoryStore(join(process.cwd(), "state", "dashboard"), "risex-paper");
+  const telemetry = new DashboardTelemetry(paperAdapter, false, 100, history, () => alertBus?.getDeliveryHealth() ?? { enabled: false, attempted: 0, delivered: 0, failed: 0, pending: 0 });
 
   const runnerMarkets: PaperRunnerMarket[] = enabled.map((marketConfig) => ({
     market: marketConfig.symbol,

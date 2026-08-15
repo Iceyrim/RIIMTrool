@@ -26,7 +26,7 @@ function testConfig(symbol: string): EngineMarketConfig {
       maxOrderNotionalUsd: 160,
       maxOpenOrders: 12,
     },
-    sessionLossCapUsd: 15,
+    accountSessionLossCapUsd: 15,
     reduceOnlyExit: { minHoldMs: 45_000, maxHoldMs: 300_000 },
     quoteMinimumLifetimeMs: 2_000,
   };
@@ -137,9 +137,13 @@ describe("buildDashboardStatus", () => {
     const market = await buildMarket("BTCUSD", adapter);
     const status = buildDashboardStatus([market]);
     expect(status.markets[0]?.fills.available).toBe(false);
-    expect(status.markets[0]?.fills.sourceNeeded).toContain("TradeLog fill snapshot");
-    expect(status.accounts[0]?.volumes["24h"].sourceNeeded).toContain("getAccountVolume");
-    expect(status.accounts[0]?.volumes.allTime.sourceNeeded).toContain("confirmed fills only");
+    const fills = status.markets[0]!.fills;
+    const day = status.accounts[0]!.volumes["24h"];
+    const allTime = status.accounts[0]!.volumes.allTime;
+    if (fills.available || day.available || allTime.available) throw new Error("expected unavailable telemetry");
+    expect(fills.sourceNeeded).toContain("TradeLog fill snapshot");
+    expect(day.sourceNeeded).toContain("getAccountVolume");
+    expect(allTime.sourceNeeded).toContain("confirmed fills only");
   });
 
   it("surfaces quote refresh, risk skips, and reduction/exit status from the last cycle", async () => {

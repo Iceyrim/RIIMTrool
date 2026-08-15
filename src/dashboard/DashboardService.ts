@@ -8,6 +8,8 @@ import type { CycleSummary, MarketEngine } from "../engine/MarketEngine.js";
 import type { LocalOrder } from "../engine/types.js";
 import type { DashboardTelemetry, VolumeTelemetry } from "./DashboardTelemetry.js";
 import type { TradeLogEntry } from "../engine/TradeLog.js";
+import type { AlertDeliveryHealth } from "../alerting/TelegramAlertSink.js";
+import type { HistoryPoint, SessionSummary, HistoryStoreStatus } from "./DashboardHistoryStore.js";
 
 export interface DashboardMarket {
   market: string;
@@ -50,7 +52,7 @@ export interface MarketStatus {
   reconciliation: MarketReconciliationStatus;
   position: MarketPositionStatus | null;
   openOrders: LocalOrder[];
-  fills: DashboardMetric<{ label: "current session"; entries: readonly TradeLogEntry[] }>;
+  fills: DashboardMetric<{ label: "current session + durable history"; entries: readonly TradeLogEntry[] }>;
   operations?: Pick<CycleSummary,
     | "positionBaseSize"
     | "inventoryReductionThresholdBase"
@@ -82,6 +84,8 @@ export interface DashboardAccountStatus {
   sessionLossCapUsd: number;
   pnlAvailable: boolean;
   volumes: Record<"24h" | "7d" | "30d" | "allTime", DashboardMetric<VolumeTelemetry>>;
+  history: DashboardMetric<{ sessions: SessionSummary[]; points: HistoryPoint[]; status: HistoryStoreStatus }>;
+  alertHealth: DashboardMetric<AlertDeliveryHealth>;
 }
 
 export interface DashboardStatus {
@@ -139,7 +143,7 @@ function buildMarketStatus({ market, engine, adapter, telemetry }: DashboardMark
         }
       : null,
     openOrders: engine.registry.list(),
-    fills: telemetry ? { available: true, value: { label: "current session", entries: telemetry.snapshot().fills.filter((fill) => fill.market === market) } } : unavailable(
+    fills: telemetry ? { available: true, value: { label: "current session + durable history", entries: telemetry.snapshot().fills.filter((fill) => fill.market === market) } } : unavailable(
       `An in-memory, deduplicated TradeLog fill snapshot for ${market}; placements and cancellations are not volume/fill sources.`,
     ),
     operations: engine.getLastCycleSummary(),
@@ -169,11 +173,17 @@ function buildAccountStatus(
       `Cached account-trade volume from adapter.getAccountVolume({ since, until }) for the ${window} window, aggregated from confirmed fills only.`,
     );
   const risk = engine.getAccountRiskState();
-  const telemetry = accountMarkets.find((market) => market.telemetry)?.telemetry?.snapshot();
+  const telemetryPublisher = accountMarkets.find((market) => market.telemetry)?.telemetry;
+  let telemetry = telemetryPublisher?.snapshot();
   const volumeMetric = (window: "24h" | "7d" | "30d" | "allTime"): DashboardMetric<VolumeTelemetry> => {
     const cached = telemetry?.volumes[window];
     return cached ? { available: true, value: cached } : volumeSource(window);
   };
+  const quoteVolume = telemetry?.volumes["24h"].available
+    ? telemetry.volumes["24h"].value?.reduce((sum, row) => sum + row.quoteVolume, 0) ?? null
+    : null;
+  telemetryPublisher?.recordAccountPoint({ timestamp: Date.now(), realizedPnlUsd: engine.getSessionRealizedPnlUsd(), quoteVolume });
+  telemetry = telemetryPublisher?.snapshot();
 
   return {
     exchangeId,
@@ -194,6 +204,8 @@ function buildAccountStatus(
       "30d": volumeMetric("30d"),
       allTime: volumeMetric("allTime"),
     },
+    history: telemetry ? { available: true, value: { sessions: telemetry.history.sessions, points: telemetry.history.points, status: telemetry.historyStatus } } : unavailable("Local dashboard history store is not configured."),
+    alertHealth: telemetry ? { available: true, value: telemetry.alertHealth } : unavailable("Local alert-delivery health publisher is not configured."),
   };
 }
 
@@ -243,7 +255,7 @@ export function buildDashboardStatus(markets: readonly DashboardMarket[]): Dashb
     markets: marketStatuses,
     unavailableTelemetry: [
       "Uptime: owning runner monotonic startedAt timestamp.",
-      "Fills: in-memory deduplicated TradeLog fill snapshot.",
+      "Fills: deduplicated current-session and durable local history.",
       "24h/7d/30d/all-time volume: cached adapter.getAccountVolume results from confirmed fills.",
     ],
   };

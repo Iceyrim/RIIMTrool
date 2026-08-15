@@ -13,6 +13,18 @@ export interface TelegramAlertSinkOptions {
   apiBaseUrl?: string;
 }
 
+export interface AlertDeliveryHealth {
+  enabled: boolean;
+  attempted: number;
+  delivered: number;
+  failed: number;
+  pending: number;
+  lastAttemptAt?: number;
+  lastSuccessAt?: number;
+  lastFailureAt?: number;
+  lastErrorCategory?: "http" | "network";
+}
+
 /**
  * Delivers AlertEvents to a Telegram chat via the Bot API's sendMessage endpoint. handle() is
  * synchronous (the AlertSink interface) so the network call itself runs detached — its rejection
@@ -23,6 +35,7 @@ export interface TelegramAlertSinkOptions {
  */
 export class TelegramAlertSink implements AlertSink {
   private readonly apiBaseUrl: string;
+  private readonly health: AlertDeliveryHealth = { enabled: true, attempted: 0, delivered: 0, failed: 0, pending: 0 };
 
   constructor(private readonly options: TelegramAlertSinkOptions) {
     this.apiBaseUrl = options.apiBaseUrl ?? "https://api.telegram.org";
@@ -33,7 +46,10 @@ export class TelegramAlertSink implements AlertSink {
     void this.send(prefix + formatEvent(event));
   }
 
+  getDeliveryHealth(): Readonly<AlertDeliveryHealth> { return Object.freeze({ ...this.health }); }
+
   private async send(text: string): Promise<void> {
+    try { this.health.attempted++; this.health.pending++; this.health.lastAttemptAt = Date.now(); } catch { /* observability only */ }
     try {
       const url = `${this.apiBaseUrl}/bot${this.options.botToken}/sendMessage`;
       const response = await fetch(url, {
@@ -44,9 +60,15 @@ export class TelegramAlertSink implements AlertSink {
       if (!response.ok) {
         const body = await response.text().catch(() => "");
         console.error(`[TelegramAlertSink] Telegram API returned ${response.status}: ${body}`);
+        try { this.health.failed++; this.health.lastFailureAt = Date.now(); this.health.lastErrorCategory = "http"; } catch { /* observability only */ }
+      } else {
+        try { this.health.delivered++; this.health.lastSuccessAt = Date.now(); delete this.health.lastErrorCategory; } catch { /* observability only */ }
       }
     } catch (err) {
       console.error(`[TelegramAlertSink] failed to deliver alert: ${String(err)}`);
+      try { this.health.failed++; this.health.lastFailureAt = Date.now(); this.health.lastErrorCategory = "network"; } catch { /* observability only */ }
+    } finally {
+      try { this.health.pending = Math.max(0, this.health.pending - 1); } catch { /* observability only */ }
     }
   }
 }

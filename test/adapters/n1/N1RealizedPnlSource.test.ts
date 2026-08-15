@@ -191,7 +191,7 @@ describe("N1RealizedPnlSource", () => {
         anchorFilePath: anchorPath(),
       });
 
-      await expect(source.drainRealizedPnlDeltaUsd(BTC)).rejects.toThrow(/initialize/);
+      await expect(source.drainRealizedPnlDeltaUsd()).rejects.toThrow(/initialize/);
     });
 
     it("uses one account-wide drain independent of market arguments", async () => {
@@ -218,7 +218,7 @@ describe("N1RealizedPnlSource", () => {
 
       ledger.push(pnlEntry(new Date().toISOString(), 1, 0, BTC_ID, 42.5));
 
-      await expect(source.drainRealizedPnlDeltaUsd(BTC)).resolves.toBeCloseTo(42.5);
+      await expect(source.drainRealizedPnlDeltaUsd()).resolves.toBeCloseTo(42.5);
     });
 
     it("sums a single losing trade's negative tradingPnl", async () => {
@@ -233,7 +233,7 @@ describe("N1RealizedPnlSource", () => {
 
       ledger.push(pnlEntry(new Date().toISOString(), 1, 0, BTC_ID, -17.25));
 
-      await expect(source.drainRealizedPnlDeltaUsd(BTC)).resolves.toBeCloseTo(-17.25);
+      await expect(source.drainRealizedPnlDeltaUsd()).resolves.toBeCloseTo(-17.25);
     });
 
     it("excludes settledFundingPnl — only tradingPnl is summed", async () => {
@@ -248,7 +248,7 @@ describe("N1RealizedPnlSource", () => {
 
       ledger.push(pnlEntry(new Date().toISOString(), 1, 0, BTC_ID, 10, /* settledFundingPnl */ 999));
 
-      await expect(source.drainRealizedPnlDeltaUsd(BTC)).resolves.toBeCloseTo(10);
+      await expect(source.drainRealizedPnlDeltaUsd()).resolves.toBeCloseTo(10);
     });
 
     it("sums multiple entries in one drain (partial close across several fills)", async () => {
@@ -268,7 +268,7 @@ describe("N1RealizedPnlSource", () => {
         pnlEntry(new Date(now + 3000).toISOString(), 3, 0, BTC_ID, -1.5),
       );
 
-      await expect(source.drainRealizedPnlDeltaUsd(BTC)).resolves.toBeCloseTo(6.5);
+      await expect(source.drainRealizedPnlDeltaUsd()).resolves.toBeCloseTo(6.5);
     });
 
     it("models a position flip as a closing entry plus a zero-pnl opening entry, summing correctly", async () => {
@@ -289,7 +289,7 @@ describe("N1RealizedPnlSource", () => {
         pnlEntry(new Date(now + 1000).toISOString(), 1, 1, BTC_ID, 0),
       );
 
-      await expect(source.drainRealizedPnlDeltaUsd(BTC)).resolves.toBeCloseTo(8);
+      await expect(source.drainRealizedPnlDeltaUsd()).resolves.toBeCloseTo(8);
     });
 
     it("counts interleaved market events once in one account-wide delta", async () => {
@@ -323,7 +323,7 @@ describe("N1RealizedPnlSource", () => {
       });
       await source.initialize(CONFIGURED_MARKETS); // anchor = "now", strictly after `past`
 
-      await expect(source.drainRealizedPnlDeltaUsd(BTC)).resolves.toBe(0);
+      await expect(source.drainRealizedPnlDeltaUsd()).resolves.toBe(0);
     });
 
     it("does not double-count entries tied exactly at the cursor boundary across repeated drains", async () => {
@@ -341,14 +341,14 @@ describe("N1RealizedPnlSource", () => {
         pnlEntry(tieTime, 1, 0, BTC_ID, 4),
         pnlEntry(tieTime, 1, 1, BTC_ID, 6),
       );
-      await expect(source.drainRealizedPnlDeltaUsd(BTC)).resolves.toBeCloseTo(10);
+      await expect(source.drainRealizedPnlDeltaUsd()).resolves.toBeCloseTo(10);
       // A second drain immediately after, with no new data, must not re-sum the same two
       // entries just because the cursor's `since` still lands exactly on tieTime.
-      await expect(source.drainRealizedPnlDeltaUsd(BTC)).resolves.toBe(0);
+      await expect(source.drainRealizedPnlDeltaUsd()).resolves.toBe(0);
 
       // A genuinely new entry landing at that exact same tied timestamp is still counted.
       ledger.push(pnlEntry(tieTime, 1, 2, BTC_ID, 1.5));
-      await expect(source.drainRealizedPnlDeltaUsd(BTC)).resolves.toBeCloseTo(1.5);
+      await expect(source.drainRealizedPnlDeltaUsd()).resolves.toBeCloseTo(1.5);
     });
 
     it("restart does not reset or duplicate session PnL — a previously-drained entry is not re-summed, a new one after restart is", async () => {
@@ -363,7 +363,7 @@ describe("N1RealizedPnlSource", () => {
       await first.initialize(CONFIGURED_MARKETS);
 
       ledger.push(pnlEntry(new Date(Date.now() + 1000).toISOString(), 1, 0, BTC_ID, 15));
-      await expect(first.drainRealizedPnlDeltaUsd(BTC)).resolves.toBeCloseTo(15);
+      await expect(first.drainRealizedPnlDeltaUsd()).resolves.toBeCloseTo(15);
 
       // Simulate a process restart: brand new instance, same anchor file on disk.
       const fakeNord2 = makeFakeNord(ledger);
@@ -375,11 +375,11 @@ describe("N1RealizedPnlSource", () => {
       await second.initialize(CONFIGURED_MARKETS);
 
       // The already-counted +15 must not reappear...
-      await expect(second.drainRealizedPnlDeltaUsd(BTC)).resolves.toBe(0);
+      await expect(second.drainRealizedPnlDeltaUsd()).resolves.toBe(0);
 
       // ...but a genuinely new fill realized after the restart is picked up normally.
       ledger.push(pnlEntry(new Date(Date.now() + 2000).toISOString(), 2, 0, BTC_ID, 3));
-      await expect(second.drainRealizedPnlDeltaUsd(BTC)).resolves.toBeCloseTo(3);
+      await expect(second.drainRealizedPnlDeltaUsd()).resolves.toBeCloseTo(3);
     });
 
     it("walks multiple pages within one drain when the server paginates below the requested pageSize", async () => {
@@ -399,7 +399,7 @@ describe("N1RealizedPnlSource", () => {
         pnlEntry(new Date(now + 3000).toISOString(), 3, 0, BTC_ID, 3),
       );
 
-      await expect(source.drainRealizedPnlDeltaUsd(BTC)).resolves.toBeCloseTo(6);
+      await expect(source.drainRealizedPnlDeltaUsd()).resolves.toBeCloseTo(6);
       // getAccountPnl was called once for the initial probe (initialize) plus 3 pages this drain.
       expect(fakeNord.getAccountPnl.mock.calls.length).toBeGreaterThanOrEqual(4);
     });
@@ -422,7 +422,7 @@ describe("N1RealizedPnlSource", () => {
         pnlEntry(new Date(now + 3000).toISOString(), 3, 0, BTC_ID, 1),
       );
 
-      await expect(source.drainRealizedPnlDeltaUsd(BTC)).rejects.toThrow(/maxPagesPerDrain/);
+      await expect(source.drainRealizedPnlDeltaUsd()).rejects.toThrow(/maxPagesPerDrain/);
     });
 
     it("throws — never returns 0 — when the network call fails", async () => {
@@ -435,7 +435,7 @@ describe("N1RealizedPnlSource", () => {
       await source.initialize(CONFIGURED_MARKETS);
 
       fakeNord.getAccountPnl.mockRejectedValueOnce(new Error("timeout"));
-      await expect(source.drainRealizedPnlDeltaUsd(BTC)).rejects.toThrow(/timeout/);
+      await expect(source.drainRealizedPnlDeltaUsd()).rejects.toThrow(/timeout/);
     });
 
     it("throws — never returns 0 — when an entry has a malformed tradingPnl field", async () => {
@@ -457,7 +457,7 @@ describe("N1RealizedPnlSource", () => {
         settledFundingPnl: 0,
       } as AccountPnlInfo);
 
-      await expect(source.drainRealizedPnlDeltaUsd(BTC)).rejects.toThrow(/malformed tradingPnl/);
+      await expect(source.drainRealizedPnlDeltaUsd()).rejects.toThrow(/malformed tradingPnl/);
     });
   });
 });

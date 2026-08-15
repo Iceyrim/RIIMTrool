@@ -8,7 +8,7 @@ describe("DashboardTelemetry", () => {
     telemetry.recordFill({ timestamp: 1, market: "BTCUSD", side: "buy", size: 1, price: 2, isReduceOnly: false, clientOrderId: "c1", exchangeOrderId: "e1", source: "placement" });
     telemetry.recordFill({ timestamp: 2, market: "ETHUSD", side: "sell", size: 3, price: 4, isReduceOnly: false, clientOrderId: "c2", exchangeOrderId: "e2", source: "reconciliation" });
     const snapshot = telemetry.snapshot(10);
-    expect(snapshot.fillsLabel).toBe("current session");
+    expect(snapshot.fillsLabel).toBe("current session + durable history");
     expect(snapshot.fills).toHaveLength(1);
     expect(snapshot.fills[0]?.market).toBe("ETHUSD");
     expect(Object.isFrozen(snapshot.fills)).toBe(true);

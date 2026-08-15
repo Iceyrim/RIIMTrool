@@ -33,6 +33,8 @@ import { loadMarketsConfig } from "../src/config/loadConfig.js";
 import { toEngineMarketConfig } from "../src/config/toEngineMarketConfig.js";
 import { createDashboardServer } from "../src/dashboard/server.js";
 import type { DashboardMarket } from "../src/dashboard/DashboardService.js";
+import { DashboardTelemetry } from "../src/dashboard/DashboardTelemetry.js";
+import { DashboardHistoryStore } from "../src/dashboard/DashboardHistoryStore.js";
 import { MarketEngine } from "../src/engine/MarketEngine.js";
 import { PaperRunner, type PaperRunnerMarket } from "../src/paperRunner/PaperRunner.js";
 
@@ -73,6 +75,8 @@ async function main(): Promise<void> {
   await stubAdapter.connect();
 
   const alertBus = createAlertBusFromEnv("STUB");
+  const history = new DashboardHistoryStore(join(process.cwd(), "state", "dashboard"), "stub-paper");
+  const telemetry = new DashboardTelemetry(stubAdapter, false, 100, history, () => alertBus?.getDeliveryHealth() ?? { enabled: false, attempted: 0, delivered: 0, failed: 0, pending: 0 });
 
   const runnerMarkets: PaperRunnerMarket[] = enabled.map((marketConfig) => ({
     market: marketConfig.symbol,
@@ -84,7 +88,8 @@ async function main(): Promise<void> {
         "stub",
         `trades-${marketConfig.symbol}.jsonl`,
       ),
-      onFillRecorded: (entry) =>
+      onFillRecorded: (entry) => {
+        telemetry.recordFill(entry);
         alertBus?.emit({
           type: "fill",
           market: entry.market,
@@ -92,7 +97,8 @@ async function main(): Promise<void> {
           size: entry.size,
           price: entry.price,
           isReduceOnly: entry.isReduceOnly,
-        }),
+        });
+      },
     }),
     pnlSource: stubAdapter,
   }));
@@ -101,6 +107,7 @@ async function main(): Promise<void> {
     market,
     engine,
     adapter: stubAdapter,
+    telemetry,
   }));
   const dashboardPort = Number(process.env.DASHBOARD_PORT ?? "4100");
   const dashboardServer = createDashboardServer(dashboardMarkets, { port: dashboardPort });
@@ -113,7 +120,7 @@ async function main(): Promise<void> {
     `run-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`,
   );
 
-  const runner = new PaperRunner(runnerMarkets, { intervalMs, durationMs, logFilePath, alertBus });
+  const runner = new PaperRunner(runnerMarkets, { intervalMs, durationMs, logFilePath, alertBus, telemetry });
 
   const shutdown = (): void => {
     const report = runner.stop();

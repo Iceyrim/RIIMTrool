@@ -167,5 +167,17 @@ describe("TelegramAlertSink", () => {
 
     expect(() => sink.handle({ type: "resumed", market: "BTCUSD" })).not.toThrow();
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(sink.getDeliveryHealth()).toMatchObject({ attempted: 1, failed: 1, pending: 0, lastErrorCategory: "network" }));
+  });
+
+  it("publishes delivery health without credentials or message contents", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ ok: true }));
+    const sink = newSink();
+    sink.handle({ type: "error", message: "sensitive message" });
+    await vi.waitFor(() => expect(sink.getDeliveryHealth().delivered).toBe(1));
+    const serialized = JSON.stringify(sink.getDeliveryHealth());
+    expect(serialized).not.toContain(BOT_TOKEN);
+    expect(serialized).not.toContain(CHAT_ID);
+    expect(serialized).not.toContain("sensitive message");
   });
 });

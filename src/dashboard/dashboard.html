@@ -24,6 +24,7 @@
       .orders { display:grid; gap:7px; margin-top:7px }.order { display:grid; grid-template-columns:45px 1fr 1fr auto; gap:8px; padding:8px 10px; background:#0b1017; border-radius:8px; font-size:12px }.buy { color:var(--green) }.sell { color:var(--red) }
       .anomaly { margin-top:6px; padding:7px 9px; border-left:2px solid var(--amber); background:rgba(255,191,90,.07); color:var(--amber); text-align:left }
       .footer-card { margin-top:14px }.sources { display:grid; gap:7px; padding-left:18px; color:var(--muted) }
+      .chart { width:100%; height:90px; margin-top:10px; background:#0b1017; border-radius:8px }.chart polyline { fill:none; stroke:var(--cyan); stroke-width:2; vector-effect:non-scaling-stroke }.chart.volume polyline { stroke:var(--amber) }
       #error { display:none; margin-bottom:14px; padding:12px 14px; border:1px solid var(--red); border-radius:10px; background:rgba(255,100,116,.1); color:var(--red) }
       @media(max-width:1000px){ .stats { grid-template-columns:repeat(2,minmax(0,1fr)) }.markets { grid-template-columns:1fr } }
       @media(max-width:680px){ main { padding:15px } header { align-items:start; flex-direction:column }.updated { text-align:left }.venues { grid-template-columns:1fr }.stats { grid-template-columns:1fr 1fr }.row { grid-template-columns:110px minmax(0,1fr) }.order { grid-template-columns:40px 1fr }.order span:nth-child(n+3){ text-align:right } }
@@ -46,6 +47,7 @@
       function metric(parent,label,value,reason){ const box=node("div","stat"); box.append(node("span","label",label),node("strong","value",value)); if(reason) box.append(node("span","reason",reason)); parent.append(box); }
       function row(parent,label,value,className){ const el=node("div","row"); el.append(node("span","label",label),node("span",className,value)); parent.append(el); return el.lastChild; }
       function unavailableReason(metric){ return metric && !metric.available ? metric.sourceNeeded : undefined; }
+      function chart(points,key,className=""){ const svg=document.createElementNS("http://www.w3.org/2000/svg","svg"); svg.setAttribute("viewBox","0 0 300 90"); svg.setAttribute("class",`chart ${className}`); const values=points.map(p=>p[key]).filter(Number.isFinite); if(values.length<2) return svg; const min=Math.min(...values),max=Math.max(...values),span=max-min||1; const line=document.createElementNS(svg.namespaceURI,"polyline"); line.setAttribute("points",values.map((v,i)=>`${i*300/(values.length-1)},${85-(v-min)*80/span}`).join(" ")); svg.append(line); return svg; }
       function renderVenue(status,label,match){
         const account=status.accounts.find(match); const card=node("article","card"); const head=node("div","card-head"); head.append(node("h2","",label),node("span",account ? `pill ${account.healthy ? "ok":"bad"}`:"pill warn",account ? (account.healthy ? "HEALTHY":"DEGRADED") : "UNAVAILABLE")); card.append(head);
         const body=node("div","body"), stats=node("div","stats"); body.append(stats); card.append(body);
@@ -54,6 +56,8 @@
         const margin=account.margin.available ? `${money(account.margin.value.accountValue)} · ${(account.margin.value.initialMarginFraction*100).toFixed(2)}% initial` : "Unavailable";
         metric(stats,"Balance",balances,unavailableReason(account.balances)); metric(stats,"Margin / account value",margin,unavailableReason(account.margin)); metric(stats,"Uptime",account.uptimeMs.available ? duration(account.uptimeMs.value):"Unavailable",unavailableReason(account.uptimeMs)); metric(stats,"Account PnL / cap",`${account.pnlAvailable ? money(account.sessionRealizedPnlUsd):"Unavailable"} / ${money(account.sessionLossCapUsd)}`);
         for(const key of ["24h","7d","30d","allTime"]){ const metricValue=account.volumes[key], volume=metricValue.available ? metricValue.value:null, total=volume?.available ? volume.value.reduce((sum,row)=>sum+row.quoteVolume,0):null, reason=volume?.available ? `${volume.stale ? "STALE · ":""}cached ${new Date(volume.updatedAt).toLocaleString()}${volume.error ? ` · ${volume.error}`:""}`:(volume?.sourceNeeded ?? metricValue.sourceNeeded); metric(stats,`Volume ${key === "allTime" ? "all time":key}`,total === null ? "Unavailable":money(total),reason); }
+        if(account.history.available){ const h=account.history.value, health=h.status; metric(stats,"Sessions",String(h.sessions.length),health.stale ? `STALE · ${health.error||"history unavailable"}`:`90-day retention · ${h.points.length} samples`); stats.append(chart(h.points,"realizedPnlUsd"),chart(h.points,"quoteVolume","volume")); }
+        if(account.alertHealth.available){ const a=account.alertHealth.value; metric(stats,"Telegram delivery",a.enabled ? `${a.delivered} delivered · ${a.failed} failed` : "Disabled",a.enabled ? `${a.pending} pending${a.lastErrorCategory ? ` · last error: ${a.lastErrorCategory}`:""}`:"No configured sink"); }
         return card;
       }
       function renderMarket(m){

@@ -1,5 +1,6 @@
 import type { OrderSide } from "../adapters/ExchangeAdapter.js";
 import type { ReconciliationAnomaly } from "../engine/Reconciliation.js";
+import type { AlertDeliveryHealth } from "./TelegramAlertSink.js";
 
 /**
  * Generic, exchange/transport-agnostic events the operational-alerting layer cares about.
@@ -65,5 +66,13 @@ export class AlertBus {
         console.error(`[AlertBus] sink threw handling "${event.type}": ${String(err)}`);
       }
     }
+  }
+
+  getDeliveryHealth(): AlertDeliveryHealth {
+    for (const sink of this.sinks) {
+      const candidate = sink as AlertSink & { getDeliveryHealth?: () => Readonly<AlertDeliveryHealth> };
+      if (candidate.getDeliveryHealth) return { ...candidate.getDeliveryHealth() };
+    }
+    return { enabled: false, attempted: 0, delivered: 0, failed: 0, pending: 0 };
   }
 }

@@ -69,6 +69,7 @@ import { toEngineMarketConfig } from "../src/config/toEngineMarketConfig.js";
 import { createDashboardServer } from "../src/dashboard/server.js";
 import type { DashboardMarket } from "../src/dashboard/DashboardService.js";
 import { DashboardTelemetry } from "../src/dashboard/DashboardTelemetry.js";
+import { DashboardHistoryStore } from "../src/dashboard/DashboardHistoryStore.js";
 import { MarketEngine } from "../src/engine/MarketEngine.js";
 import { PaperRunner, type PaperRunnerMarket } from "../src/paperRunner/PaperRunner.js";
 
@@ -265,7 +266,8 @@ async function main(): Promise<void> {
 
   // STAGE 9
   const alertBus = createAlertBusFromEnv("LIVE");
-  const telemetry = new DashboardTelemetry(adapter, true);
+  const history = new DashboardHistoryStore(join(process.cwd(), "state", "dashboard"), "n1-live");
+  const telemetry = new DashboardTelemetry(adapter, true, 100, history, () => alertBus?.getDeliveryHealth() ?? { enabled: false, attempted: 0, delivered: 0, failed: 0, pending: 0 });
 
   // STAGE 10 — one shared N1Adapter across every configured market, matching N1's real single
   // cross-margined account (SPEC.md Section 4.3), same as run-paper.ts. pnlSource is likewise

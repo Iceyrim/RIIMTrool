@@ -51,7 +51,7 @@ function testConfig(
       maxOrderNotionalUsd: 160,
       maxOpenOrders: 12,
     },
-    sessionLossCapUsd: 15,
+    accountSessionLossCapUsd: 15,
     reduceOnlyExit: { minHoldMs: 45_000, maxHoldMs: 300_000 },
     quoteMinimumLifetimeMs: 2_000,
     ...overrides,

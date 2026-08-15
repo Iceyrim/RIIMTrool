@@ -24,7 +24,7 @@ function testConfig(overrides: Partial<EngineMarketConfig> = {}): EngineMarketCo
       maxOrderNotionalUsd: 160,
       maxOpenOrders: 12,
     },
-    sessionLossCapUsd: 15,
+    accountSessionLossCapUsd: 15,
     reduceOnlyExit: { minHoldMs: 45_000, maxHoldMs: 300_000 },
     quoteMinimumLifetimeMs: 30_000,
     quoteRepriceThresholdBps: 1,
