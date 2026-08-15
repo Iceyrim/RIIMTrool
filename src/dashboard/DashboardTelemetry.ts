@@ -39,6 +39,7 @@ export class DashboardTelemetry {
   private refreshInFlight = false;
   private nextRefreshAt = 0;
   private nextAllTimeAt = 0;
+  private nextAccountSampleAt = 0;
   private failureCount = 0;
 
   constructor(
@@ -69,7 +70,14 @@ export class DashboardTelemetry {
     }
   }
 
-  recordAccountPoint(point: HistoryPoint): void {
+  sampleAccountIfDue(realizedPnlUsd: number, now = Date.now()): void {
+    if (now < this.nextAccountSampleAt) return;
+    this.nextAccountSampleAt = now + FIVE_MINUTES;
+    const volume = this.volumes.get("24h");
+    const quoteVolume = volume?.available
+      ? volume.value?.reduce((sum, row) => sum + row.quoteVolume, 0) ?? null
+      : null;
+    const point: HistoryPoint = { timestamp: now, realizedPnlUsd, quoteVolume };
     try { this.historyStore?.recordPoint(point); }
     catch (error) { console.error(`[DashboardTelemetry] history publication failed: ${String(error)}`); }
   }

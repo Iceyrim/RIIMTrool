@@ -8,6 +8,8 @@ import {
 } from "../../src/dashboard/DashboardService.js";
 import { MarketEngine } from "../../src/engine/MarketEngine.js";
 import type { EngineMarketConfig } from "../../src/engine/types.js";
+import { DashboardTelemetry } from "../../src/dashboard/DashboardTelemetry.js";
+import { DashboardHistoryStore } from "../../src/dashboard/DashboardHistoryStore.js";
 import { FakeExchangeAdapter } from "../engine/fakeAdapter.js";
 
 function testConfig(symbol: string): EngineMarketConfig {
@@ -191,5 +193,17 @@ describe("buildDashboardStatus", () => {
     const first = buildDashboardStatus([market]);
     const second = buildDashboardStatus([market]);
     expect(second.generatedAt).toBeGreaterThanOrEqual(first.generatedAt);
+  });
+
+  it("keeps status reads side-effect free and does not sample account history", async () => {
+    const market = await buildMarket("BTCUSD", adapter);
+    const store = new DashboardHistoryStore(mkdtempSync(join(tmpdir(), "riimtrool-status-history-")), "n1-paper");
+    const telemetry = new DashboardTelemetry(adapter, false, 100, store);
+    const withTelemetry = { ...market, telemetry };
+
+    buildDashboardStatus([withTelemetry]);
+    buildDashboardStatus([withTelemetry]);
+
+    expect(telemetry.snapshot().history.points).toEqual([]);
   });
 });

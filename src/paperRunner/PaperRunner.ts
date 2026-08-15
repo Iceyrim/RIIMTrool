@@ -277,6 +277,7 @@ export class PaperRunner {
     }
 
     await this.drainPnl(entry);
+    this.config.telemetry?.sampleAccountIfDue(engine.getSessionRealizedPnlUsd());
 
     this.cycleCount++;
     const logEntry: CycleLogEntry = {

@@ -33,6 +33,11 @@ describe("dashboard static safety", () => {
     expect(source).toContain('x.state!=="FILLED"&&x.state!=="CANCELLED"');
   });
 
+  it("labels open-order size in USD and derives it from the retained base size and limit price", () => {
+    expect(source).toMatch(/Open Orders[\s\S]*<th>USD Size<\/th>/);
+    expect(source).toContain("money(Math.abs(o.size*o.price))");
+  });
+
   it("owns content in five client-side views while preserving filters and locked settings", () => {
     for (const view of ["dashboard", "positions-orders", "history", "alerts", "settings"]) {
       expect(source).toContain(`data-view-panel="${view}"`);

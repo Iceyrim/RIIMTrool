@@ -7,6 +7,8 @@ import { MarketEngine } from "../../src/engine/MarketEngine.js";
 import type { EngineMarketConfig } from "../../src/engine/types.js";
 import { PaperRunner, type RealizedPnlSource } from "../../src/paperRunner/PaperRunner.js";
 import { FakeExchangeAdapter } from "../engine/fakeAdapter.js";
+import { DashboardTelemetry } from "../../src/dashboard/DashboardTelemetry.js";
+import { DashboardHistoryStore } from "../../src/dashboard/DashboardHistoryStore.js";
 
 class FakeAlertSink implements AlertSink {
   events: AlertEvent[] = [];
@@ -100,6 +102,29 @@ describe("PaperRunner", () => {
     expect(entries).toHaveLength(2);
     expect(entries.map((e) => e.market).sort()).toEqual(["BTCUSD", "ETHUSD"]);
     expect(entries[0]?.summary.quotesPlaced).toBeGreaterThan(0);
+  });
+
+  it("publishes one account-history sample for two markets sharing one account telemetry", async () => {
+    const adapter = new FakeExchangeAdapter();
+    adapter.marketPrices.set("BTCUSD", { market: "BTCUSD", mark: 60000 });
+    adapter.marketPrices.set("ETHUSD", { market: "ETHUSD", mark: 3000 });
+    const btcEngine = new MarketEngine(adapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const ethEngine = new MarketEngine(adapter, testConfig("ETHUSD"), tempPaths("ETHUSD"));
+    const store = new DashboardHistoryStore(mkdtempSync(join(tmpdir(), "riimtrool-runner-history-")), "n1-paper");
+    const telemetry = new DashboardTelemetry(adapter, false, 100, store);
+    const runner = new PaperRunner(
+      [
+        { market: "BTCUSD", engine: btcEngine, pnlSource: btcPnl },
+        { market: "ETHUSD", engine: ethEngine, pnlSource: ethPnl },
+      ],
+      { intervalMs: 1000, telemetry },
+    );
+
+    await runner.start();
+    await runner.runOnce();
+    runner.stop();
+
+    expect(telemetry.snapshot().history.points).toHaveLength(1);
   });
 
   it("relays drained realized PnL into the engine's session PnL, feeding the loss-cap check", async () => {

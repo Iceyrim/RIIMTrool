@@ -1,5 +1,9 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
+import type { ExchangeAdapter } from "../../src/adapters/ExchangeAdapter.js";
 import { DashboardTelemetry } from "../../src/dashboard/DashboardTelemetry.js";
+import { DashboardHistoryStore } from "../../src/dashboard/DashboardHistoryStore.js";
 import { FakeExchangeAdapter } from "../engine/fakeAdapter.js";
 
 describe("DashboardTelemetry", () => {
@@ -35,5 +39,36 @@ describe("DashboardTelemetry", () => {
     expect(adapter.getAccountVolume).toHaveBeenCalledTimes(4);
     telemetry.refreshIfDue(1_000_000 + 299_999);
     expect(adapter.getAccountVolume).toHaveBeenCalledTimes(4);
+  });
+
+  it("requests the exact account-wide time windows from N1 telemetry", async () => {
+    const adapter: ExchangeAdapter = new FakeExchangeAdapter();
+    const read = vi.spyOn(adapter, "getAccountVolume").mockResolvedValue([]);
+    const telemetry = new DashboardTelemetry(adapter, true);
+    const now = Date.parse("2026-08-16T12:00:00.000Z");
+
+    telemetry.refreshIfDue(now);
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(4));
+
+    expect(read.mock.calls.map(([params]) => params)).toEqual([
+      { since: "2026-08-15T12:00:00.000Z", until: "2026-08-16T12:00:00.000Z" },
+      { since: "2026-08-09T12:00:00.000Z", until: "2026-08-16T12:00:00.000Z" },
+      { since: "2026-07-17T12:00:00.000Z", until: "2026-08-16T12:00:00.000Z" },
+      { since: "1970-01-01T00:00:00.000Z", until: "2026-08-16T12:00:00.000Z" },
+    ]);
+  });
+
+  it("records at most one runner-owned account sample every five minutes", () => {
+    const store = new DashboardHistoryStore(mkdtempSync(`${tmpdir()}/riimtrool-telemetry-`), "n1-paper");
+    const telemetry = new DashboardTelemetry(new FakeExchangeAdapter(), false, 100, store);
+
+    telemetry.sampleAccountIfDue(1, 1_000_000);
+    telemetry.sampleAccountIfDue(2, 1_299_999);
+    telemetry.sampleAccountIfDue(3, 1_300_000);
+
+    expect(telemetry.snapshot().history.points).toEqual([
+      { timestamp: 1_000_000, realizedPnlUsd: 1, quoteVolume: null },
+      { timestamp: 1_300_000, realizedPnlUsd: 3, quoteVolume: null },
+    ]);
   });
 });

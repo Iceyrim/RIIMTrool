@@ -176,17 +176,11 @@ function buildAccountStatus(
     );
   const risk = engine.getAccountRiskState();
   const telemetryPublisher = accountMarkets.find((market) => market.telemetry)?.telemetry;
-  let telemetry = telemetryPublisher?.snapshot();
+  const telemetry = telemetryPublisher?.snapshot();
   const volumeMetric = (window: "24h" | "7d" | "30d" | "allTime"): DashboardMetric<VolumeTelemetry> => {
     const cached = telemetry?.volumes[window];
     return cached ? { available: true, value: cached } : volumeSource(window);
   };
-  const quoteVolume = telemetry?.volumes["24h"].available
-    ? telemetry.volumes["24h"].value?.reduce((sum, row) => sum + row.quoteVolume, 0) ?? null
-    : null;
-  telemetryPublisher?.recordAccountPoint({ timestamp: Date.now(), realizedPnlUsd: engine.getSessionRealizedPnlUsd(), quoteVolume });
-  telemetry = telemetryPublisher?.snapshot();
-
   return {
     exchangeId,
     ...venueMode(exchangeId),
