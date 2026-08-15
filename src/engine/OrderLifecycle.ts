@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import type {
   ExchangeAdapter,
   NormalizedFill,
@@ -24,6 +24,17 @@ export interface CancelResult {
 }
 
 export type ReduceOnlyRepriceDecision = "hold" | "eligible" | "forced";
+
+function generateClientOrderId(registry: OrderRegistry): string {
+  while (true) {
+    const bytes = randomBytes(8);
+    bytes[0] = bytes[0]! & 0x7f;
+    const clientOrderId = bytes.readBigUInt64BE().toString(10);
+    if (clientOrderId !== "0" && registry.get(clientOrderId) === undefined) {
+      return clientOrderId;
+    }
+  }
+}
 
 /**
  * Owns the full order placement/cancellation flow for one market, implementing SPEC.md Sections
@@ -103,7 +114,7 @@ export class OrderLifecycle {
     params: { side: OrderSide; type: OrderType; size: number; price: number },
     options: { exchangeReduceOnly: boolean; localReduceOnly: boolean },
   ): Promise<PlaceQuoteResult> {
-    const clientOrderId = randomUUID();
+    const clientOrderId = generateClientOrderId(this.registry);
     const now = Date.now();
 
     const result = await this.adapter.placeOrder({

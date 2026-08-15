@@ -284,22 +284,45 @@ describe("N1Adapter", () => {
   });
 
   describe("placeOrder", () => {
-    it("returns success:false REJECTED without any network call for an invalid clientOrderId", async () => {
+    it.each(["not-an-integer", "1.5", "-1", "0", (2n ** 63n).toString()])(
+      "returns REJECTED without calling the SDK for invalid clientOrderId %s",
+      async (clientOrderId) => {
+        const adapter = new N1Adapter(baseConfig());
+        await adapter.connect();
+
+        const result = await adapter.placeOrder({
+          market: MARKET,
+          side: "buy",
+          type: "postOnly",
+          size: 0.01,
+          price: 59000,
+          isReduceOnly: false,
+          clientOrderId,
+        });
+
+        expect(result).toMatchObject({ success: false, reason: "REJECTED" });
+        expect(fakeUser.placeOrder).not.toHaveBeenCalled();
+      },
+    );
+
+    it("converts a valid decimal clientOrderId to bigint for the SDK", async () => {
+      fakeUser.placeOrder.mockResolvedValue({ actionId: 1n, orderId: 42n, fills: [] });
       const adapter = new N1Adapter(baseConfig());
       await adapter.connect();
 
-      const result = await adapter.placeOrder({
+      await adapter.placeOrder({
         market: MARKET,
         side: "buy",
         type: "postOnly",
         size: 0.01,
         price: 59000,
         isReduceOnly: false,
-        clientOrderId: "not-an-integer",
+        clientOrderId: "9223372036854775807",
       });
 
-      expect(result).toMatchObject({ success: false, reason: "REJECTED" });
-      expect(fakeUser.placeOrder).not.toHaveBeenCalled();
+      expect(fakeUser.placeOrder).toHaveBeenCalledWith(
+        expect.objectContaining({ clientOrderId: 9223372036854775807n }),
+      );
     });
 
     it("returns success:false UNRESOLVED_NOT_CONFIRMED when the resolved call has neither an orderId nor fills", async () => {

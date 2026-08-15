@@ -43,6 +43,7 @@ export interface N1AdapterConfig {
  * relative to it — renewal is cheap (one signed action) and checked every cycle via
  * refreshAccountState(), so there is no cost to erring on the early side. */
 const SESSION_REFRESH_MARGIN_SEC = 3600n;
+const MAX_CLIENT_ORDER_ID = 2n ** 63n;
 
 /** Walks an Error's `.cause` chain (bounded depth) and joins every message into one string, so a
  * doubly-wrapped SDK error (e.g. nord-ts's own `NordError("Failed to place order", { cause })`)
@@ -207,6 +208,13 @@ export class N1Adapter implements ExchangeAdapter {
 
     let clientOrderId: bigint | undefined;
     if (params.clientOrderId !== undefined) {
+      if (!/^\d+$/.test(params.clientOrderId)) {
+        return {
+          success: false,
+          reason: "REJECTED",
+          message: `clientOrderId "${params.clientOrderId}" is not a valid decimal integer`,
+        };
+      }
       try {
         clientOrderId = BigInt(params.clientOrderId);
       } catch (err) {
@@ -215,6 +223,13 @@ export class N1Adapter implements ExchangeAdapter {
           reason: "REJECTED",
           message: `clientOrderId "${params.clientOrderId}" is not a valid integer`,
           raw: err,
+        };
+      }
+      if (clientOrderId <= 0n || clientOrderId >= MAX_CLIENT_ORDER_ID) {
+        return {
+          success: false,
+          reason: "REJECTED",
+          message: `clientOrderId "${params.clientOrderId}" must be greater than zero and less than 2^63`,
         };
       }
     }

@@ -37,6 +37,27 @@ describe("OrderLifecycle", () => {
   });
 
   describe("placeQuote", () => {
+    it("generates unique positive decimal client order IDs below 2^63", async () => {
+      const ids = new Set<string>();
+
+      for (let i = 0; i < 100; i++) {
+        const result = await lifecycle.placeQuote({
+          side: "buy",
+          type: "postOnly",
+          size: 0.01,
+          price: 60000,
+        });
+        const id = result.order!.clientOrderId;
+        expect(id).toMatch(/^\d+$/);
+        expect(BigInt(id)).toBeGreaterThan(0n);
+        expect(BigInt(id)).toBeLessThan(2n ** 63n);
+        expect(adapter.placeOrderCalls[i]?.clientOrderId).toBe(id);
+        ids.add(id);
+      }
+
+      expect(ids.size).toBe(100);
+    });
+
     it("records a RESTING local order on success", async () => {
       const result = await lifecycle.placeQuote({
         side: "buy",
