@@ -290,4 +290,16 @@ describe("RiseXPaperAdapter", () => {
     const position = adapter.getPositions(MARKET)[0];
     expect(position?.unrealizedPnl).toBeCloseTo((60000 - 59000) * 0.01);
   });
+
+  it("getAccountVolume() includes confirmed simulated fills only inside since/until", async () => {
+    const placed = await adapter.placeOrder({ market: MARKET, side: "buy", type: "limit", size: 0.01, price: 60000, isReduceOnly: false });
+    if (!placed.success) throw new Error("expected placeOrder to succeed");
+    marketData.tradesByMarketId.set(MARKET_ID, [trade({ id: "fill-1", timestamp: 2000, price: 60000, size: 0.01, takerSide: "sell" })]);
+    await adapter.refreshAccountState();
+
+    await expect(adapter.getAccountVolume({ since: new Date(1000).toISOString(), until: new Date(2500).toISOString() }))
+      .resolves.toEqual([{ market: MARKET, since: new Date(1000).toISOString(), until: new Date(2500).toISOString(), baseVolume: 0.01, quoteVolume: 600 }]);
+    await expect(adapter.getAccountVolume({ since: new Date(2501).toISOString(), until: new Date(3000).toISOString() }))
+      .resolves.toEqual([]);
+  });
 });

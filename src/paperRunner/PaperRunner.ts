@@ -7,6 +7,7 @@ import type {
   MarketEngine,
 } from "../engine/MarketEngine.js";
 import type { AccountRiskState } from "../engine/types.js";
+import type { DashboardTelemetry } from "../dashboard/DashboardTelemetry.js";
 
 /** Minimal structural interface PaperRunner needs from a paper adapter — deliberately narrower
  * than N1PaperAdapter itself, so tests can inject a trivial fake without constructing a full
@@ -43,6 +44,8 @@ export interface PaperRunnerConfig {
    * Fills are wired separately, straight from TradeLog's onFillRecorded callback at the
    * entrypoint-script level, since PaperRunner never sees individual fills itself. */
   alertBus?: AlertBus;
+  /** Optional fail-open publisher. Refresh calls return immediately and are never awaited. */
+  telemetry?: DashboardTelemetry;
 }
 
 export interface CycleLogEntry {
@@ -140,6 +143,8 @@ export class PaperRunner {
       await engine.start();
     }
     this.startedAt = Date.now();
+    this.config.telemetry?.markStarted(this.startedAt);
+    this.config.telemetry?.refreshIfDue(this.startedAt);
     this.quiescing = false;
     this.running = true;
     for (const entry of this.markets) {
@@ -254,6 +259,7 @@ export class PaperRunner {
    * crashed market from whichever caller invoked this (runOnce()'s Promise.all, or this market's
    * own live timer). Returns undefined when the cycle threw, so callers can filter it out. */
   private async runMarketCycle(entry: PaperRunnerMarket): Promise<CycleLogEntry | undefined> {
+    this.config.telemetry?.refreshIfDue();
     const { market, engine } = entry;
     let summary: CycleSummary;
     try {

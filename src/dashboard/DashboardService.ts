@@ -6,11 +6,14 @@ import type {
 import type { ReconciliationAnomaly } from "../engine/Reconciliation.js";
 import type { CycleSummary, MarketEngine } from "../engine/MarketEngine.js";
 import type { LocalOrder } from "../engine/types.js";
+import type { DashboardTelemetry, VolumeTelemetry } from "./DashboardTelemetry.js";
+import type { TradeLogEntry } from "../engine/TradeLog.js";
 
 export interface DashboardMarket {
   market: string;
   engine: MarketEngine;
   adapter: ExchangeAdapter;
+  telemetry?: DashboardTelemetry;
 }
 
 export interface UnavailableMetric {
@@ -47,7 +50,7 @@ export interface MarketStatus {
   reconciliation: MarketReconciliationStatus;
   position: MarketPositionStatus | null;
   openOrders: LocalOrder[];
-  fills: UnavailableMetric;
+  fills: DashboardMetric<{ label: "current session"; entries: readonly TradeLogEntry[] }>;
   operations?: Pick<CycleSummary,
     | "positionBaseSize"
     | "inventoryReductionThresholdBase"
@@ -74,11 +77,11 @@ export interface DashboardAccountStatus {
   margin: DashboardMetric<NormalizedMarginStatus>;
   healthy: boolean;
   healthDetails: string[];
-  uptimeMs: UnavailableMetric;
+  uptimeMs: DashboardMetric<number>;
   sessionRealizedPnlUsd: number;
   sessionLossCapUsd: number;
   pnlAvailable: boolean;
-  volumes: Record<"24h" | "7d" | "30d" | "allTime", UnavailableMetric>;
+  volumes: Record<"24h" | "7d" | "30d" | "allTime", DashboardMetric<VolumeTelemetry>>;
 }
 
 export interface DashboardStatus {
@@ -114,7 +117,7 @@ function venueMode(exchangeId: string): Pick<DashboardAccountStatus, "venue" | "
   return { venue: "Unknown", mode: "UNKNOWN", label: exchangeId };
 }
 
-function buildMarketStatus({ market, engine, adapter }: DashboardMarket): MarketStatus {
+function buildMarketStatus({ market, engine, adapter, telemetry }: DashboardMarket): MarketStatus {
   const result = engine.reconciliation.getLastResult();
   const rawPosition = adapter.getPositions(market)[0];
   return {
@@ -136,7 +139,7 @@ function buildMarketStatus({ market, engine, adapter }: DashboardMarket): Market
         }
       : null,
     openOrders: engine.registry.list(),
-    fills: unavailable(
+    fills: telemetry ? { available: true, value: { label: "current session", entries: telemetry.snapshot().fills.filter((fill) => fill.market === market) } } : unavailable(
       `An in-memory, deduplicated TradeLog fill snapshot for ${market}; placements and cancellations are not volume/fill sources.`,
     ),
     operations: engine.getLastCycleSummary(),
@@ -166,6 +169,11 @@ function buildAccountStatus(
       `Cached account-trade volume from adapter.getAccountVolume({ since, until }) for the ${window} window, aggregated from confirmed fills only.`,
     );
   const risk = engine.getAccountRiskState();
+  const telemetry = accountMarkets.find((market) => market.telemetry)?.telemetry?.snapshot();
+  const volumeMetric = (window: "24h" | "7d" | "30d" | "allTime"): DashboardMetric<VolumeTelemetry> => {
+    const cached = telemetry?.volumes[window];
+    return cached ? { available: true, value: cached } : volumeSource(window);
+  };
 
   return {
     exchangeId,
@@ -174,17 +182,17 @@ function buildAccountStatus(
     margin,
     healthy: healthDetails.length === 0,
     healthDetails,
-    uptimeMs: unavailable(
+    uptimeMs: telemetry?.uptimeMs !== undefined ? { available: true, value: telemetry.uptimeMs } : unavailable(
       "The owning runner's monotonic startedAt timestamp supplied to DashboardService.",
     ),
     sessionRealizedPnlUsd: engine.getSessionRealizedPnlUsd(),
     sessionLossCapUsd: risk.sessionLossCapUsd,
     pnlAvailable: risk.pnlAvailable,
     volumes: {
-      "24h": volumeSource("trailing 24h"),
-      "7d": volumeSource("trailing 7d"),
-      "30d": volumeSource("trailing 30d"),
-      allTime: volumeSource("account lifetime"),
+      "24h": volumeMetric("24h"),
+      "7d": volumeMetric("7d"),
+      "30d": volumeMetric("30d"),
+      allTime: volumeMetric("allTime"),
     },
   };
 }

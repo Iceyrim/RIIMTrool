@@ -441,7 +441,8 @@ export class RiseXPaperAdapter implements ExchangeAdapter {
     // Section 11 locks in is for the future authenticated RiseXAdapter (Phase 3), not this one.
     const relevant = [...this.fillsByOrderId.values()]
       .flat()
-      .filter((f) => !params.market || f.market === params.market);
+      .filter((f) => (!params.market || f.market === params.market) &&
+        f.timestamp >= Date.parse(params.since) && f.timestamp <= Date.parse(params.until));
     const byMarket = new Map<string, { base: number; quote: number }>();
     for (const fill of relevant) {
       const agg = byMarket.get(fill.market) ?? { base: 0, quote: 0 };
