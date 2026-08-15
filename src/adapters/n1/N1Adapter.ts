@@ -363,7 +363,8 @@ export class N1Adapter implements ExchangeAdapter {
       marketIds: marketId !== undefined ? [marketId] : [],
     });
     return rows.map((row) => ({
-      market: this.registry.symbolFor(row.marketId),
+      market: this.registry.symbolForVolume(row.marketId),
+      marketId: row.marketId,
       since: params.since,
       until: params.until,
       baseVolume: row.volumeBase,

@@ -61,4 +61,9 @@ export class MarketRegistry {
     }
     return symbol;
   }
+
+  /** Volume history can outlive configured markets, so attribution must not discard unknown IDs. */
+  symbolForVolume(marketId: number): string | null {
+    return this.marketIdToSymbol.get(marketId) ?? null;
+  }
 }

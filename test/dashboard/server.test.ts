@@ -32,6 +32,28 @@ describe("dashboard static safety", () => {
     expect(source).toContain("state-unknown");
     expect(source).toContain('x.state!=="FILLED"&&x.state!=="CANCELLED"');
   });
+
+  it("owns content in five client-side views while preserving filters and locked settings", () => {
+    for (const view of ["dashboard", "positions-orders", "history", "alerts", "settings"]) {
+      expect(source).toContain(`data-view-panel="${view}"`);
+    }
+    expect(source).toMatch(/data-view-panel="dashboard"[\s\S]*>Account<[\s\S]*>Volume<[\s\S]*Account PnL[\s\S]*Strategy · read only[\s\S]*Risk · read only/);
+    expect(source).toMatch(/data-view-panel="positions-orders"[\s\S]*>Positions<[\s\S]*>Open Orders</);
+    expect(source).toMatch(/data-view-panel="history"[\s\S]*Trade history/);
+    expect(source).toMatch(/data-view-panel="alerts"[\s\S]*Telegram \/ operational health/);
+    expect(source).toMatch(/data-view-panel="settings"[\s\S]*Settings are read-only placeholders/);
+    expect(source).toContain('id="dex"');
+    expect(source).toContain('data-range="1d"');
+    expect(source).toContain('type="button" disabled>Editing locked</button>');
+  });
+
+  it("keeps every volume window visible and navigation limited to DOM state", () => {
+    for (const label of ['"24h":"24H"', '"7d":"7D"', '"30d":"30D"', 'allTime:"All Time"']) {
+      expect(source).toContain(label);
+    }
+    expect(source).toContain('fetch("/api/status"');
+    expect(source.match(/fetch\(/g)).toHaveLength(1);
+  });
 });
 
 function testConfig(symbol: string): EngineMarketConfig {
@@ -137,6 +159,11 @@ describe("createDashboardServer", () => {
 });
 
 describe("dashboard health handlers", () => {
+  it("exposes no dashboard action endpoints", () => {
+    const serverSource = readFileSync(new URL("../../src/dashboard/server.ts", import.meta.url), "utf8");
+    expect(serverSource).not.toMatch(/\/api\/(?:order|position|trade|settings|start|stop|cancel)/i);
+  });
+
   it.each([
     ["/healthz", { status: "ok" }],
     ["/readyz", { status: "ready" }],

@@ -98,7 +98,8 @@ export interface MarketPrice {
 }
 
 export interface AccountVolume {
-  market: string;
+  market: string | null;
+  marketId?: number;
   since: string; // RFC3339
   until: string; // RFC3339
   baseVolume: number;

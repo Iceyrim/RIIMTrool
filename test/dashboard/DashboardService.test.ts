@@ -87,8 +87,24 @@ describe("buildDashboardStatus", () => {
     const positionStatus = status.markets[0]?.position;
     expect(positionStatus).not.toBeNull();
     expect(positionStatus?.notionalUsd).toBeCloseTo(0.004 * 60000);
+    expect(positionStatus?.baseSize).toBeGreaterThan(0);
     expect(positionStatus?.unrealizedPnl).toBe(12.5);
     expect(status.totalExposureUsd).toBeCloseTo(0.004 * 60000);
+  });
+
+  it("keeps signed direction while exposing absolute mark-derived USD notional", async () => {
+    adapter.positions.push({
+      market: "BTCUSD",
+      baseSize: -0.004,
+      markPrice: 60000,
+      unrealizedPnl: -5,
+      openOrderCount: 0,
+    });
+    const market = await buildMarket("BTCUSD", adapter);
+    const position = buildDashboardStatus([market]).markets[0]?.position;
+
+    expect(position?.baseSize).toBeLessThan(0);
+    expect(position?.notionalUsd).toBeCloseTo(240);
   });
 
   it("sums exposure across multiple independent markets", async () => {

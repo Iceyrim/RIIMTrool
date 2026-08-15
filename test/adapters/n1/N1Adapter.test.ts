@@ -639,12 +639,34 @@ describe("N1Adapter", () => {
       expect(rows).toEqual([
         {
           market: MARKET,
+          marketId: MARKET_ID,
           since: "2026-01-01T00:00:00Z",
           until: "2026-01-02T00:00:00Z",
           baseVolume: 1.5,
           quoteVolume: 90000,
         },
       ]);
+    });
+
+    it("preserves authoritative totals and IDs for mixed known and historical unknown markets", async () => {
+      fakeNord.getAccountVolume.mockResolvedValue([
+        { marketId: MARKET_ID, volumeBase: 1.5, volumeQuote: 90000 },
+        { marketId: 404, volumeBase: 2, volumeQuote: 125000 },
+      ]);
+      const adapter = new N1Adapter(baseConfig());
+      await adapter.connect();
+
+      const rows = await adapter.getAccountVolume({
+        since: "2026-01-01T00:00:00Z",
+        until: "2026-01-02T00:00:00Z",
+      });
+
+      expect(rows).toEqual([
+        expect.objectContaining({ market: MARKET, marketId: MARKET_ID, quoteVolume: 90000 }),
+        expect.objectContaining({ market: null, marketId: 404, quoteVolume: 125000 }),
+      ]);
+      expect(rows.reduce((sum, row) => sum + row.baseVolume, 0)).toBe(3.5);
+      expect(rows.reduce((sum, row) => sum + row.quoteVolume, 0)).toBe(215000);
     });
 
     it("passes an empty marketIds array when no market is specified (account-wide query)", async () => {
