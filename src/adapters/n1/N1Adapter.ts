@@ -1,3 +1,4 @@
+import "../../utils/polyfills.js";
 import { Nord, NordUser, Side } from "@n1xyz/nord-ts";
 import { Connection } from "@solana/web3.js";
 import type {
