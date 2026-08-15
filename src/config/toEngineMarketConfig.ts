@@ -19,5 +19,7 @@ export function toEngineMarketConfig(config: MarketConfig): EngineMarketConfig {
     sessionLossCapUsd: config.sessionLossCapUsd,
     reduceOnlyExit: config.reduceOnlyExit,
     quoteMinimumLifetimeMs: config.quoteMinimumLifetimeMs,
+    quoteRepriceThresholdBps: config.quoteRepriceThresholdBps,
+    quoteMaximumLifetimeMs: config.quoteMaximumLifetimeMs,
   };
 }

@@ -15,9 +15,10 @@ describe("generateQuoteLadder", () => {
     expect(bids).toHaveLength(5);
     expect(asks).toHaveLength(5);
 
-    // 2bps level
-    expect(bids[0]?.price).toBeCloseTo(60000 - 60000 * (2 / 10_000));
-    expect(asks[0]?.price).toBeCloseTo(60000 + 60000 * (2 / 10_000));
+    for (const [index, bps] of [2, 3, 4, 7, 10].entries()) {
+      expect(bids[index]?.price).toBeCloseTo(60000 - 60000 * (bps / 10_000));
+      expect(asks[index]?.price).toBeCloseTo(60000 + 60000 * (bps / 10_000));
+    }
   });
 
   it("uses equal size across every level, not growing size at outer levels", () => {

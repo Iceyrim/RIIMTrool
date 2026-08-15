@@ -35,6 +35,19 @@ export interface CycleSummary {
   };
   /** Deduplicated, capped reasons explaining ladder levels denied before placement. */
   riskSkipMessages: string[];
+  /** Managed resting-order cleanup performed while session PnL is unavailable. */
+  pnlOutageCancellation: {
+    attempted: number;
+    succeeded: number;
+    failed: number;
+    unresolved: number;
+    messages: string[];
+  };
+  quoteRefreshReason?:
+    | "below-minimum hold"
+    | "below-threshold hold"
+    | "threshold refresh"
+    | "maximum-age refresh";
   reduceOnlyAction: "placed" | "repriced" | "held" | "skipped_duplicate" | "none";
   /** Set when the entire cycle skipped new placements (margin risk, degraded reconciliation) —
    * not just an individual order rejection. */
@@ -83,6 +96,8 @@ export class MarketEngine {
   private sessionPnlUnavailable = false;
   private sessionPnlUnavailableReason?: string;
   private quiescing = false;
+  private quoteLadderReferencePrice?: number;
+  private quoteLadderRefreshedAt?: number;
 
   constructor(
     private readonly adapter: ExchangeAdapter,
@@ -287,8 +302,27 @@ export class MarketEngine {
         orderNotional: 0,
       },
       riskSkipMessages: [],
+      pnlOutageCancellation: {
+        attempted: 0,
+        succeeded: 0,
+        failed: 0,
+        unresolved: 0,
+        messages: [],
+      },
       reduceOnlyAction: "none",
     };
+
+    // A stale/unknown realized-PnL total invalidates the session loss cap. Reconciliation above
+    // must still run first, but once the feed is known unavailable the safest state is no managed
+    // resting exposure at all. This deliberately precedes the other early-return gates: margin or
+    // reconciliation trouble must not leave our own confirmed-open orders resting.
+    if (this.sessionPnlUnavailable) {
+      summary.pnlOutageCancellation = await this.cancelManagedOrdersForPnlOutage();
+      summary.blockedReason =
+        `Session realized-PnL unavailable for ${this.config.symbol} ` +
+        `(${this.sessionPnlUnavailableReason}); holding all new placements this cycle`;
+      return summary;
+    }
 
     const marginCheck = this.riskManager.checkMarginHealth();
     if (!marginCheck.allowed) {
@@ -300,19 +334,6 @@ export class MarketEngine {
       summary.blockedReason =
         `Reconciliation degraded (streak ${this.reconciliation.getDegradedStreak()}); ` +
         `holding all new placements for ${this.config.symbol} this cycle`;
-      return summary;
-    }
-
-    // Session realized-PnL feeds RiskManager's sessionLossCapUsd check directly (see
-    // manageQuoteLadder's canPlaceOrder call below) — if the last drain attempt failed, that
-    // number is stale/unknown, so the loss cap can no longer be trusted to catch a real breach.
-    // Blocks reduce-only exits too, same as the reconciliation-degraded block above: a reduce-
-    // only exit is still a new placement, and there is no case where placing one is safer than
-    // holding while the risk gate itself is unconfirmed.
-    if (this.sessionPnlUnavailable) {
-      summary.blockedReason =
-        `Session realized-PnL unavailable for ${this.config.symbol} ` +
-        `(${this.sessionPnlUnavailableReason}); holding all new placements this cycle`;
       return summary;
     }
 
@@ -343,7 +364,15 @@ export class MarketEngine {
       }
     }
 
-    const { placed, attempted, cancelled, failureMessages, riskSkippedLevels, riskSkipMessages } =
+    const {
+      placed,
+      attempted,
+      cancelled,
+      failureMessages,
+      riskSkippedLevels,
+      riskSkipMessages,
+      refreshReason,
+    } =
       await this.manageQuoteLadder(position, reconciliationResult, {
         progressiveOpenOrderCount,
         openBuyQuantity,
@@ -357,9 +386,92 @@ export class MarketEngine {
     summary.quoteFailureMessages = failureMessages;
     summary.riskSkippedLevels = riskSkippedLevels;
     summary.riskSkipMessages = riskSkipMessages;
+    summary.quoteRefreshReason = refreshReason;
 
     this.registry.save();
     return summary;
+  }
+
+  private async cancelManagedOrdersForPnlOutage(): Promise<
+    CycleSummary["pnlOutageCancellation"]
+  > {
+    const messages: string[] = [];
+    const MAX_MESSAGES = 5;
+    const openIds = new Set(
+      this.adapter.getOpenOrders(this.config.symbol).map((order) => order.exchangeOrderId),
+    );
+    const managedActive = this.registry.list().filter(
+      (order) =>
+        order.exchangeOrderId !== null &&
+        (order.state === "RESTING" ||
+          order.state === "PENDING_CANCEL" ||
+          order.state === "UNKNOWN"),
+    );
+    const managedOpen = managedActive.filter((order) =>
+      openIds.has(order.exchangeOrderId as string),
+    );
+
+    // The cycle's reconciliation refresh already proved these IDs are no longer resting. Resolve
+    // them without issuing a cancel; fill replay distinguishes filled from already-cancelled.
+    for (const order of managedActive) {
+      if (!openIds.has(order.exchangeOrderId as string)) {
+        await this.resolveCleanupTerminal(order, new Set<string>(), new Set<string>());
+      }
+    }
+
+    let failed = 0;
+    for (const order of managedOpen) {
+      const exchangeOrderId = order.exchangeOrderId as string;
+      try {
+        const result = await this.adapter.cancelOrder(exchangeOrderId, this.config.symbol);
+        if (!result.success) {
+          failed++;
+          if (messages.length < MAX_MESSAGES) {
+            messages.push(`Failed to cancel managed order ${exchangeOrderId}`);
+          }
+          continue;
+        }
+      } catch (err) {
+        failed++;
+        if (messages.length < MAX_MESSAGES) {
+          messages.push(`Failed to cancel managed order ${exchangeOrderId}: ${String(err)}`);
+        }
+      }
+    }
+
+    try {
+      await this.adapter.refreshAccountState();
+    } catch (err) {
+      if (messages.length < MAX_MESSAGES) {
+        messages.push(`Failed to refresh after managed cancellation attempts: ${String(err)}`);
+      }
+    }
+    const finalOpenIds = new Set(
+      this.adapter.getOpenOrders(this.config.symbol).map((order) => order.exchangeOrderId),
+    );
+    let succeeded = 0;
+    for (const order of managedOpen) {
+      if (!finalOpenIds.has(order.exchangeOrderId as string)) {
+        succeeded++;
+        await this.resolveCleanupTerminal(order, new Set<string>(), new Set<string>());
+      }
+    }
+    // Never claim the market is clean while a registry-managed ID remains exchange-open. Those
+    // entries retain their prior state and are retried on the next blocked cycle.
+    const unresolved = managedOpen.filter((order) =>
+      finalOpenIds.has(order.exchangeOrderId as string),
+    ).length;
+    if (unresolved > 0 && messages.length < MAX_MESSAGES) {
+      messages.push(`${unresolved} managed order(s) remain open and will be retried`);
+    }
+    this.registry.save();
+    return {
+      attempted: managedOpen.length,
+      succeeded,
+      failed,
+      unresolved,
+      messages,
+    };
   }
 
   private computeExitPrice(currentBaseSize: number, markPrice: number): number {
@@ -445,14 +557,70 @@ export class MarketEngine {
     failureMessages: string[];
     riskSkippedLevels: CycleSummary["riskSkippedLevels"];
     riskSkipMessages: string[];
+    refreshReason?: CycleSummary["quoteRefreshReason"];
   }> {
     const now = Date.now();
     const restingQuotes = this.registry.listByState("RESTING").filter((o) => !o.isReduceOnly);
+    const expectedQuoteCount = this.config.quoteLevels * 2;
+    const hasCompleteLadder = restingQuotes.length === expectedQuoteCount;
+    const marketPrice = await this.adapter.getMarketPrice(this.config.symbol);
+
+    if (hasCompleteLadder && this.quoteLadderReferencePrice === undefined) {
+      this.quoteLadderReferencePrice =
+        restingQuotes.reduce((sum, order) => sum + order.price, 0) / restingQuotes.length;
+      // The latest placement approximates completion on a ladder recovered at startup and avoids
+      // treating placement latency across the ladder as quote age.
+      this.quoteLadderRefreshedAt = Math.max(...restingQuotes.map((order) => order.placedAt));
+    }
+
+    let refreshReason: CycleSummary["quoteRefreshReason"];
+    let refreshTriggered = false;
+    if (
+      hasCompleteLadder &&
+      this.quoteLadderReferencePrice !== undefined &&
+      this.quoteLadderRefreshedAt !== undefined
+    ) {
+      const ageMs = now - this.quoteLadderRefreshedAt;
+      const movementBps =
+        (Math.abs(marketPrice.mark - this.quoteLadderReferencePrice) /
+          this.quoteLadderReferencePrice) *
+        10_000;
+      const maximumLifetimeMs = this.config.quoteMaximumLifetimeMs ?? 120_000;
+      const repriceThresholdBps = this.config.quoteRepriceThresholdBps ?? 1;
+      if (ageMs < this.config.quoteMinimumLifetimeMs) {
+        refreshReason = "below-minimum hold";
+      } else if (ageMs >= maximumLifetimeMs) {
+        refreshReason = "maximum-age refresh";
+        refreshTriggered = true;
+      } else if (movementBps >= repriceThresholdBps - 1e-9) {
+        refreshReason = "threshold refresh";
+        refreshTriggered = true;
+      } else {
+        refreshReason = "below-threshold hold";
+      }
+    }
+
+    const emptyRiskSkippedLevels: CycleSummary["riskSkippedLevels"] = {
+      openOrderCapacity: 0,
+      aggregateLongExposure: 0,
+      aggregateShortExposure: 0,
+      orderSize: 0,
+      orderNotional: 0,
+    };
+    if (hasCompleteLadder && !refreshTriggered) {
+      return {
+        placed: 0,
+        attempted: 0,
+        cancelled: 0,
+        failureMessages: [],
+        riskSkippedLevels: emptyRiskSkippedLevels,
+        riskSkipMessages: [],
+        refreshReason,
+      };
+    }
 
     let cancelled = 0;
-    const stale = restingQuotes.filter(
-      (o) => now - o.placedAt >= this.config.quoteMinimumLifetimeMs,
-    );
+    const stale = refreshTriggered ? restingQuotes : [];
     for (const order of stale) {
       const remainingBeforeCancel = Math.max(0, order.size - order.filledSize);
       const result = await this.lifecycle.cancelOrder(order.clientOrderId);
@@ -470,7 +638,6 @@ export class MarketEngine {
     // still fresh from a previous cycle.
     const stillResting = this.registry.listByState("RESTING").filter((o) => !o.isReduceOnly);
 
-    const marketPrice = await this.adapter.getMarketPrice(this.config.symbol);
     const size = pickOrderSize(this.config.orderSize);
     const ladder = generateQuoteLadder({
       reservationPrice: marketPrice.mark,
@@ -484,13 +651,7 @@ export class MarketEngine {
     let attempted = 0;
     const failureMessages: string[] = [];
     const MAX_FAILURE_MESSAGES = 5;
-    const riskSkippedLevels: CycleSummary["riskSkippedLevels"] = {
-      openOrderCapacity: 0,
-      aggregateLongExposure: 0,
-      aggregateShortExposure: 0,
-      orderSize: 0,
-      orderNotional: 0,
-    };
+    const riskSkippedLevels = emptyRiskSkippedLevels;
     const riskSkipMessages: string[] = [];
     const MAX_RISK_MESSAGES = 5;
 
@@ -557,6 +718,30 @@ export class MarketEngine {
       }
     }
 
-    return { placed, attempted, cancelled, failureMessages, riskSkippedLevels, riskSkipMessages };
+    const finalRestingQuotes = this.registry
+      .listByState("RESTING")
+      .filter((order) => !order.isReduceOnly);
+    const replacedOriginalLadder = restingQuotes.every(
+      (original) => !finalRestingQuotes.some((order) => order.clientOrderId === original.clientOrderId),
+    );
+    if (
+      finalRestingQuotes.length === expectedQuoteCount &&
+      (!refreshTriggered || replacedOriginalLadder)
+    ) {
+      this.quoteLadderReferencePrice = marketPrice.mark;
+      // Start the next lifetime window after all adapter operations finish. A slow cancel/place
+      // sequence therefore cannot consume the replacement ladder's lifetime before it rests.
+      this.quoteLadderRefreshedAt = Date.now();
+    }
+
+    return {
+      placed,
+      attempted,
+      cancelled,
+      failureMessages,
+      riskSkippedLevels,
+      riskSkipMessages,
+      refreshReason,
+    };
   }
 }

@@ -697,6 +697,8 @@ describe("PaperRunner PnL-drain failure handling", () => {
     expect(blockedCycle[0]?.summary.blockedReason).toMatch(/Session realized-PnL unavailable/);
     expect(blockedCycle[0]?.summary.blockedReason).toMatch(/network hiccup/);
     expect(blockedCycle[0]?.summary.quotesPlaced).toBe(0);
+    expect(blockedCycle[0]?.summary.pnlOutageCancellation.unresolved).toBe(0);
+    expect(btcAdapter.getOpenOrders("BTCUSD")).toHaveLength(0);
   });
 
   it("recovers once a subsequent drain succeeds after a prior failure", async () => {

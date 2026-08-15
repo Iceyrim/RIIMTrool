@@ -57,10 +57,11 @@ export const marketConfigSchema = z
     riskLimits: riskLimitsSchema,
     sessionLossCapUsd: z.number().positive(),
     reduceOnlyExit: reduceOnlyExitSchema.default({}),
-    /** Normal (non-reduce-only) quote refresh cadence. SPEC.md Section 6 root cause for the 5c
-     * bug: this must be a named, overridable value, never a bare literal reused for reduce-only
-     * exits too. Default is the proven ~2s value. */
-    quoteMinimumLifetimeMs: z.number().int().positive().default(2_000),
+    /** Normal (non-reduce-only) quote refresh policy. Kept separate from reduce-only exit
+     * timing so the two order classes cannot accidentally share lifecycle semantics. */
+    quoteMinimumLifetimeMs: z.number().int().nonnegative().default(30_000),
+    quoteRepriceThresholdBps: z.number().positive().default(1),
+    quoteMaximumLifetimeMs: z.number().int().nonnegative().default(120_000),
   })
   .refine((m) => m.levelSpacingBps.length === m.quoteLevels, {
     message: "levelSpacingBps length must match quoteLevels",
@@ -77,6 +78,10 @@ export const marketConfigSchema = z
   .refine((m) => m.reduceOnlyExit.minHoldMs < m.reduceOnlyExit.maxHoldMs, {
     message: "reduceOnlyExit.minHoldMs must be < reduceOnlyExit.maxHoldMs",
     path: ["reduceOnlyExit"],
+  })
+  .refine((m) => m.quoteMaximumLifetimeMs >= m.quoteMinimumLifetimeMs, {
+    message: "quoteMaximumLifetimeMs must be >= quoteMinimumLifetimeMs",
+    path: ["quoteMaximumLifetimeMs"],
   })
   .refine((m) => m.quoteLevels * 2 + 1 <= m.riskLimits.maxOpenOrders, {
     message: "two-sided quoteLevels plus one permitted exit slot must not exceed maxOpenOrders",

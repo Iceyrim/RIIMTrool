@@ -62,8 +62,10 @@ export interface EngineMarketConfig {
    * once, in prose) — surfaced as config here so it's not a hidden literal, matching Section 6's
    * "no hardcoded literal alongside a configurable system" lesson. */
   reduceOnlyExit: ReduceOnlyExitConfig;
-  /** Normal (non-reduce-only) quote refresh cadence, ms. SPEC.md Section 6 (5c root cause):
-   * proven value ~2000ms, but must be a named config value, not a bare literal reused for both
-   * quote types. */
+  /** Normal (non-reduce-only) full-ladder refresh policy. */
   quoteMinimumLifetimeMs: number;
+  /** Optional only for backward-compatible programmatic construction; parsed config supplies it. */
+  quoteRepriceThresholdBps?: number;
+  /** Optional only for backward-compatible programmatic construction; parsed config supplies it. */
+  quoteMaximumLifetimeMs?: number;
 }

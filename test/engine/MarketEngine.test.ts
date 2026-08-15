@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MarketEngine } from "../../src/engine/MarketEngine.js";
 import type { EngineMarketConfig } from "../../src/engine/types.js";
 import { FakeExchangeAdapter } from "./fakeAdapter.js";
@@ -26,7 +26,9 @@ function testConfig(overrides: Partial<EngineMarketConfig> = {}): EngineMarketCo
     },
     sessionLossCapUsd: 15,
     reduceOnlyExit: { minHoldMs: 45_000, maxHoldMs: 300_000 },
-    quoteMinimumLifetimeMs: 2_000,
+    quoteMinimumLifetimeMs: 30_000,
+    quoteRepriceThresholdBps: 1,
+    quoteMaximumLifetimeMs: 120_000,
     ...overrides,
   };
 }
@@ -45,6 +47,10 @@ describe("MarketEngine", () => {
   beforeEach(() => {
     adapter = new FakeExchangeAdapter();
     adapter.marketPrices.set(MARKET, { market: MARKET, mark: 60000, index: 60000 });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("start() seeds local state from exchange truth before any cycle runs", async () => {
@@ -266,6 +272,180 @@ describe("MarketEngine", () => {
     const secondCycle = await engine.runCycle();
     expect(secondCycle.quotesPlaced).toBe(0);
     expect(secondCycle.quotesCancelled).toBe(0);
+    expect(secondCycle.quoteRefreshReason).toBe("below-minimum hold");
+  });
+
+  async function placeInitialLadder(engine: MarketEngine, now = 1_000_000): Promise<void> {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    await engine.start();
+    const first = await engine.runCycle();
+    expect(first.quotesPlaced).toBe(10);
+  }
+
+  it("holds the complete ladder before 30 seconds despite mark movement", async () => {
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+    await placeInitialLadder(engine);
+    const before = engine.registry.listByState("RESTING").map((order) => ({
+      id: order.clientOrderId,
+      placedAt: order.placedAt,
+    }));
+
+    adapter.marketPrices.set(MARKET, { market: MARKET, mark: 61_000, index: 61_000 });
+    vi.setSystemTime(1_029_999);
+    const summary = await engine.runCycle();
+
+    expect(summary.quoteRefreshReason).toBe("below-minimum hold");
+    expect(summary.quotesCancelled).toBe(0);
+    expect(summary.quotesPlaced).toBe(0);
+    expect(engine.registry.listByState("RESTING").map((order) => ({
+      id: order.clientOrderId,
+      placedAt: order.placedAt,
+    }))).toEqual(before);
+  });
+
+  it("holds after minimum lifetime when movement is below 1 bp and before maximum age", async () => {
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+    await placeInitialLadder(engine);
+    adapter.marketPrices.set(MARKET, { market: MARKET, mark: 60_003, index: 60_003 });
+    vi.setSystemTime(1_030_000);
+
+    const summary = await engine.runCycle();
+    expect(summary.quoteRefreshReason).toBe("below-threshold hold");
+    expect(summary.quotesCancelled).toBe(0);
+    expect(summary.quotesPlaced).toBe(0);
+  });
+
+  it.each([
+    ["exactly", 60_006],
+    ["above", 60_012],
+  ])("performs one full-ladder refresh %s 1 bp movement", async (_case, mark) => {
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+    await placeInitialLadder(engine);
+    const before = engine.registry.listByState("RESTING");
+    const oldIds = new Set(before.map((order) => order.clientOrderId));
+    const oldPlacedAt = Math.max(...before.map((order) => order.placedAt));
+    adapter.marketPrices.set(MARKET, { market: MARKET, mark, index: mark });
+    vi.setSystemTime(1_030_000);
+
+    const summary = await engine.runCycle();
+    const refreshed = engine.registry.listByState("RESTING");
+    expect(summary.quoteRefreshReason).toBe("threshold refresh");
+    expect(summary.quotesCancelled).toBe(10);
+    expect(summary.quotesPlaced).toBe(10);
+    expect(refreshed).toHaveLength(10);
+    expect(refreshed.every((order) => !oldIds.has(order.clientOrderId))).toBe(true);
+    expect(refreshed.every((order) => order.placedAt > oldPlacedAt)).toBe(true);
+  });
+
+  it("forces a full-ladder refresh at exactly 120 seconds with an unchanged mark", async () => {
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+    await placeInitialLadder(engine);
+    vi.setSystemTime(1_120_000);
+
+    const summary = await engine.runCycle();
+    expect(summary.quoteRefreshReason).toBe("maximum-age refresh");
+    expect(summary.quotesCancelled).toBe(10);
+    expect(summary.quotesPlaced).toBe(10);
+  });
+
+  it("does not force refresh before 120 seconds with an unchanged mark", async () => {
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+    await placeInitialLadder(engine);
+    vi.setSystemTime(1_119_999);
+
+    const summary = await engine.runCycle();
+    expect(summary.quoteRefreshReason).toBe("below-threshold hold");
+    expect(summary.quotesCancelled).toBe(0);
+    expect(summary.quotesPlaced).toBe(0);
+  });
+
+  it("does not immediately refresh again when adapter latency consumed wall-clock time", async () => {
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+    await placeInitialLadder(engine);
+    adapter.marketPrices.set(MARKET, { market: MARKET, mark: 60_006, index: 60_006 });
+    vi.setSystemTime(1_030_000);
+    const originalCancel = adapter.cancelOrder.bind(adapter);
+    const originalPlace = adapter.placeOrder.bind(adapter);
+    adapter.cancelOrder = async (...args) => {
+      vi.setSystemTime(Date.now() + 10_000);
+      return originalCancel(...args);
+    };
+    adapter.placeOrder = async (...args) => {
+      vi.setSystemTime(Date.now() + 10_000);
+      return originalPlace(...args);
+    };
+
+    const refreshed = await engine.runCycle();
+    expect(refreshed.quoteRefreshReason).toBe("threshold refresh");
+    expect(Date.now()).toBeGreaterThan(1_120_000);
+    const cancelCount = adapter.cancelOrderCalls.length;
+    const immediate = await engine.runCycle();
+    expect(immediate.quoteRefreshReason).toBe("below-minimum hold");
+    expect(adapter.cancelOrderCalls).toHaveLength(cancelCount);
+  });
+
+  it("reconciles and replaces a missing level without refreshing retained levels", async () => {
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+    await placeInitialLadder(engine);
+    const missing = engine.registry.listByState("RESTING")[0]!;
+    const retainedIds = engine.registry
+      .listByState("RESTING")
+      .slice(1)
+      .map((order) => order.clientOrderId);
+    adapter.openOrders = adapter.openOrders.filter(
+      (order) => order.exchangeOrderId !== missing.exchangeOrderId,
+    );
+    adapter.fillsByOrderId.set(missing.exchangeOrderId!, [{
+      exchangeOrderId: missing.exchangeOrderId!,
+      tradeId: "missing-fill",
+      market: MARKET,
+      side: missing.side,
+      price: missing.price,
+      size: missing.size,
+      timestamp: Date.now(),
+    }]);
+
+    const summary = await engine.runCycle();
+    expect(summary.quotesCancelled).toBe(0);
+    expect(summary.quotesPlaced).toBe(1);
+    const restingIds = engine.registry.listByState("RESTING").map((order) => order.clientOrderId);
+    expect(retainedIds.every((id) => restingIds.includes(id))).toBe(true);
+  });
+
+  it("keeps progressive risk enforcement when a missing level is risk-denied", async () => {
+    const config = testConfig();
+    const engine = new MarketEngine(adapter, config, tempPaths());
+    await placeInitialLadder(engine);
+    const missingBuy = engine.registry
+      .listByState("RESTING")
+      .find((order) => order.side === "buy")!;
+    adapter.openOrders = adapter.openOrders.filter(
+      (order) => order.exchangeOrderId !== missingBuy.exchangeOrderId,
+    );
+    adapter.fillsByOrderId.set(missingBuy.exchangeOrderId!, [{
+      exchangeOrderId: missingBuy.exchangeOrderId!,
+      tradeId: "risk-fill",
+      market: MARKET,
+      side: missingBuy.side,
+      price: missingBuy.price,
+      size: missingBuy.size,
+      timestamp: Date.now(),
+    }]);
+    adapter.positions.push({
+      market: MARKET,
+      baseSize: config.riskLimits.maxLongPosition,
+      markPrice: 60_000,
+      unrealizedPnl: 0,
+      openOrderCount: 9,
+    });
+
+    const summary = await engine.runCycle();
+    expect(summary.quotesPlaced).toBe(0);
+    expect(summary.riskSkippedLevels.aggregateLongExposure).toBe(1);
+    expect(
+      engine.registry.listByState("RESTING").filter((order) => !order.isReduceOnly),
+    ).toHaveLength(9);
   });
 
   it("SPEC 5c: places a reduce-only exit once inventory exceeds the threshold, instead of skewing the normal ladder", async () => {
@@ -429,6 +609,117 @@ describe("MarketEngine", () => {
   });
 
   describe("session PnL availability gate", () => {
+    it("cancels only managed resting orders and reports the outage cleanup", async () => {
+      const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+      await engine.start();
+      await engine.runCycle();
+      const managedIds = engine.registry.listByState("RESTING").map((o) => o.exchangeOrderId);
+      adapter.openOrders.push({
+        exchangeOrderId: "unmanaged",
+        market: MARKET,
+        side: "buy",
+        price: 59000,
+        size: 0.001,
+        filledSize: 0,
+        remainingSize: 0.001,
+        isReduceOnly: false,
+        state: "open",
+      });
+      engine.markSessionPnlUnavailable("drain failed");
+
+      const summary = await engine.runCycle();
+
+      expect(summary.pnlOutageCancellation).toMatchObject({
+        attempted: managedIds.length,
+        succeeded: managedIds.length,
+        failed: 0,
+        unresolved: 0,
+      });
+      expect(adapter.cancelOrderCalls.map((call) => call.exchangeOrderId)).toEqual(managedIds);
+      expect(adapter.getOpenOrders(MARKET).map((o) => o.exchangeOrderId)).toEqual(["unmanaged"]);
+      expect(summary.quotesAttempted).toBe(0);
+      expect(adapter.placeOrderCalls).toHaveLength(10);
+      expect(engine.registry.listByState("RESTING")).toHaveLength(0);
+    });
+
+    it("continues after one cancellation failure and retries the unresolved managed ID", async () => {
+      const engine = new MarketEngine(
+        adapter,
+        testConfig({ quoteLevels: 2, levelSpacingBps: [2, 3] }),
+        tempPaths(),
+      );
+      await engine.start();
+      await engine.runCycle();
+      const failedId = engine.registry.listByState("RESTING")[0]?.exchangeOrderId as string;
+      const originalCancel = adapter.cancelOrder.bind(adapter);
+      let failOnce = true;
+      vi.spyOn(adapter, "cancelOrder").mockImplementation(async (id, market) => {
+        if (id === failedId && failOnce) {
+          failOnce = false;
+          adapter.cancelOrderCalls.push({ exchangeOrderId: id, market });
+          return { success: false, exchangeOrderId: id };
+        }
+        return originalCancel(id, market);
+      });
+      engine.markSessionPnlUnavailable("drain failed");
+
+      const first = await engine.runCycle();
+      expect(first.pnlOutageCancellation).toMatchObject({
+        attempted: 4,
+        succeeded: 3,
+        failed: 1,
+        unresolved: 1,
+      });
+      expect(adapter.getOpenOrders(MARKET).map((o) => o.exchangeOrderId)).toEqual([failedId]);
+      expect(engine.registry.findByExchangeOrderId(failedId)?.state).toBe("RESTING");
+
+      const second = await engine.runCycle();
+      expect(second.pnlOutageCancellation).toMatchObject({
+        attempted: 1,
+        succeeded: 1,
+        failed: 0,
+        unresolved: 0,
+      });
+      expect(adapter.getOpenOrders(MARKET)).toHaveLength(0);
+      expect(engine.registry.findByExchangeOrderId(failedId)?.state).toBe("CANCELLED");
+    });
+
+    it("makes filled and already-cancelled managed orders terminal after reconciliation", async () => {
+      const engine = new MarketEngine(
+        adapter,
+        testConfig({ quoteLevels: 1, levelSpacingBps: [2] }),
+        tempPaths(),
+      );
+      await engine.start();
+      await engine.runCycle();
+      const [filled, cancelled] = engine.registry.listByState("RESTING");
+      adapter.openOrders = [];
+      adapter.fillsByOrderId.set(filled!.exchangeOrderId!, [
+        {
+          tradeId: "fill-during-outage",
+          exchangeOrderId: filled!.exchangeOrderId!,
+          market: MARKET,
+          side: filled!.side,
+          price: filled!.price,
+          size: filled!.size,
+          timestamp: Date.now(),
+        },
+      ]);
+      engine.markSessionPnlUnavailable("drain failed");
+
+      const summary = await engine.runCycle();
+
+      expect(summary.pnlOutageCancellation).toMatchObject({
+        attempted: 0,
+        succeeded: 0,
+        failed: 0,
+        unresolved: 0,
+      });
+      expect(engine.registry.get(filled!.clientOrderId)?.state).toBe("FILLED");
+      expect(engine.registry.get(cancelled!.clientOrderId)?.state).toBe("CANCELLED");
+      expect(adapter.cancelOrderCalls).toHaveLength(0);
+    });
+
     it("blocks all new placements, including a reduce-only exit, while session PnL is marked unavailable", async () => {
       // Position exceeds inventoryReductionThresholdBase (0.003) — without the PnL gate this
       // would otherwise place a reduce-only exit (see the SPEC 5c test above).

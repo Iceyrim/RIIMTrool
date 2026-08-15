@@ -37,6 +37,22 @@ describe("loadMarketsConfig", () => {
     const config = loadMarketsConfig(writeTempConfig(validYaml));
     expect(config.markets).toHaveLength(1);
     expect(config.markets[0]?.exchangeSymbol).toBe("BTCUSDC");
+    expect(config.markets[0]?.quoteMinimumLifetimeMs).toBe(30_000);
+    expect(config.markets[0]?.quoteRepriceThresholdBps).toBe(1);
+    expect(config.markets[0]?.quoteMaximumLifetimeMs).toBe(120_000);
+  });
+
+  it.each([
+    ["negative minimum lifetime", "    quoteMinimumLifetimeMs: -1\n", /quoteMinimumLifetimeMs/],
+    ["zero repricing threshold", "    quoteRepriceThresholdBps: 0\n", /quoteRepriceThresholdBps/],
+    [
+      "maximum lifetime below minimum lifetime",
+      "    quoteMinimumLifetimeMs: 30000\n    quoteMaximumLifetimeMs: 29999\n",
+      /quoteMaximumLifetimeMs/,
+    ],
+  ])("rejects %s", (_description, refreshConfig, expected) => {
+    const invalid = validYaml.replace("    sessionLossCapUsd: 15\n", `    sessionLossCapUsd: 15\n${refreshConfig}`);
+    expect(() => loadMarketsConfig(writeTempConfig(invalid))).toThrow(expected);
   });
 
   it("throws with field-level detail on missing required fields", () => {
