@@ -1,7 +1,11 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { AlertBus } from "../alerting/AlertBus.js";
-import type { CycleSummary, MarketEngine } from "../engine/MarketEngine.js";
+import type {
+  CycleSummary,
+  ManagedOrderCleanupResult,
+  MarketEngine,
+} from "../engine/MarketEngine.js";
 
 /** Minimal structural interface PaperRunner needs from a paper adapter — deliberately narrower
  * than N1PaperAdapter itself, so tests can inject a trivial fake without constructing a full
@@ -61,6 +65,12 @@ export interface SoakReport {
   finalSessionRealizedPnlUsd: Record<string, number>;
 }
 
+export interface PaperRunnerShutdownResult {
+  report: SoakReport;
+  cleanup: ManagedOrderCleanupResult[];
+  successful: boolean;
+}
+
 /**
  * Drives one or more MarketEngines, logging every cycle and producing the soak-test report
  * SPEC.md Section 9.3 requires before any live change.
@@ -84,7 +94,9 @@ export interface SoakReport {
 export class PaperRunner {
   private readonly marketTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly inFlight = new Set<string>();
+  private readonly activeCycles = new Set<Promise<CycleLogEntry | undefined>>();
   private running = false;
+  private quiescing = false;
   private durationTimer?: ReturnType<typeof setTimeout>;
   private cycleCount = 0;
   private startedAt = 0;
@@ -111,6 +123,7 @@ export class PaperRunner {
       await engine.start();
     }
     this.startedAt = Date.now();
+    this.quiescing = false;
     this.running = true;
     for (const entry of this.markets) {
       this.scheduleNextTick(entry);
@@ -137,7 +150,7 @@ export class PaperRunner {
     } else {
       this.inFlight.add(entry.market);
       try {
-        await this.runMarketCycle(entry);
+        await this.trackCycle(entry);
       } finally {
         this.inFlight.delete(entry.market);
       }
@@ -149,8 +162,61 @@ export class PaperRunner {
   /** Runs exactly one cycle across every configured market, concurrently. Exposed publicly so
    * tests (and a manual single-step invocation) don't have to wait on real interval timing. */
   async runOnce(): Promise<CycleLogEntry[]> {
-    const results = await Promise.all(this.markets.map((entry) => this.runMarketCycle(entry)));
+    if (this.quiescing) return [];
+    const results = await Promise.all(this.markets.map((entry) => this.trackCycle(entry)));
     return results.filter((entry): entry is CycleLogEntry => entry !== undefined);
+  }
+
+  private trackCycle(entry: PaperRunnerMarket): Promise<CycleLogEntry | undefined> {
+    const cycle = this.runMarketCycle(entry);
+    this.activeCycles.add(cycle);
+    void cycle.then(
+      () => this.activeCycles.delete(cycle),
+      () => this.activeCycles.delete(cycle),
+    );
+    return cycle;
+  }
+
+  /** Stops scheduling synchronously, closes every engine's placement gate, then awaits cycles. */
+  async quiesce(): Promise<void> {
+    if (!this.quiescing) {
+      this.quiescing = true;
+      this.running = false;
+      for (const timer of this.marketTimers.values()) clearTimeout(timer);
+      this.marketTimers.clear();
+      if (this.durationTimer) clearTimeout(this.durationTimer);
+      for (const { engine } of this.markets) engine.quiesce();
+    }
+    await Promise.allSettled([...this.activeCycles]);
+  }
+
+  /** Quiesces, verifies managed-order cleanup per market, persists state, and returns status. */
+  async shutdown(): Promise<PaperRunnerShutdownResult> {
+    await this.quiesce();
+    const cleanup = await Promise.all(
+      this.markets.map(async ({ market, engine }) => {
+        try {
+          return await engine.cleanupManagedOrders();
+        } catch (err) {
+          const managedIds = engine.registry
+            .list()
+            .filter((order) => order.exchangeOrderId !== null)
+            .map((order) => order.exchangeOrderId as string);
+          return {
+            market,
+            attempted: [],
+            cancelled: [],
+            terminal: [],
+            failed: managedIds,
+            unresolved: managedIds,
+            successful: false,
+            error: String(err),
+          } satisfies ManagedOrderCleanupResult & { error: string };
+        }
+      }),
+    );
+    const report = this.stop();
+    return { report, cleanup, successful: cleanup.every((result) => result.successful) };
   }
 
   /** Runs one cycle for exactly one market: engine.runCycle(), PnL drain, logging. A thrown error

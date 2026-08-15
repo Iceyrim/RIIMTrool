@@ -281,6 +281,134 @@ describe("PaperRunner", () => {
     expect(report.totalQuotesPlaced).toBeGreaterThan(0);
     expect(report.finalSessionRealizedPnlUsd).toEqual({ BTCUSD: 0 });
   });
+
+  it("quiesce waits for an in-flight cycle and prevents its pending placements", async () => {
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+    });
+    await runner.start();
+    let releaseRefresh!: () => void;
+    btcAdapter.refreshAccountState = () =>
+      new Promise<void>((resolve) => {
+        releaseRefresh = resolve;
+      });
+    const cycle = runner.runOnce();
+    await vi.waitFor(() => expect(releaseRefresh).toBeTypeOf("function"));
+    let quiesced = false;
+    const shutdown = runner.quiesce().then(() => {
+      quiesced = true;
+    });
+    expect(quiesced).toBe(false);
+    releaseRefresh();
+    await Promise.all([cycle, shutdown]);
+    expect(btcAdapter.placeOrderCalls).toHaveLength(0);
+    expect(await runner.runOnce()).toEqual([]);
+  });
+
+  it("shutdown cancels managed orders across markets but never unmanaged orders", async () => {
+    const btcEngine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const ethEngine = new MarketEngine(ethAdapter, testConfig("ETHUSD"), tempPaths("ETHUSD"));
+    const runner = new PaperRunner(
+      [
+        { market: "BTCUSD", engine: btcEngine, pnlSource: btcPnl },
+        { market: "ETHUSD", engine: ethEngine, pnlSource: ethPnl },
+      ],
+      { intervalMs: 1000 },
+    );
+    await runner.start();
+    await runner.runOnce();
+    btcAdapter.openOrders.push({
+      exchangeOrderId: "unmanaged",
+      market: "BTCUSD",
+      side: "buy",
+      price: 1,
+      size: 1,
+      filledSize: 0,
+      remainingSize: 1,
+      isReduceOnly: false,
+      state: "open",
+    });
+    const result = await runner.shutdown();
+    expect(result.successful).toBe(true);
+    expect(result.cleanup.map((entry) => entry.market).sort()).toEqual(["BTCUSD", "ETHUSD"]);
+    expect(btcAdapter.cancelOrderCalls.some((call) => call.exchangeOrderId === "unmanaged")).toBe(
+      false,
+    );
+    expect(btcAdapter.getOpenOrders("BTCUSD").map((order) => order.exchangeOrderId)).toEqual([
+      "unmanaged",
+    ]);
+  });
+
+  it("continues after one cancellation failure and retries transient failures", async () => {
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+    });
+    await runner.start();
+    await runner.runOnce();
+    const firstId = btcAdapter.openOrders[0]!.exchangeOrderId;
+    const originalCancel = btcAdapter.cancelOrder.bind(btcAdapter);
+    let failedOnce = false;
+    btcAdapter.cancelOrder = async (id, market) => {
+      if (id === firstId && !failedOnce) {
+        failedOnce = true;
+        btcAdapter.cancelOrderCalls.push({ exchangeOrderId: id, market });
+        throw new Error("transient");
+      }
+      return originalCancel(id, market);
+    };
+    const result = await runner.shutdown();
+    expect(result.successful).toBe(true);
+    expect(result.cleanup[0]!.failed).toContain(firstId);
+    expect(btcAdapter.cancelOrderCalls.filter((call) => call.exchangeOrderId === firstId)).toHaveLength(
+      2,
+    );
+    expect(result.cleanup[0]!.unresolved).toEqual([]);
+  });
+
+  it("reports permanently open managed IDs as unresolved", async () => {
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+    });
+    await runner.start();
+    await runner.runOnce();
+    const managedId = btcAdapter.openOrders[0]!.exchangeOrderId;
+    btcAdapter.cancelOrder = async (id) => ({ success: false, exchangeOrderId: id });
+    const result = await runner.shutdown();
+    expect(result.successful).toBe(false);
+    expect(result.cleanup[0]!.unresolved).toContain(managedId);
+    expect(result.cleanup[0]!.failed).toContain(managedId);
+  });
+
+  it("treats managed orders already filled or cancelled before cleanup as terminal", async () => {
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+    });
+    await runner.start();
+    await runner.runOnce();
+    const order = btcAdapter.openOrders.shift()!;
+    const alreadyCancelled = btcAdapter.openOrders.shift()!;
+    btcAdapter.fillsByOrderId.set(order.exchangeOrderId, [
+      {
+        exchangeOrderId: order.exchangeOrderId,
+        market: "BTCUSD",
+        side: order.side,
+        price: order.price,
+        size: order.size,
+        timestamp: Date.now(),
+      },
+    ]);
+    const result = await runner.shutdown();
+    expect(result.successful).toBe(true);
+    expect(result.cleanup[0]!.terminal).toContain(order.exchangeOrderId);
+    expect(result.cleanup[0]!.terminal).toContain(alreadyCancelled.exchangeOrderId);
+    expect(result.cleanup[0]!.cancelled).toContain(alreadyCancelled.exchangeOrderId);
+    expect(result.cleanup[0]!.attempted).not.toContain(alreadyCancelled.exchangeOrderId);
+    expect(engine.registry.findByExchangeOrderId(order.exchangeOrderId)?.state).toBe("FILLED");
+  });
 });
 
 describe("PaperRunner alertBus transition detection", () => {

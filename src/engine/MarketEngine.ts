@@ -42,6 +42,16 @@ export interface MarketEngineOptions {
   onFillRecorded?: (entry: TradeLogEntry) => void;
 }
 
+export interface ManagedOrderCleanupResult {
+  market: string;
+  attempted: string[];
+  cancelled: string[];
+  terminal: string[];
+  failed: string[];
+  unresolved: string[];
+  successful: boolean;
+}
+
 /**
  * Drives one market end-to-end against ExchangeAdapter: refresh -> runtime reconciliation ->
  * margin check -> inventory-triggered reduce-only exit management -> quote ladder management.
@@ -63,6 +73,7 @@ export class MarketEngine {
   // live PnL probe itself fails — so runCycle() is never reachable with this genuinely unknown.
   private sessionPnlUnavailable = false;
   private sessionPnlUnavailableReason?: string;
+  private quiescing = false;
 
   constructor(
     private readonly adapter: ExchangeAdapter,
@@ -101,6 +112,119 @@ export class MarketEngine {
     return this.sessionRealizedPnlUsd;
   }
 
+  /** Permanently prevents this engine instance from beginning another placement. */
+  quiesce(): void {
+    this.quiescing = true;
+  }
+
+  /**
+   * Cancels only exchange-confirmed open orders that are also present in this engine's registry.
+   * Each order is isolated from failures, and exchange truth is refreshed between bounded retry
+   * rounds. Local state is persisted after the final verification.
+   */
+  async cleanupManagedOrders(maxAttempts = 3): Promise<ManagedOrderCleanupResult> {
+    this.quiesce();
+    const managed = new Map(
+      this.registry
+        .list()
+        .filter(
+          (order) =>
+            order.exchangeOrderId !== null &&
+            (order.state === "RESTING" ||
+              order.state === "PENDING_CANCEL" ||
+              order.state === "UNKNOWN"),
+        )
+        .map((order) => [order.exchangeOrderId as string, order]),
+    );
+    const attempted = new Set<string>();
+    const cancelled = new Set<string>();
+    const terminal = new Set<string>();
+    const failed = new Set<string>();
+
+    for (let round = 0; round < maxAttempts; round++) {
+      try {
+        await this.adapter.refreshAccountState();
+      } catch {
+        if (round + 1 < maxAttempts) continue;
+      }
+
+      const openIds = new Set(
+        this.adapter.getOpenOrders(this.config.symbol).map((order) => order.exchangeOrderId),
+      );
+      for (const [exchangeOrderId, local] of managed) {
+        if (!openIds.has(exchangeOrderId)) {
+          await this.resolveCleanupTerminal(local, terminal, cancelled);
+          continue;
+        }
+        attempted.add(exchangeOrderId);
+        try {
+          const result = await this.adapter.cancelOrder(exchangeOrderId, this.config.symbol);
+          if (!result.success) failed.add(exchangeOrderId);
+        } catch {
+          failed.add(exchangeOrderId);
+        }
+      }
+    }
+
+    try {
+      await this.adapter.refreshAccountState();
+    } catch {
+      // The final cached snapshot is still checked below and unresolved orders fail cleanup.
+    }
+    const finalOpenIds = new Set(
+      this.adapter.getOpenOrders(this.config.symbol).map((order) => order.exchangeOrderId),
+    );
+    const unresolved: string[] = [];
+    for (const [exchangeOrderId, local] of managed) {
+      if (finalOpenIds.has(exchangeOrderId)) {
+        unresolved.push(exchangeOrderId);
+      } else {
+        await this.resolveCleanupTerminal(local, terminal, cancelled);
+      }
+    }
+    this.registry.save();
+    return {
+      market: this.config.symbol,
+      attempted: [...attempted],
+      cancelled: [...cancelled],
+      terminal: [...terminal],
+      failed: [...failed],
+      unresolved,
+      successful: unresolved.length === 0,
+    };
+  }
+
+  private async resolveCleanupTerminal(
+    local: import("./types.js").LocalOrder,
+    terminal: Set<string>,
+    cancelled: Set<string>,
+  ): Promise<void> {
+    const exchangeOrderId = local.exchangeOrderId as string;
+    let filledSize = local.filledSize;
+    try {
+      const fills = await this.adapter.getOrderFills(exchangeOrderId, this.config.symbol);
+      filledSize = Math.max(
+        filledSize,
+        fills.reduce((sum, fill) => sum + fill.size, 0),
+      );
+      for (const fill of fills) {
+        this.tradeLog.record(fill, {
+          isReduceOnly: local.isReduceOnly,
+          clientOrderId: local.clientOrderId,
+          source: "cancel_race_check",
+        });
+      }
+    } catch {
+      // Absence from the refreshed open-order view is terminal even if fill replay is unavailable.
+    }
+    local.filledSize = filledSize;
+    local.state = filledSize >= local.size ? "FILLED" : "CANCELLED";
+    local.updatedAt = Date.now();
+    this.registry.upsert(local);
+    terminal.add(exchangeOrderId);
+    if (local.state === "CANCELLED") cancelled.add(exchangeOrderId);
+  }
+
   /** Called by PaperRunner when a cycle's RealizedPnlSource.drainRealizedPnlDeltaUsd() throws.
    * RiskManager's sessionLossCapUsd check only means anything if sessionRealizedPnlUsd is
    * actually current — trading on with a PnL feed known to be broken would let real losses
@@ -125,6 +249,10 @@ export class MarketEngine {
       throw new Error(
         `MarketEngine for ${this.config.symbol}: start() must be called before runCycle()`,
       );
+    }
+
+    if (this.quiescing) {
+      throw new Error(`MarketEngine for ${this.config.symbol}: quiescing; cycle refused`);
     }
 
     const reconciliationResult = await this.reconciliation.checkAgainstExchange();
@@ -241,6 +369,7 @@ export class MarketEngine {
     const side: OrderSide = currentBaseSize > 0 ? "sell" : "buy";
     const size = Math.min(Math.abs(currentBaseSize), this.config.riskLimits.maxOrderSize);
 
+    if (this.quiescing) return "none";
     const result = await this.lifecycle.placeReduceOnlyExit({
       side,
       type: "postOnly",
@@ -308,6 +437,7 @@ export class MarketEngine {
         sessionLossCapUsd: this.config.sessionLossCapUsd,
       });
       if (!riskCheck.allowed) continue;
+      if (this.quiescing) break;
 
       attempted++;
       const result = await this.lifecycle.placeQuote({

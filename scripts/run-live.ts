@@ -71,6 +71,48 @@ import type { DashboardMarket } from "../src/dashboard/DashboardService.js";
 import { MarketEngine } from "../src/engine/MarketEngine.js";
 import { PaperRunner, type PaperRunnerMarket } from "../src/paperRunner/PaperRunner.js";
 
+export function createLiveShutdownHandler(options: {
+  runner: PaperRunner;
+  closeDashboard: () => void | Promise<void>;
+  exit: (code: number) => void;
+  log?: (message: string) => void;
+  error?: (message: string) => void;
+}): (signal: NodeJS.Signals) => Promise<void> {
+  const log = options.log ?? console.log;
+  const error = options.error ?? console.error;
+  let shutdownPromise: Promise<void> | undefined;
+
+  return async (signal: NodeJS.Signals): Promise<void> => {
+    if (shutdownPromise) {
+      error(`[LIVE] ${signal} received during shutdown; cleanup is already in progress.`);
+      return shutdownPromise;
+    }
+    shutdownPromise = (async () => {
+      const result = await options.runner.shutdown();
+      await options.closeDashboard();
+      log("\n=== [LIVE] Session report ===");
+      log(JSON.stringify(result, null, 2));
+      if (!result.successful) {
+        error("\n!!! [LIVE] CLEANUP INCOMPLETE — MANAGED ORDERS MAY REMAIN OPEN !!!");
+        for (const market of result.cleanup.filter((entry) => !entry.successful)) {
+          error(`[LIVE] ${market.market}: unresolved managed IDs: ${market.unresolved.join(", ")}`);
+        }
+      }
+      log(
+        "\n[LIVE] Reminder (SPEC.md Section 9 rule 4): before restarting this or any live " +
+          "process, confirm genuinely flat state directly against the exchange — never assume " +
+          "it from local files.",
+      );
+      options.exit(result.successful ? 0 : 1);
+    })().catch(async (err: unknown) => {
+      error(`\n!!! [LIVE] SHUTDOWN FAILED; CLEANUP MAY BE INCOMPLETE: ${String(err)} !!!`);
+      await options.closeDashboard();
+      options.exit(1);
+    });
+    return shutdownPromise;
+  };
+}
+
 function requiredEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -267,20 +309,16 @@ async function main(): Promise<void> {
   const runner = new PaperRunner(runnerMarkets, { intervalMs, durationMs, logFilePath, alertBus });
 
   // STAGE 13
-  const shutdown = (): void => {
-    const report = runner.stop();
-    dashboardServer.close();
-    console.log("\n=== [LIVE] Session report ===");
-    console.log(JSON.stringify(report, null, 2));
-    console.log(
-      "\n[LIVE] Reminder (SPEC.md Section 9 rule 4): before restarting this or any live " +
-        "process, confirm genuinely flat state directly against the exchange — never assume " +
-        "it from local files.",
-    );
-    process.exit(0);
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  const shutdown = createLiveShutdownHandler({
+    runner,
+    closeDashboard: () =>
+      new Promise<void>((resolve, reject) =>
+        dashboardServer.close((err) => (err ? reject(err) : resolve())),
+      ),
+    exit: (code) => process.exit(code),
+  });
+  process.on("SIGINT", (signal) => void shutdown(signal));
+  process.on("SIGTERM", (signal) => void shutdown(signal));
 
   // STAGE 14
   console.log(`\n[LIVE] Starting live run for markets: ${enabled.map((m) => m.symbol).join(", ")}`);
@@ -292,7 +330,9 @@ async function main(): Promise<void> {
   await runner.start();
 }
 
-main().catch((err: unknown) => {
-  console.error(err);
-  process.exitCode = 1;
-});
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((err: unknown) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}
