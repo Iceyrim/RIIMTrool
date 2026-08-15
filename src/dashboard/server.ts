@@ -2,7 +2,11 @@ import { createServer, type RequestListener, type Server } from "node:http";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildDashboardStatus, type DashboardMarket } from "./DashboardService.js";
+import {
+  buildDashboardStatus,
+  type DashboardMarket,
+  type DashboardStatus,
+} from "./DashboardService.js";
 
 const dashboardDir = dirname(fileURLToPath(import.meta.url));
 // Read once at module load, not per-request — this is a static asset, not something that changes
@@ -16,18 +20,39 @@ export interface DashboardServerOptions {
   port: number;
 }
 
+export type DashboardStatusProvider = () => DashboardStatus;
+
+function statusProvider(
+  source: readonly DashboardMarket[] | DashboardStatusProvider,
+): DashboardStatusProvider {
+  return typeof source === "function" ? source : () => buildDashboardStatus(source);
+}
+
 /** Kept separate from listen() so failure containment can be tested without opening a socket. */
 export function createDashboardRequestHandler(
-  markets: readonly DashboardMarket[],
+  source: readonly DashboardMarket[] | DashboardStatusProvider,
 ): RequestListener {
+  const readStatus = statusProvider(source);
   return (req, res) => {
     try {
       const url = req.url ?? "/";
 
       if (url === "/api/status") {
-        const status = buildDashboardStatus(markets);
+        const status = readStatus();
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(status));
+        return;
+      }
+
+      if (url === "/healthz") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ status: "ok" }));
+        return;
+      }
+
+      if (url === "/readyz") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ status: "ready" }));
         return;
       }
 
@@ -61,15 +86,20 @@ export function createDashboardRequestHandler(
  * an order. Status-only.
  */
 export function createDashboardServer(
-  markets: readonly DashboardMarket[],
+  source: readonly DashboardMarket[] | DashboardStatusProvider,
   options: DashboardServerOptions,
 ): Server {
-  const server = createServer(createDashboardRequestHandler(markets));
+  const host = options.host ?? "127.0.0.1";
+  if (host !== "127.0.0.1") {
+    throw new Error("Dashboard server must bind to 127.0.0.1");
+  }
+
+  const server = createServer(createDashboardRequestHandler(source));
 
   server.on("error", (error) => {
     console.error(`[Dashboard] server error: ${String(error)}`);
   });
 
-  server.listen(options.port, options.host ?? "127.0.0.1");
+  server.listen(options.port, host);
   return server;
 }

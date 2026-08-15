@@ -4,7 +4,10 @@ import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDashboardServer } from "../../src/dashboard/server.js";
+import {
+  createDashboardRequestHandler,
+  createDashboardServer,
+} from "../../src/dashboard/server.js";
 import type { DashboardMarket } from "../../src/dashboard/DashboardService.js";
 import { MarketEngine } from "../../src/engine/MarketEngine.js";
 import type { EngineMarketConfig } from "../../src/engine/types.js";
@@ -69,6 +72,12 @@ describe("createDashboardServer", () => {
     expect(address).toBe("127.0.0.1");
   });
 
+  it("rejects a non-loopback listener before opening it", () => {
+    expect(() => createDashboardServer(markets, { host: "0.0.0.0", port: 4100 })).toThrow(
+      "must bind to 127.0.0.1",
+    );
+  });
+
   it("contains status-building failures instead of throwing into the owning process", async () => {
     vi.spyOn(markets[0]!.engine, "getSessionRealizedPnlUsd").mockImplementation(() => {
       throw new Error("telemetry failure");
@@ -103,5 +112,28 @@ describe("createDashboardServer", () => {
   it("returns 404 for an unknown path", async () => {
     const res = await fetch(`${baseUrl}/nope`);
     expect(res.status).toBe(404);
+  });
+});
+
+describe("dashboard health handlers", () => {
+  it.each([
+    ["/healthz", { status: "ok" }],
+    ["/readyz", { status: "ready" }],
+  ])("serves %s without reading or disclosing dashboard status", (url, expected) => {
+    const readStatus = vi.fn(() => { throw new Error("must not be read"); });
+    const handler = createDashboardRequestHandler(readStatus);
+    const req = { url };
+    const responseBody: string[] = [];
+    const res = {
+      writeHead: vi.fn(),
+      end: vi.fn((body: string) => responseBody.push(body)),
+    };
+
+    handler(req as never, res as never);
+
+    expect(readStatus).not.toHaveBeenCalled();
+    expect(res.writeHead).toHaveBeenCalledWith(200, { "content-type": "application/json" });
+    expect(JSON.parse(responseBody[0]!)).toEqual(expected);
+    expect(responseBody[0]).not.toMatch(/market|order|position|balance|pnl/i);
   });
 });
