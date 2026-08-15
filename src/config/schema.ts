@@ -55,7 +55,6 @@ export const marketConfigSchema = z
     levelSpacingBps: z.array(z.number().positive()).min(1),
     inventoryReductionThresholdBase: z.number().positive(),
     riskLimits: riskLimitsSchema,
-    sessionLossCapUsd: z.number().positive(),
     reduceOnlyExit: reduceOnlyExitSchema.default({}),
     /** Normal (non-reduce-only) quote refresh policy. Kept separate from reduce-only exit
      * timing so the two order classes cannot accidentally share lifecycle semantics. */
@@ -63,6 +62,7 @@ export const marketConfigSchema = z
     quoteRepriceThresholdBps: z.number().positive().default(1),
     quoteMaximumLifetimeMs: z.number().int().nonnegative().default(120_000),
   })
+  .strict("Unknown market configuration key (sessionLossCapUsd is now accountRisk.sessionLossCapUsd)")
   .refine((m) => m.levelSpacingBps.length === m.quoteLevels, {
     message: "levelSpacingBps length must match quoteLevels",
     path: ["levelSpacingBps"],
@@ -88,9 +88,22 @@ export const marketConfigSchema = z
     path: ["riskLimits", "maxOpenOrders"],
   });
 
-export const marketsConfigSchema = z.object({
-  markets: z.array(marketConfigSchema).min(1),
+export const accountRiskSchema = z.object({
+  sessionLossCapUsd: z.number().positive(),
 });
+
+export const marketsConfigSchema = z
+  .object({
+    accountRisk: accountRiskSchema,
+    markets: z.array(marketConfigSchema).min(1),
+  })
+  .transform(({ accountRisk, markets }) => ({
+    accountRisk,
+    markets: markets.map((market) => ({
+      ...market,
+      accountSessionLossCapUsd: accountRisk.sessionLossCapUsd,
+    })),
+  }));
 
 export type RiskLimits = z.infer<typeof riskLimitsSchema>;
 export type MarketConfig = z.infer<typeof marketConfigSchema>;

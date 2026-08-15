@@ -84,7 +84,7 @@ function anchorPath(): string {
 
 describe("N1RealizedPnlSource", () => {
   describe("initialize()", () => {
-    it("resolves configured markets and live-probes each one, even with no persisted anchor", async () => {
+    it("live-probes the account once without a market filter", async () => {
       const fakeNord = makeFakeNord([]);
       const source = new N1RealizedPnlSource({
         nord: fakeNord as unknown as Nord,
@@ -94,11 +94,8 @@ describe("N1RealizedPnlSource", () => {
 
       await source.initialize(CONFIGURED_MARKETS);
 
-      expect(fakeNord.getAccountPnl).toHaveBeenCalled();
-      const calledMarketIds = fakeNord.getAccountPnl.mock.calls.map(
-        (c: unknown[]) => (c[1] as { marketId: number }).marketId,
-      );
-      expect(calledMarketIds).toEqual(expect.arrayContaining([BTC_ID, ETH_ID]));
+      expect(fakeNord.getAccountPnl).toHaveBeenCalledTimes(1);
+      expect(fakeNord.getAccountPnl.mock.calls[0]?.[1]).not.toHaveProperty("marketId");
     });
 
     it("writes a persisted anchor file after a fresh initialize()", async () => {
@@ -113,7 +110,8 @@ describe("N1RealizedPnlSource", () => {
       await source.initialize(CONFIGURED_MARKETS);
 
       const persisted = JSON.parse(readFileSync(path, "utf-8"));
-      expect(Object.keys(persisted.markets).sort()).toEqual([BTC, ETH].sort());
+      expect(persisted).toMatchObject({ version: 2, scope: "account" });
+      expect(persisted.cursor).toBeDefined();
     });
 
     it("still makes a live probe call on restart, even though a persisted anchor already exists", async () => {
@@ -166,9 +164,10 @@ describe("N1RealizedPnlSource", () => {
       await expect(source.initialize(CONFIGURED_MARKETS)).rejects.toThrow(/Failed to parse/);
     });
 
-    it("throws if the persisted anchor file is missing its markets object", async () => {
+    it("fails closed on a legacy per-market anchor and prints the exact archive command", async () => {
       const path = anchorPath();
-      writeFileSync(path, JSON.stringify({ notMarkets: {} }), "utf-8");
+      const legacy = JSON.stringify({ markets: { BTCUSD: { time: "2026-01-01T00:00:00Z", keysAtTime: [] } } });
+      writeFileSync(path, legacy, "utf-8");
       const fakeNord = makeFakeNord([]);
       const source = new N1RealizedPnlSource({
         nord: fakeNord as unknown as Nord,
@@ -176,7 +175,10 @@ describe("N1RealizedPnlSource", () => {
         anchorFilePath: path,
       });
 
-      await expect(source.initialize(CONFIGURED_MARKETS)).rejects.toThrow(/malformed/);
+      await expect(source.initialize(CONFIGURED_MARKETS)).rejects.toThrow(
+        /mv state\/live\/pnl-session-anchor\.json "state\/live\/pnl-session-anchor\.per-market\.\$\(date -u \+%Y%m%dT%H%M%SZ\)\.json"/,
+      );
+      expect(readFileSync(path, "utf-8")).toBe(legacy);
     });
   });
 
@@ -192,7 +194,7 @@ describe("N1RealizedPnlSource", () => {
       await expect(source.drainRealizedPnlDeltaUsd(BTC)).rejects.toThrow(/initialize/);
     });
 
-    it("throws for a market that was never passed to initialize()", async () => {
+    it("uses one account-wide drain independent of market arguments", async () => {
       const fakeNord = makeFakeNord([]);
       const source = new N1RealizedPnlSource({
         nord: fakeNord as unknown as Nord,
@@ -201,7 +203,7 @@ describe("N1RealizedPnlSource", () => {
       });
       await source.initialize([CONFIGURED_MARKETS[0]!]); // BTC only
 
-      await expect(source.drainRealizedPnlDeltaUsd(ETH)).rejects.toThrow(/not passed to initialize/);
+      await expect(source.drainRealizedPnlDeltaUsd()).resolves.toBe(0);
     });
 
     it("sums a single profitable trade's tradingPnl", async () => {
@@ -290,7 +292,7 @@ describe("N1RealizedPnlSource", () => {
       await expect(source.drainRealizedPnlDeltaUsd(BTC)).resolves.toBeCloseTo(8);
     });
 
-    it("keeps each market's realized PnL separate — draining one never leaks into another", async () => {
+    it("counts interleaved market events once in one account-wide delta", async () => {
       const ledger: AccountPnlInfo[] = [];
       const fakeNord = makeFakeNord(ledger);
       const source = new N1RealizedPnlSource({
@@ -306,8 +308,8 @@ describe("N1RealizedPnlSource", () => {
         pnlEntry(new Date(now + 1000).toISOString(), 2, 0, ETH_ID, -6),
       );
 
-      await expect(source.drainRealizedPnlDeltaUsd(ETH)).resolves.toBeCloseTo(-6);
-      await expect(source.drainRealizedPnlDeltaUsd(BTC)).resolves.toBeCloseTo(20);
+      await expect(source.drainRealizedPnlDeltaUsd()).resolves.toBeCloseTo(14);
+      await expect(source.drainRealizedPnlDeltaUsd()).resolves.toBe(0);
     });
 
     it("excludes PnL history that predates the session anchor (pre-existing historical PnL)", async () => {

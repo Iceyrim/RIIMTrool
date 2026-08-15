@@ -1,6 +1,6 @@
 import type { ExchangeAdapter } from "../adapters/ExchangeAdapter.js";
 import type { ReconciliationAnomaly } from "../engine/Reconciliation.js";
-import type { MarketEngine } from "../engine/MarketEngine.js";
+import type { CycleSummary, MarketEngine } from "../engine/MarketEngine.js";
 import type { LocalOrder } from "../engine/types.js";
 
 /**
@@ -35,9 +35,9 @@ export interface MarketPositionStatus {
 export interface MarketStatus {
   market: string;
   reconciliation: MarketReconciliationStatus;
-  sessionRealizedPnlUsd: number;
   position: MarketPositionStatus | null;
   openOrders: LocalOrder[];
+  operations?: Pick<CycleSummary, "positionBaseSize" | "inventoryReductionThresholdBase" | "reductionMode" | "reductionModeCancellation" | "exitState" | "exitDetails" | "quoteRefreshReason" | "quotesCancelled" | "pnlOutageCancellation">;
 }
 
 export interface DashboardStatus {
@@ -50,6 +50,9 @@ export interface DashboardStatus {
    * value, so a restart (or a session PnL reset) cannot desync it from reality.
    */
   totalExposureUsd: number;
+  accountSessionRealizedPnlUsd: number;
+  accountSessionLossCapUsd: number;
+  accountPnlAvailable: boolean;
   markets: MarketStatus[];
   /** Section 8 also calls for real N1 volume (Nord.getAccountVolume()) and live control actions
    * (pause/shutdown, per-market and all-markets). Both are live-account features with nothing to
@@ -91,9 +94,9 @@ function buildMarketStatus({ market, engine, adapter }: DashboardMarket): Market
   return {
     market,
     reconciliation,
-    sessionRealizedPnlUsd: engine.getSessionRealizedPnlUsd(),
     position,
     openOrders: engine.registry.list(),
+    operations: engine.getLastCycleSummary(),
   };
 }
 
@@ -111,6 +114,9 @@ export function buildDashboardStatus(markets: readonly DashboardMarket[]): Dashb
   return {
     generatedAt: Date.now(),
     totalExposureUsd,
+    accountSessionRealizedPnlUsd: markets[0]?.engine.getSessionRealizedPnlUsd() ?? 0,
+    accountSessionLossCapUsd: markets[0]?.engine.getAccountRiskState().sessionLossCapUsd ?? 0,
+    accountPnlAvailable: markets[0]?.engine.getAccountRiskState().pnlAvailable ?? false,
     markets: marketStatuses,
     todo: TODOS,
   };

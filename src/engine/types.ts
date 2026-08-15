@@ -57,7 +57,8 @@ export interface EngineMarketConfig {
   levelSpacingBps: number[];
   inventoryReductionThresholdBase: number;
   riskLimits: RiskLimitsConfig;
-  sessionLossCapUsd: number;
+  /** Derived from the runner configuration's single accountRisk source of truth. */
+  accountSessionLossCapUsd?: number;
   /** Not part of SPEC.md Section 2's config shape (which only states the proven values 45s/5min
    * once, in prose) — surfaced as config here so it's not a hidden literal, matching Section 6's
    * "no hardcoded literal alongside a configurable system" lesson. */
@@ -68,4 +69,11 @@ export interface EngineMarketConfig {
   quoteRepriceThresholdBps?: number;
   /** Optional only for backward-compatible programmatic construction; parsed config supplies it. */
   quoteMaximumLifetimeMs?: number;
+}
+
+export interface AccountRiskState {
+  sessionRealizedPnlUsd: number;
+  sessionLossCapUsd: number;
+  pnlAvailable: boolean;
+  pnlUnavailableReason?: string;
 }

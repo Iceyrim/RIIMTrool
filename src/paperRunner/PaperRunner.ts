@@ -6,6 +6,7 @@ import type {
   ManagedOrderCleanupResult,
   MarketEngine,
 } from "../engine/MarketEngine.js";
+import type { AccountRiskState } from "../engine/types.js";
 
 /** Minimal structural interface PaperRunner needs from a paper adapter — deliberately narrower
  * than N1PaperAdapter itself, so tests can inject a trivial fake without constructing a full
@@ -13,11 +14,14 @@ import type {
  * instance is meant to be SHARED across every market in a run (SPEC.md Section 4.3's shared
  * cross-margin account), so PnL must be drained per-market, not as a single pooled value. */
 export interface RealizedPnlSource {
+  /** Account sources are drained by exactly one designated market; market sources are aggregated
+   * into the same runner-account total without acquiring N1 semantics. */
+  readonly scope?: "market" | "account";
   /** Async because a real implementation (N1RealizedPnlSource) makes a live network call — it
    * must throw on failure, never resolve to 0 as a silent fallback (a real realized loss must
    * never be masked as "no PnL this cycle"). Paper adapters implement this as a trivial async
    * wrapper around their already-synchronous local simulation. */
-  drainRealizedPnlDeltaUsd(market: string): Promise<number>;
+  drainRealizedPnlDeltaUsd(market?: string): Promise<number>;
 }
 
 export interface PaperRunnerMarket {
@@ -45,7 +49,7 @@ export interface CycleLogEntry {
   timestamp: number;
   market: string;
   summary: CycleSummary;
-  sessionRealizedPnlUsd: number;
+  accountSessionRealizedPnlUsd: number;
 }
 
 /** Consecutive fully-failed quote-ladder cycles (attempted &gt; 0, placed === 0) before
@@ -62,13 +66,15 @@ export interface SoakReport {
   totalQuotesAttempted: number;
   totalQuotesCancelled: number;
   totalAnomalies: number;
-  finalSessionRealizedPnlUsd: Record<string, number>;
+  finalAccountSessionRealizedPnlUsd: number;
 }
 
 export interface PaperRunnerShutdownResult {
   report: SoakReport;
   cleanup: ManagedOrderCleanupResult[];
   successful: boolean;
+  positionsFlattened: false;
+  positionDisposition: "NOT_FLATTENED_REQUIRES_DIRECT_EXCHANGE_VERIFICATION_AND_MANUAL_CLOSURE";
 }
 
 /**
@@ -112,11 +118,22 @@ export class PaperRunner {
   // fired for the current streak — see detectPlacementFailures().
   private readonly placementFailureStreak = new Map<string, number>();
   private readonly placementFailureAlerted = new Map<string, boolean>();
+  private readonly accountRiskState: AccountRiskState;
+  private readonly accountPnlOwnerMarket: string | undefined;
 
   constructor(
     private readonly markets: readonly PaperRunnerMarket[],
     private readonly config: PaperRunnerConfig,
-  ) {}
+  ) {
+    const cap = markets[0]?.engine.getAccountRiskState().sessionLossCapUsd ?? 6;
+    this.accountRiskState = {
+      sessionRealizedPnlUsd: 0,
+      sessionLossCapUsd: cap,
+      pnlAvailable: true,
+    };
+    for (const { engine } of markets) engine.setAccountRiskState(this.accountRiskState);
+    this.accountPnlOwnerMarket = markets.find(({ pnlSource }) => pnlSource.scope === "account")?.market;
+  }
 
   async start(): Promise<void> {
     for (const { engine } of this.markets) {
@@ -216,7 +233,20 @@ export class PaperRunner {
       }),
     );
     const report = this.stop();
-    return { report, cleanup, successful: cleanup.every((result) => result.successful) };
+    const result: PaperRunnerShutdownResult = {
+      report,
+      cleanup,
+      successful: cleanup.every((entry) => entry.successful),
+      positionsFlattened: false,
+      positionDisposition:
+        "NOT_FLATTENED_REQUIRES_DIRECT_EXCHANGE_VERIFICATION_AND_MANUAL_CLOSURE",
+    };
+    if (this.config.logFilePath) {
+      const line = JSON.stringify({ timestamp: Date.now(), type: "shutdown_cleanup", ...result });
+      mkdirSync(dirname(this.config.logFilePath), { recursive: true });
+      appendFileSync(this.config.logFilePath, line + "\n", "utf-8");
+    }
+    return result;
   }
 
   /** Runs one cycle for exactly one market: engine.runCycle(), PnL drain, logging. A thrown error
@@ -247,7 +277,7 @@ export class PaperRunner {
       timestamp: Date.now(),
       market,
       summary,
-      sessionRealizedPnlUsd: engine.getSessionRealizedPnlUsd(),
+      accountSessionRealizedPnlUsd: engine.getSessionRealizedPnlUsd(),
     };
     this.log.push(logEntry);
     this.emitLogLine(logEntry);
@@ -262,9 +292,12 @@ export class PaperRunner {
    * propagate: same isolation contract runMarketCycle already gives a thrown runCycle(). */
   private async drainPnl(entry: PaperRunnerMarket): Promise<void> {
     const { market, engine, pnlSource } = entry;
+    if (pnlSource.scope === "account" && market !== this.accountPnlOwnerMarket) return;
     try {
-      const pnlDelta = await pnlSource.drainRealizedPnlDeltaUsd(market);
-      engine.confirmSessionPnlHealthy();
+      const pnlDelta = await pnlSource.drainRealizedPnlDeltaUsd(
+        pnlSource.scope === "account" ? undefined : market,
+      );
+      for (const entry of this.markets) entry.engine.confirmSessionPnlHealthy();
       if (this.config.alertBus && this.prevPnlHealthy.get(market) === false) {
         this.config.alertBus.emit({
           type: "error",
@@ -277,7 +310,7 @@ export class PaperRunner {
     } catch (err) {
       const reason = `realized-PnL drain failed: ${String(err)}`;
       console.error(`[PaperRunner:${market}] ${reason}`);
-      engine.markSessionPnlUnavailable(reason);
+      for (const entry of this.markets) entry.engine.markSessionPnlUnavailable(reason);
       if (this.config.alertBus && this.prevPnlHealthy.get(market) !== false) {
         this.config.alertBus.emit({ type: "error", market, message: `[${market}] ${reason}` });
       }
@@ -378,9 +411,7 @@ export class PaperRunner {
         (sum, e) => sum + e.summary.reconciliation.anomalies.length,
         0,
       ),
-      finalSessionRealizedPnlUsd: Object.fromEntries(
-        this.markets.map(({ market, engine }) => [market, engine.getSessionRealizedPnlUsd()]),
-      ),
+      finalAccountSessionRealizedPnlUsd: this.accountRiskState.sessionRealizedPnlUsd,
     };
   }
 }

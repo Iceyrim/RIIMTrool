@@ -107,7 +107,7 @@ export class RiskManager {
     if (ctx.sessionRealizedPnlUsd <= -ctx.sessionLossCapUsd) {
       return {
         allowed: false,
-        reason: `Session loss cap of $${ctx.sessionLossCapUsd} reached for ${ctx.market} ($${(-ctx.sessionRealizedPnlUsd).toFixed(2)} realized loss)`,
+        reason: `Account-wide session loss cap of $${ctx.sessionLossCapUsd} reached ($${(-ctx.sessionRealizedPnlUsd).toFixed(2)} realized loss); placement blocked for ${ctx.market}`,
         deniedBy: "sessionLoss",
       };
     }

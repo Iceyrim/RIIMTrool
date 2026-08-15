@@ -3,20 +3,22 @@ import { dirname } from "node:path";
 import type { AccountPnlInfo, Nord } from "@n1xyz/nord-ts";
 import type { RealizedPnlSource } from "../../paperRunner/PaperRunner.js";
 import { ExchangeAdapterError } from "../AdapterError.js";
-import { MarketRegistry, type ConfiguredMarket } from "./marketRegistry.js";
+import type { ConfiguredMarket } from "./marketRegistry.js";
 
 /** One market's resume point into N1's PnL history. `time` is an inclusive lower bound for the
  * next query; `keysAtTime` records every entry already summed at exactly that timestamp so a
  * repeat of the same boundary instant on the next drain doesn't get double-counted. Mirrors
  * RiseXPaperAdapter's (lastSeenTime, idsSeenAtThatTime) trade-tape cursor — N1's PnL history has
  * the same "timestamp alone isn't a unique sort key" property once ties are possible. */
-interface MarketPnlCursor {
+interface AccountPnlCursor {
   time: string;
   keysAtTime: string[];
 }
 
 interface PersistedAnchor {
-  markets: Record<string, MarketPnlCursor>;
+  version: 2;
+  scope: "account";
+  cursor: AccountPnlCursor;
 }
 
 export interface N1RealizedPnlSourceConfig {
@@ -36,8 +38,11 @@ const DEFAULT_PAGE_SIZE = 200;
 const DEFAULT_MAX_PAGES_PER_DRAIN = 50;
 
 function pnlEntryKey(entry: AccountPnlInfo): string {
-  return `${entry.actionId}:${entry.subActionId}`;
+  return `${entry.actionId}:${entry.subActionId}:${entry.marketId}`;
 }
+
+const MANUAL_ARCHIVE_COMMAND =
+  'mv state/live/pnl-session-anchor.json "state/live/pnl-session-anchor.per-market.$(date -u +%Y%m%dT%H%M%SZ).json"';
 
 /**
  * Real N1 realized-PnL source, replacing scripts/run-live.ts's former always-zero stub. Wraps
@@ -67,8 +72,8 @@ function pnlEntryKey(entry: AccountPnlInfo): string {
  * new placement until a subsequent drain succeeds.
  */
 export class N1RealizedPnlSource implements RealizedPnlSource {
-  private registry?: MarketRegistry;
-  private readonly cursors = new Map<string, MarketPnlCursor>();
+  readonly scope = "account" as const;
+  private cursor?: AccountPnlCursor;
   private readonly maxPagesPerDrain: number;
   private initialized = false;
 
@@ -77,45 +82,36 @@ export class N1RealizedPnlSource implements RealizedPnlSource {
   }
 
   async initialize(markets: ConfiguredMarket[]): Promise<void> {
-    const registry = new MarketRegistry(markets);
-    registry.resolve(this.config.nord.markets);
-    this.registry = registry;
-
     const persisted = this.loadPersistedAnchor();
     const nowIso = new Date().toISOString();
-
-    for (const { symbol } of markets) {
-      // Always a live network call, restart or not — see class doc comment.
-      await this.probe(symbol);
-      this.cursors.set(symbol, persisted?.markets[symbol] ?? { time: nowIso, keysAtTime: [] });
-    }
+    if (markets.length === 0) throw new ExchangeAdapterError("At least one N1 market is required");
+    await this.probe();
+    this.cursor = persisted?.cursor ?? { time: nowIso, keysAtTime: [] };
 
     this.persistAnchor();
     this.initialized = true;
   }
 
   private assertInitialized(): void {
-    if (!this.initialized || !this.registry) {
+    if (!this.initialized || !this.cursor) {
       throw new ExchangeAdapterError("N1RealizedPnlSource.initialize() must be called before use");
     }
   }
 
   /** Only ever called from initialize(), after this.registry is already assigned — does not
    * assert initialized itself since this runs before this.initialized flips true. */
-  private async probe(symbol: string): Promise<void> {
-    const marketId = this.registry!.marketIdFor(symbol);
+  private async probe(): Promise<void> {
     // pageSize: 1 — this call exists purely to prove connectivity/auth/response-shape before
     // startup proceeds, not to fetch anything usable.
-    await this.fetchAccountPnlPage(marketId, { pageSize: 1 });
+    await this.fetchAccountPnlPage({ pageSize: 1 });
   }
 
   private async fetchAccountPnlPage(
-    marketId: number,
     query: { since?: string; until?: string; startInclusive?: string; pageSize?: number },
   ): Promise<{ items: AccountPnlInfo[]; nextStartInclusive?: string | null }> {
     let page: { items: AccountPnlInfo[]; nextStartInclusive?: string | null };
     try {
-      page = await this.config.nord.getAccountPnl(this.config.accountId, { marketId, ...query });
+      page = await this.config.nord.getAccountPnl(this.config.accountId, query);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       throw new ExchangeAdapterError(`N1 getAccountPnl() request failed: ${message}`, err, true);
@@ -131,15 +127,9 @@ export class N1RealizedPnlSource implements RealizedPnlSource {
   /** Pages getAccountPnl forward from this market's cursor to now, sums fresh tradingPnl
    * entries (inclusive-boundary deduped against the cursor), and advances the cursor. Throws
    * on any network failure or malformed data — never substitutes 0. */
-  async drainRealizedPnlDeltaUsd(market: string): Promise<number> {
+  async drainRealizedPnlDeltaUsd(): Promise<number> {
     this.assertInitialized();
-    const cursor = this.cursors.get(market);
-    if (!cursor) {
-      throw new ExchangeAdapterError(
-        `N1RealizedPnlSource: market "${market}" was not passed to initialize()`,
-      );
-    }
-    const marketId = this.registry!.marketIdFor(market);
+    const cursor = this.cursor!;
     const until = new Date().toISOString();
 
     const items: AccountPnlInfo[] = [];
@@ -147,12 +137,12 @@ export class N1RealizedPnlSource implements RealizedPnlSource {
     for (let page = 1; ; page++) {
       if (page > this.maxPagesPerDrain) {
         throw new ExchangeAdapterError(
-          `N1RealizedPnlSource.drainRealizedPnlDeltaUsd(${market}): exceeded maxPagesPerDrain ` +
+          `N1RealizedPnlSource.drainRealizedPnlDeltaUsd(): exceeded maxPagesPerDrain ` +
             `(${this.maxPagesPerDrain}) without exhausting PnL history since ${cursor.time} — ` +
             "widen the cap or investigate an unexpectedly large backlog",
         );
       }
-      const result = await this.fetchAccountPnlPage(marketId, {
+      const result = await this.fetchAccountPnlPage({
         since: cursor.time,
         until,
         startInclusive,
@@ -175,7 +165,7 @@ export class N1RealizedPnlSource implements RealizedPnlSource {
     for (const item of fresh) {
       if (typeof item.tradingPnl !== "number" || !Number.isFinite(item.tradingPnl)) {
         throw new ExchangeAdapterError(
-          `N1RealizedPnlSource: market "${market}" got a malformed tradingPnl entry: ` +
+          `N1RealizedPnlSource got a malformed tradingPnl entry: ` +
             JSON.stringify(item),
         );
       }
@@ -189,7 +179,7 @@ export class N1RealizedPnlSource implements RealizedPnlSource {
       }
     }
 
-    this.cursors.set(market, { time: maxTime, keysAtTime: keysAtMaxTime });
+    this.cursor = { time: maxTime, keysAtTime: [...new Set(keysAtMaxTime)] };
     this.persistAnchor();
     return delta;
   }
@@ -207,22 +197,20 @@ export class N1RealizedPnlSource implements RealizedPnlSource {
         err,
       );
     }
-    if (
-      typeof raw !== "object" ||
-      raw === null ||
-      typeof (raw as PersistedAnchor).markets !== "object"
-    ) {
+    if (typeof raw !== "object" || raw === null || (raw as PersistedAnchor).version !== 2 ||
+        (raw as PersistedAnchor).scope !== "account" || typeof (raw as PersistedAnchor).cursor !== "object") {
       throw new ExchangeAdapterError(
-        `PnL session anchor at "${this.config.anchorFilePath}" is malformed (missing "markets"). ` +
-          "Refusing to guess a fresh boundary — delete the file deliberately to reset, if that's " +
-          "genuinely intended.",
+        `PnL session anchor at "${this.config.anchorFilePath}" is an incompatible per-market or ` +
+          `malformed anchor. Refusing automatic conversion because it could omit or double-count ` +
+          `account PnL. After directly confirming the account is flat, archive it with exactly:\n` +
+          MANUAL_ARCHIVE_COMMAND,
       );
     }
     return raw as PersistedAnchor;
   }
 
   private persistAnchor(): void {
-    const anchor: PersistedAnchor = { markets: Object.fromEntries(this.cursors) };
+    const anchor: PersistedAnchor = { version: 2, scope: "account", cursor: this.cursor! };
     mkdirSync(dirname(this.config.anchorFilePath), { recursive: true });
     writeFileSync(this.config.anchorFilePath, JSON.stringify(anchor, null, 2), "utf-8");
   }

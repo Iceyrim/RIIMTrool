@@ -9,6 +9,9 @@
 #
 # Numbers are arbitrary but internally consistent (order notional roughly matches
 # riskLimits.maxOrderNotionalUsd at StubAdapter's starting synthetic price of 100).
+accountRisk:
+  sessionLossCapUsd: 6
+
 markets:
   - symbol: STUBUSD
     exchange: stub
@@ -28,4 +31,3 @@ markets:
         maxOrderNotionalUsd: 250,
         maxOpenOrders: 12,
       }
-    sessionLossCapUsd: 15

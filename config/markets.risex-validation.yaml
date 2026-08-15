@@ -12,6 +12,9 @@
 # step grid, not a claim that these are RISEx-optimal.
 #
 # Never load this alongside a real live-mode run; keep it isolated from config/markets.yaml.
+accountRisk:
+  sessionLossCapUsd: 6
+
 markets:
   - symbol: BTCUSD
     exchange: risex
@@ -31,7 +34,6 @@ markets:
         maxOrderNotionalUsd: 160,
         maxOpenOrders: 12,
       }
-    sessionLossCapUsd: 15
 
   - symbol: ETHUSD
     exchange: risex
@@ -53,4 +55,3 @@ markets:
       }
     # Deliberately tighter than BTC's, matching config/markets.yaml's same asymmetry (SPEC.md
     # Section 2).
-    sessionLossCapUsd: 6

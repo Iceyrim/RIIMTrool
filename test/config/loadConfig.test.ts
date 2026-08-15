@@ -12,6 +12,8 @@ function writeTempConfig(contents: string): string {
 }
 
 const validYaml = `
+accountRisk:
+  sessionLossCapUsd: 6
 markets:
   - symbol: BTCUSD
     exchange: n1
@@ -24,7 +26,6 @@ markets:
     levelSpacingBps: [2, 3]
     inventoryReductionThresholdBase: 0.003
     riskLimits: { maxLongPosition: 0.005, maxShortPosition: 0.005, maxOrderSize: 0.0025, maxOrderNotionalUsd: 160, maxOpenOrders: 12 }
-    sessionLossCapUsd: 15
 `;
 
 describe("loadMarketsConfig", () => {
@@ -51,12 +52,13 @@ describe("loadMarketsConfig", () => {
       /quoteMaximumLifetimeMs/,
     ],
   ])("rejects %s", (_description, refreshConfig, expected) => {
-    const invalid = validYaml.replace("    sessionLossCapUsd: 15\n", `    sessionLossCapUsd: 15\n${refreshConfig}`);
+    const invalid = validYaml.replace("    inventoryReductionThresholdBase: 0.003\n", `    inventoryReductionThresholdBase: 0.003\n${refreshConfig}`);
     expect(() => loadMarketsConfig(writeTempConfig(invalid))).toThrow(expected);
   });
 
   it("throws with field-level detail on missing required fields", () => {
     const badYaml = `
+accountRisk: { sessionLossCapUsd: 6 }
 markets:
   - symbol: BTCUSD
     exchange: n1
@@ -83,6 +85,7 @@ markets:
 
   it("throws on duplicate market symbols", () => {
     const duplicated = `
+accountRisk: { sessionLossCapUsd: 6 }
 markets:
   - symbol: BTCUSD
     exchange: n1
@@ -95,7 +98,6 @@ markets:
     levelSpacingBps: [2]
     inventoryReductionThresholdBase: 0.003
     riskLimits: { maxLongPosition: 0.005, maxShortPosition: 0.005, maxOrderSize: 0.0025, maxOrderNotionalUsd: 160, maxOpenOrders: 12 }
-    sessionLossCapUsd: 15
   - symbol: BTCUSD
     exchange: n1
     exchangeSymbol: BTCUSDC2
@@ -107,8 +109,15 @@ markets:
     levelSpacingBps: [2]
     inventoryReductionThresholdBase: 0.003
     riskLimits: { maxLongPosition: 0.005, maxShortPosition: 0.005, maxOrderSize: 0.0025, maxOrderNotionalUsd: 160, maxOpenOrders: 12 }
-    sessionLossCapUsd: 15
 `;
     expect(() => loadMarketsConfig(writeTempConfig(duplicated))).toThrow(/duplicate/);
+  });
+
+  it("rejects obsolete per-market loss caps instead of silently misreading them", () => {
+    const legacy = validYaml.replace(
+      "    inventoryReductionThresholdBase: 0.003\n",
+      "    inventoryReductionThresholdBase: 0.003\n    sessionLossCapUsd: 15\n",
+    );
+    expect(() => loadMarketsConfig(writeTempConfig(legacy))).toThrow(/sessionLossCapUsd/);
   });
 });

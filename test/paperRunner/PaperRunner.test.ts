@@ -120,7 +120,7 @@ describe("PaperRunner", () => {
     const entries = await runner.runOnce();
     runner.stop();
 
-    expect(entries[0]?.sessionRealizedPnlUsd).toBe(-20);
+    expect(entries[0]?.accountSessionRealizedPnlUsd).toBe(-20);
     // Next cycle's per-level risk check should now reject every placement attempt for this
     // market — the cap is enforced per-order inside manageQuoteLadder, not as a whole-cycle
     // blockedReason (that field is reserved for margin/reconciliation blocks).
@@ -279,7 +279,7 @@ describe("PaperRunner", () => {
 
     expect(report.cycles).toBe(2);
     expect(report.totalQuotesPlaced).toBeGreaterThan(0);
-    expect(report.finalSessionRealizedPnlUsd).toEqual({ BTCUSD: 0 });
+    expect(report.finalAccountSessionRealizedPnlUsd).toBe(0);
   });
 
   it("quiesce waits for an in-flight cycle and prevents its pending placements", async () => {
@@ -694,7 +694,7 @@ describe("PaperRunner PnL-drain failure handling", () => {
     await runner.runOnce();
 
     const blockedCycle = await runner.runOnce();
-    expect(blockedCycle[0]?.summary.blockedReason).toMatch(/Session realized-PnL unavailable/);
+    expect(blockedCycle[0]?.summary.blockedReason).toMatch(/Account realized-PnL unavailable/);
     expect(blockedCycle[0]?.summary.blockedReason).toMatch(/network hiccup/);
     expect(blockedCycle[0]?.summary.quotesPlaced).toBe(0);
     expect(blockedCycle[0]?.summary.pnlOutageCancellation.unresolved).toBe(0);
@@ -716,7 +716,7 @@ describe("PaperRunner PnL-drain failure handling", () => {
     await runner.runOnce(); // this cycle's drain fails (errorToThrow self-clears after throwing)
 
     const blockedCycle = await runner.runOnce();
-    expect(blockedCycle[0]?.summary.blockedReason).toMatch(/Session realized-PnL unavailable/);
+    expect(blockedCycle[0]?.summary.blockedReason).toMatch(/Account realized-PnL unavailable/);
 
     const recoveredCycle = await runner.runOnce(); // drain succeeded again last cycle
     expect(recoveredCycle[0]?.summary.blockedReason).toBeUndefined();

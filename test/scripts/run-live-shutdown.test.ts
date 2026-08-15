@@ -39,10 +39,12 @@ describe("live one-shot shutdown handling", () => {
         totalQuotesAttempted: 0,
         totalQuotesCancelled: 0,
         totalAnomalies: 0,
-        finalSessionRealizedPnlUsd: {},
+        finalAccountSessionRealizedPnlUsd: 0,
       },
       cleanup: [],
       successful: true,
+      positionsFlattened: false,
+      positionDisposition: "NOT_FLATTENED_REQUIRES_DIRECT_EXCHANGE_VERIFICATION_AND_MANUAL_CLOSURE",
     });
     await Promise.all([first, repeated]);
     expect(closeDashboard).toHaveBeenCalledTimes(1);
@@ -62,7 +64,7 @@ describe("live one-shot shutdown handling", () => {
           totalQuotesAttempted: 0,
           totalQuotesCancelled: 0,
           totalAnomalies: 0,
-          finalSessionRealizedPnlUsd: {},
+          finalAccountSessionRealizedPnlUsd: 0,
         },
         cleanup: [
           {
@@ -76,6 +78,8 @@ describe("live one-shot shutdown handling", () => {
           },
         ],
         successful: false,
+        positionsFlattened: false,
+        positionDisposition: "NOT_FLATTENED_REQUIRES_DIRECT_EXCHANGE_VERIFICATION_AND_MANUAL_CLOSURE",
       })),
     } as unknown as PaperRunner;
     const handler = createLiveShutdownHandler({

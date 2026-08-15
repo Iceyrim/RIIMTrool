@@ -5,6 +5,9 @@
 # exchangeSymbol is a TODO: confirm the real live N1 market symbols before connecting anything
 # (see .env.example — no live/testnet connection has been made yet, this is unverified).
 
+accountRisk:
+  sessionLossCapUsd: 6
+
 markets:
   - symbol: BTCUSD
     exchange: n1
@@ -24,7 +27,6 @@ markets:
         maxOrderNotionalUsd: 160,
         maxOpenOrders: 12,
       }
-    sessionLossCapUsd: 15
 
   - symbol: ETHUSD
     exchange: n1
@@ -44,4 +46,3 @@ markets:
         maxOrderNotionalUsd: 160,
         maxOpenOrders: 12,
       }
-    sessionLossCapUsd: 6

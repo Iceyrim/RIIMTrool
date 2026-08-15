@@ -9,7 +9,7 @@ import { Reconciliation, type ReconciliationResult } from "./Reconciliation.js";
 import { generateQuoteLadder, pickOrderSize } from "./QuoteLadder.js";
 import { RiskManager } from "./RiskManager.js";
 import { TradeLog, type TradeLogEntry } from "./TradeLog.js";
-import type { EngineMarketConfig } from "./types.js";
+import type { AccountRiskState, EngineMarketConfig } from "./types.js";
 
 export interface CycleSummary {
   market: string;
@@ -44,11 +44,38 @@ export interface CycleSummary {
     messages: string[];
   };
   quoteRefreshReason?:
+    | "empty ladder placement"
     | "below-minimum hold"
     | "below-threshold hold"
     | "threshold refresh"
     | "maximum-age refresh";
   reduceOnlyAction: "placed" | "repriced" | "held" | "skipped_duplicate" | "none";
+  positionBaseSize: number;
+  inventoryReductionThresholdBase: number;
+  reductionMode: boolean;
+  reductionModeCancellation: {
+    attempted: number;
+    succeeded: number;
+    unresolved: number;
+    messages: string[];
+  };
+  exitState:
+    | "no_position"
+    | "below_threshold"
+    | "blocked"
+    | "placed"
+    | "held"
+    | "repriced"
+    | "placement_failed"
+    | "unresolved";
+  exitDetails?: {
+    size?: number;
+    price?: number;
+    orderId?: string;
+    ageMs?: number;
+    driftBps?: number;
+    cause?: string;
+  };
   /** Set when the entire cycle skipped new placements (margin risk, degraded reconciliation) —
    * not just an individual order rejection. */
   blockedReason?: string;
@@ -62,6 +89,9 @@ export interface MarketEngineOptions {
   /** Forwarded straight into this market's TradeLog (see TradeLogOptions) — MarketEngine stays
    * alerting-agnostic, this is just a pass-through callback. */
   onFillRecorded?: (entry: TradeLogEntry) => void;
+  /** Shared by every engine belonging to one configured account. PaperRunner installs one
+   * automatically; live construction may inject it before the runner exists. */
+  accountRiskState?: AccountRiskState;
 }
 
 export interface ManagedOrderCleanupResult {
@@ -88,22 +118,28 @@ export class MarketEngine {
   readonly riskManager: RiskManager;
   readonly tradeLog: TradeLog;
 
-  private sessionRealizedPnlUsd = 0;
+  private accountRiskState: AccountRiskState;
   private started = false;
   // Defaults healthy: PaperRunner only ever calls markSessionPnlUnavailable() after a real
   // drain attempt fails, and startup (run-live.ts) aborts before any cycle runs if the initial
   // live PnL probe itself fails — so runCycle() is never reachable with this genuinely unknown.
-  private sessionPnlUnavailable = false;
-  private sessionPnlUnavailableReason?: string;
   private quiescing = false;
   private quoteLadderReferencePrice?: number;
-  private quoteLadderRefreshedAt?: number;
+  private lastCycleSummary?: CycleSummary;
 
   constructor(
     private readonly adapter: ExchangeAdapter,
     private readonly config: EngineMarketConfig,
     options: MarketEngineOptions,
   ) {
+    this.accountRiskState = options.accountRiskState ?? {
+      sessionRealizedPnlUsd: 0,
+      sessionLossCapUsd:
+        config.accountSessionLossCapUsd ??
+        // Compatibility for programmatic test fixtures during the configuration migration.
+        ((config as EngineMarketConfig & { sessionLossCapUsd?: number }).sessionLossCapUsd ?? 6),
+      pnlAvailable: true,
+    };
     this.registry = new OrderRegistry(config.symbol, options.stateFilePath);
     this.tradeLog = new TradeLog(options.tradeLogFilePath, {
       onFillRecorded: options.onFillRecorded,
@@ -129,11 +165,28 @@ export class MarketEngine {
    * proper fill-level PnL accounting from it is separate future work. Callers apply deltas as
    * fills are processed. */
   recordRealizedPnl(deltaUsd: number): void {
-    this.sessionRealizedPnlUsd += deltaUsd;
+    this.accountRiskState.sessionRealizedPnlUsd += deltaUsd;
   }
 
   getSessionRealizedPnlUsd(): number {
-    return this.sessionRealizedPnlUsd;
+    return this.accountRiskState.sessionRealizedPnlUsd;
+  }
+
+  setAccountRiskState(state: AccountRiskState): void {
+    this.accountRiskState = state;
+  }
+
+  getAccountRiskState(): Readonly<AccountRiskState> {
+    return this.accountRiskState;
+  }
+
+  getLastCycleSummary(): CycleSummary | undefined {
+    return this.lastCycleSummary;
+  }
+
+  private finishSummary(summary: CycleSummary): CycleSummary {
+    this.lastCycleSummary = summary;
+    return summary;
   }
 
   /** Permanently prevents this engine instance from beginning another placement. */
@@ -257,15 +310,15 @@ export class MarketEngine {
    * time PaperRunner drains PnL) — the same one-cycle lag sessionRealizedPnlUsd itself already
    * has via recordRealizedPnl(). */
   markSessionPnlUnavailable(reason: string): void {
-    this.sessionPnlUnavailable = true;
-    this.sessionPnlUnavailableReason = reason;
+    this.accountRiskState.pnlAvailable = false;
+    this.accountRiskState.pnlUnavailableReason = reason;
   }
 
   /** Called by PaperRunner once a drain succeeds again after a prior failure — clears the block
    * so quoting/exits resume. A no-op when already healthy. */
   confirmSessionPnlHealthy(): void {
-    this.sessionPnlUnavailable = false;
-    this.sessionPnlUnavailableReason = undefined;
+    this.accountRiskState.pnlAvailable = true;
+    this.accountRiskState.pnlUnavailableReason = undefined;
   }
 
   async runCycle(): Promise<CycleSummary> {
@@ -310,35 +363,52 @@ export class MarketEngine {
         messages: [],
       },
       reduceOnlyAction: "none",
+      positionBaseSize: 0,
+      inventoryReductionThresholdBase: this.config.inventoryReductionThresholdBase,
+      reductionMode: false,
+      reductionModeCancellation: { attempted: 0, succeeded: 0, unresolved: 0, messages: [] },
+      exitState: "no_position",
     };
 
     // A stale/unknown realized-PnL total invalidates the session loss cap. Reconciliation above
     // must still run first, but once the feed is known unavailable the safest state is no managed
     // resting exposure at all. This deliberately precedes the other early-return gates: margin or
     // reconciliation trouble must not leave our own confirmed-open orders resting.
-    if (this.sessionPnlUnavailable) {
+    if (!this.accountRiskState.pnlAvailable) {
       summary.pnlOutageCancellation = await this.cancelManagedOrdersForPnlOutage();
       summary.blockedReason =
-        `Session realized-PnL unavailable for ${this.config.symbol} ` +
-        `(${this.sessionPnlUnavailableReason}); holding all new placements this cycle`;
-      return summary;
+        `Account realized-PnL unavailable ` +
+        `(${this.accountRiskState.pnlUnavailableReason}); holding all new placements this cycle`;
+      return this.finishSummary(summary);
+    }
+
+    if (
+      this.accountRiskState.sessionRealizedPnlUsd <=
+      -this.accountRiskState.sessionLossCapUsd
+    ) {
+      summary.blockedReason =
+        `Account-wide session loss cap of $${this.accountRiskState.sessionLossCapUsd} reached ` +
+        `($${(-this.accountRiskState.sessionRealizedPnlUsd).toFixed(2)} realized loss); ` +
+        "holding all new placements across the account";
+      return this.finishSummary(summary);
     }
 
     const marginCheck = this.riskManager.checkMarginHealth();
     if (!marginCheck.allowed) {
       summary.blockedReason = marginCheck.reason;
-      return summary;
+      return this.finishSummary(summary);
     }
 
     if (!reconciliationResult.healthy) {
       summary.blockedReason =
         `Reconciliation degraded (streak ${this.reconciliation.getDegradedStreak()}); ` +
         `holding all new placements for ${this.config.symbol} this cycle`;
-      return summary;
+      return this.finishSummary(summary);
     }
 
     const position = this.adapter.getPositions(this.config.symbol)[0];
     const currentBaseSize = position?.baseSize ?? 0;
+    summary.positionBaseSize = currentBaseSize;
     const exchangeOpenOrders = this.adapter.getOpenOrders(this.config.symbol);
     let progressiveOpenOrderCount = reconciliationResult.openOrderCount;
     let openBuyQuantity = exchangeOpenOrders
@@ -348,20 +418,35 @@ export class MarketEngine {
       .filter((order) => order.side === "sell")
       .reduce((sum, order) => sum + order.remainingSize, 0);
     const exitRequired = Math.abs(currentBaseSize) > this.config.inventoryReductionThresholdBase;
+    summary.reductionMode = exitRequired;
+    summary.exitState = currentBaseSize === 0 ? "no_position" : "below_threshold";
     const existingExit = this.lifecycle.hasOpenReduceOnlyExit();
     let reserveExitSlot = exitRequired && !existingExit;
 
     // SPEC.md Section 5c: inventory management is a dedicated reduce-only exit, not a skew
     // applied to the normal ladder below.
     if (exitRequired) {
+      summary.reductionModeCancellation = await this.cancelOrdinaryQuotesForReductionMode();
+      if (summary.reductionModeCancellation.unresolved > 0) {
+        summary.exitState = "blocked";
+        summary.exitDetails = {
+          cause: `${summary.reductionModeCancellation.unresolved} ordinary managed quote(s) remain unresolved`,
+        };
+        this.registry.save();
+        return this.finishSummary(summary);
+      }
       const exit = await this.manageReduceOnlyExit(currentBaseSize, progressiveOpenOrderCount);
       summary.reduceOnlyAction = exit.action;
+      summary.exitState = exit.state;
+      summary.exitDetails = exit.details;
       if (exit.placedOrder) {
         progressiveOpenOrderCount++;
         if (exit.placedOrder.side === "buy") openBuyQuantity += exit.placedOrder.size;
         else openSellQuantity += exit.placedOrder.size;
         reserveExitSlot = false;
       }
+      this.registry.save();
+      return this.finishSummary(summary);
     }
 
     const {
@@ -389,7 +474,37 @@ export class MarketEngine {
     summary.quoteRefreshReason = refreshReason;
 
     this.registry.save();
-    return summary;
+    return this.finishSummary(summary);
+  }
+
+  private async cancelOrdinaryQuotesForReductionMode(): Promise<CycleSummary["reductionModeCancellation"]> {
+    const exchangeOpenIds = new Set(
+      this.adapter.getOpenOrders(this.config.symbol).map((order) => order.exchangeOrderId),
+    );
+    const ordinary = this.registry.list().filter((order) =>
+      !order.isReduceOnly && order.exchangeOrderId !== null &&
+      (order.state === "RESTING" || order.state === "PENDING_CANCEL" || order.state === "UNKNOWN") &&
+      exchangeOpenIds.has(order.exchangeOrderId),
+    );
+    const messages: string[] = [];
+    for (const order of ordinary) {
+      try {
+        await this.lifecycle.cancelOrder(order.clientOrderId);
+      } catch (err) {
+        messages.push(`Failed to cancel ordinary quote ${order.exchangeOrderId}: ${String(err)}`);
+      }
+    }
+    try {
+      await this.adapter.refreshAccountState();
+    } catch (err) {
+      messages.push(`Failed to verify reduction-mode cancellations: ${String(err)}`);
+    }
+    const finalOpenIds = new Set(
+      this.adapter.getOpenOrders(this.config.symbol).map((order) => order.exchangeOrderId),
+    );
+    const unresolved = ordinary.filter((order) => finalOpenIds.has(order.exchangeOrderId!)).length;
+    if (unresolved > 0) messages.push(`${unresolved} ordinary managed quote(s) remain open and will be retried`);
+    return { attempted: ordinary.length, succeeded: ordinary.length - unresolved, unresolved, messages: messages.slice(0, 5) };
   }
 
   private async cancelManagedOrdersForPnlOutage(): Promise<
@@ -486,7 +601,7 @@ export class MarketEngine {
   private async manageReduceOnlyExit(
     currentBaseSize: number,
     progressiveOpenOrderCount: number,
-  ): Promise<{ action: CycleSummary["reduceOnlyAction"]; placedOrder?: { side: OrderSide; size: number } }> {
+  ): Promise<{ action: CycleSummary["reduceOnlyAction"]; state: CycleSummary["exitState"]; details?: CycleSummary["exitDetails"]; placedOrder?: { side: OrderSide; size: number } }> {
     const existing = this.registry
       .list()
       .find((o) => o.isReduceOnly && (o.state === "RESTING" || o.state === "PENDING_CANCEL"));
@@ -496,7 +611,8 @@ export class MarketEngine {
         existing,
         this.config.reduceOnlyExit,
       );
-      if (decision === "hold") return { action: "held" };
+      const ageMs = Date.now() - existing.placedAt;
+      if (decision === "hold") return { action: "held", state: "held", details: { size: existing.size, price: existing.price, orderId: existing.exchangeOrderId ?? undefined, ageMs } };
 
       if (decision === "eligible") {
         // SPEC.md Section 5c specifies the min/max hold times exactly but not a fixed
@@ -506,7 +622,7 @@ export class MarketEngine {
         const marketPrice = await this.adapter.getMarketPrice(this.config.symbol);
         const target = this.computeExitPrice(currentBaseSize, marketPrice.mark);
         const driftBps = (Math.abs(target - existing.price) / existing.price) * 10_000;
-        if (driftBps < this.config.exitSpreadBps) return { action: "held" };
+        if (driftBps < this.config.exitSpreadBps) return { action: "held", state: "held", details: { size: existing.size, price: existing.price, orderId: existing.exchangeOrderId ?? undefined, ageMs, driftBps } };
       }
 
       // "forced" (past the max-hold ceiling) always reprices; "eligible" reprices only on
@@ -514,11 +630,11 @@ export class MarketEngine {
       await this.lifecycle.cancelOrder(existing.clientOrderId);
       // Deliberately one action per cycle: placement of the replacement happens next cycle, once
       // manageReduceOnlyExit sees no existing order. Keeps each cycle's action observable/simple.
-      return { action: "repriced" };
+      return { action: "repriced", state: "repriced", details: { size: existing.size, price: existing.price, orderId: existing.exchangeOrderId ?? undefined, ageMs } };
     }
 
     if (progressiveOpenOrderCount >= this.config.riskLimits.maxOpenOrders) {
-      return { action: "none" };
+      return { action: "none", state: "blocked", details: { cause: "open-order capacity exhausted" } };
     }
 
     const marketPrice = await this.adapter.getMarketPrice(this.config.symbol);
@@ -526,7 +642,7 @@ export class MarketEngine {
     const side: OrderSide = currentBaseSize > 0 ? "sell" : "buy";
     const size = Math.min(Math.abs(currentBaseSize), this.config.riskLimits.maxOrderSize);
 
-    if (this.quiescing) return { action: "none" };
+    if (this.quiescing) return { action: "none", state: "blocked", details: { cause: "engine quiescing" } };
     const result = await this.lifecycle.placeReduceOnlyExit({
       side,
       type: "postOnly",
@@ -536,9 +652,11 @@ export class MarketEngine {
     if (!result.success) {
       return {
         action: result.message?.includes("already open") ? "skipped_duplicate" : "none",
+        state: result.order?.state === "UNKNOWN" ? "unresolved" : "placement_failed",
+        details: { size, price: exitPrice, orderId: result.order?.exchangeOrderId ?? undefined, cause: result.message },
       };
     }
-    return { action: "placed", placedOrder: { side, size } };
+    return { action: "placed", state: "placed", details: { size, price: exitPrice, orderId: result.order?.exchangeOrderId ?? undefined, ageMs: 0 }, placedOrder: { side, size } };
   }
 
   private async manageQuoteLadder(
@@ -562,36 +680,33 @@ export class MarketEngine {
     const now = Date.now();
     const restingQuotes = this.registry.listByState("RESTING").filter((o) => !o.isReduceOnly);
     const expectedQuoteCount = this.config.quoteLevels * 2;
-    const hasCompleteLadder = restingQuotes.length === expectedQuoteCount;
+    const hasManagedLadder = restingQuotes.length > 0;
     const marketPrice = await this.adapter.getMarketPrice(this.config.symbol);
 
-    if (hasCompleteLadder && this.quoteLadderReferencePrice === undefined) {
+    if (hasManagedLadder && this.quoteLadderReferencePrice === undefined) {
       this.quoteLadderReferencePrice =
         restingQuotes.reduce((sum, order) => sum + order.price, 0) / restingQuotes.length;
-      // The latest placement approximates completion on a ladder recovered at startup and avoids
-      // treating placement latency across the ladder as quote age.
-      this.quoteLadderRefreshedAt = Math.max(...restingQuotes.map((order) => order.placedAt));
     }
 
     let refreshReason: CycleSummary["quoteRefreshReason"];
     let refreshTriggered = false;
     if (
-      hasCompleteLadder &&
-      this.quoteLadderReferencePrice !== undefined &&
-      this.quoteLadderRefreshedAt !== undefined
+      hasManagedLadder &&
+      this.quoteLadderReferencePrice !== undefined
     ) {
-      const ageMs = now - this.quoteLadderRefreshedAt;
+      const oldestAgeMs = now - Math.min(...restingQuotes.map((order) => order.placedAt));
+      const youngestAgeMs = now - Math.max(...restingQuotes.map((order) => order.placedAt));
       const movementBps =
         (Math.abs(marketPrice.mark - this.quoteLadderReferencePrice) /
           this.quoteLadderReferencePrice) *
         10_000;
       const maximumLifetimeMs = this.config.quoteMaximumLifetimeMs ?? 120_000;
       const repriceThresholdBps = this.config.quoteRepriceThresholdBps ?? 1;
-      if (ageMs < this.config.quoteMinimumLifetimeMs) {
-        refreshReason = "below-minimum hold";
-      } else if (ageMs >= maximumLifetimeMs) {
+      if (oldestAgeMs >= maximumLifetimeMs) {
         refreshReason = "maximum-age refresh";
         refreshTriggered = true;
+      } else if (youngestAgeMs < this.config.quoteMinimumLifetimeMs) {
+        refreshReason = "below-minimum hold";
       } else if (movementBps >= repriceThresholdBps - 1e-9) {
         refreshReason = "threshold refresh";
         refreshTriggered = true;
@@ -607,7 +722,7 @@ export class MarketEngine {
       orderSize: 0,
       orderNotional: 0,
     };
-    if (hasCompleteLadder && !refreshTriggered) {
+    if (hasManagedLadder && !refreshTriggered) {
       return {
         placed: 0,
         attempted: 0,
@@ -683,8 +798,8 @@ export class MarketEngine {
         progressiveOpenOrderCount: riskState.progressiveOpenOrderCount,
         openBuyQuantity: riskState.openBuyQuantity,
         openSellQuantity: riskState.openSellQuantity,
-        sessionRealizedPnlUsd: this.sessionRealizedPnlUsd,
-        sessionLossCapUsd: this.config.sessionLossCapUsd,
+        sessionRealizedPnlUsd: this.accountRiskState.sessionRealizedPnlUsd,
+        sessionLossCapUsd: this.accountRiskState.sessionLossCapUsd,
       });
       if (!riskCheck.allowed) {
         if (riskCheck.deniedBy === "openOrderCapacity") riskSkippedLevels.openOrderCapacity++;
@@ -731,8 +846,9 @@ export class MarketEngine {
       this.quoteLadderReferencePrice = marketPrice.mark;
       // Start the next lifetime window after all adapter operations finish. A slow cancel/place
       // sequence therefore cannot consume the replacement ladder's lifetime before it rests.
-      this.quoteLadderRefreshedAt = Date.now();
     }
+
+    if (!hasManagedLadder) refreshReason = "empty ladder placement";
 
     return {
       placed,

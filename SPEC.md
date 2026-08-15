@@ -52,7 +52,6 @@ markets:
     levelSpacingBps: [2, 3, 4, 7, 10]
     inventoryReductionThresholdBase: 0.003
     riskLimits: { maxLongPosition: 0.005, maxShortPosition: 0.005, maxOrderSize: 0.0025, maxOrderNotionalUsd: 160, maxOpenOrders: 12 }
-    sessionLossCapUsd: 15
 
   - symbol: ETHUSD
     exchange: n1
@@ -64,10 +63,16 @@ markets:
     levelSpacingBps: [2, 3, 4, 7, 10]
     inventoryReductionThresholdBase: 0.09
     riskLimits: { maxLongPosition: 0.15, maxShortPosition: 0.15, maxOrderSize: 0.075, maxOrderNotionalUsd: 160, maxOpenOrders: 12 }
-    sessionLossCapUsd: 6
 ```
 
-**Why per-market session loss caps differ (BTC $15 vs ETH $6):** ETH was deliberately kept on a tighter leash after an incident where its position grew unexpectedly overnight before the underlying bugs (see Section 5) were understood. Keep this asymmetry — or better, make it a deliberate, reasoned choice per market based on trading history — rather than defaulting both to the same number out of convenience.
+The N1 realized-PnL policy is account-wide. Configuration has one top-level source of truth:
+`accountRisk: { sessionLossCapUsd: 6 }`. It is enforced across every N1 market, and the N1 ledger
+uses one account-wide cursor so an event cannot be consumed once per market. Per-market loss-cap
+keys are invalid. Paper/stub/RISEx runners use the same account-risk abstraction against their own
+local/shared account source; they do not use N1 ledger semantics.
+
+**Current session loss cap:** one account-wide $6 cap. It is never displayed or enforced as
+independent BTC and ETH PnL.
 
 **Adding a new market** should be: add one entry to this config, no code changes required, restart. This was the whole point of unifying — verify this actually works before calling the unification complete.
 

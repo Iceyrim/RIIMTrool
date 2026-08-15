@@ -127,10 +127,10 @@ describe("MarketEngine", () => {
     await engine.start();
     const summary = await engine.runCycle();
 
-    expect(summary.quotesPlaced).toBe(7);
-    expect(adapter.getOpenOrders(MARKET)).toHaveLength(12);
-    expect(summary.riskSkippedLevels.openOrderCapacity).toBe(3);
-    expect(summary.riskSkipMessages.some((message) => message.includes("capacity"))).toBe(true);
+    expect(summary.quotesPlaced).toBe(0);
+    expect(adapter.getOpenOrders(MARKET)).toHaveLength(5);
+    expect(summary.quoteRefreshReason).toBe("below-minimum hold");
+    expect(summary.riskSkipMessages).toEqual([]);
   });
 
   it("increments capacity for successes but not rejected placements", async () => {
@@ -156,9 +156,9 @@ describe("MarketEngine", () => {
     await engine.start();
     const summary = await engine.runCycle();
 
-    expect(summary.quotesPlaced).toBe(7);
-    expect(summary.quotesFailed).toBe(3);
-    expect(summary.quotesAttempted).toBe(10);
+    expect(summary.quotesPlaced).toBe(0);
+    expect(summary.quotesFailed).toBe(0);
+    expect(summary.quotesAttempted).toBe(0);
   });
 
   it("uses aggregate market-scoped same-side exposure and does not net opposing orders", async () => {
@@ -208,10 +208,10 @@ describe("MarketEngine", () => {
     await engine.start();
     const summary = await engine.runCycle();
 
-    expect(summary.riskSkippedLevels.aggregateLongExposure).toBe(4);
-    expect(summary.quotesPlaced).toBe(6);
-    expect(adapter.placeOrderCalls.filter((call) => call.side === "buy")).toHaveLength(1);
-    expect(adapter.placeOrderCalls.filter((call) => call.side === "sell")).toHaveLength(5);
+    expect(summary.riskSkippedLevels.aggregateLongExposure).toBe(0);
+    expect(summary.quotesPlaced).toBe(0);
+    expect(adapter.placeOrderCalls.filter((call) => call.side === "buy")).toHaveLength(0);
+    expect(adapter.placeOrderCalls.filter((call) => call.side === "sell")).toHaveLength(0);
   });
 
   it("does not let another market's orders consume this market's capacity", async () => {
@@ -259,8 +259,8 @@ describe("MarketEngine", () => {
     const summary = await engine.runCycle();
 
     expect(summary.reduceOnlyAction).toBe("placed");
-    expect(summary.quotesPlaced).toBe(4);
-    expect(adapter.getOpenOrders(MARKET)).toHaveLength(5);
+    expect(summary.quotesPlaced).toBe(0);
+    expect(adapter.getOpenOrders(MARKET)).toHaveLength(1);
     expect(adapter.placeOrderCalls[0]?.isReduceOnly).toBe(true);
     expect(adapter.placeOrderCalls.slice(1).every((call) => !call.isReduceOnly)).toBe(true);
   });
@@ -349,6 +349,22 @@ describe("MarketEngine", () => {
     expect(summary.quotesPlaced).toBe(10);
   });
 
+  it("forces out an old partial-ladder survivor even while newer siblings remain below minimum age", async () => {
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+    await placeInitialLadder(engine);
+    const resting = engine.registry.listByState("RESTING");
+    resting[0]!.placedAt = 1_000_000;
+    for (const sibling of resting.slice(1)) sibling.placedAt = 1_110_000;
+    // Reconciliation reads exchange truth but must preserve genuine registry placement times.
+    vi.setSystemTime(1_120_000);
+
+    const summary = await engine.runCycle();
+
+    expect(summary.quoteRefreshReason).toBe("maximum-age refresh");
+    expect(summary.quotesCancelled).toBe(10);
+    expect(engine.registry.get(resting[0]!.clientOrderId)?.state).not.toBe("RESTING");
+  });
+
   it("does not force refresh before 120 seconds with an unchanged mark", async () => {
     const engine = new MarketEngine(adapter, testConfig(), tempPaths());
     await placeInitialLadder(engine);
@@ -408,7 +424,7 @@ describe("MarketEngine", () => {
 
     const summary = await engine.runCycle();
     expect(summary.quotesCancelled).toBe(0);
-    expect(summary.quotesPlaced).toBe(1);
+    expect(summary.quotesPlaced).toBe(0);
     const restingIds = engine.registry.listByState("RESTING").map((order) => order.clientOrderId);
     expect(retainedIds.every((id) => restingIds.includes(id))).toBe(true);
   });
@@ -442,10 +458,10 @@ describe("MarketEngine", () => {
 
     const summary = await engine.runCycle();
     expect(summary.quotesPlaced).toBe(0);
-    expect(summary.riskSkippedLevels.aggregateLongExposure).toBe(1);
+    expect(summary.riskSkippedLevels.aggregateLongExposure).toBe(0);
     expect(
       engine.registry.listByState("RESTING").filter((order) => !order.isReduceOnly),
-    ).toHaveLength(9);
+    ).toHaveLength(0);
   });
 
   it("SPEC 5c: places a reduce-only exit once inventory exceeds the threshold, instead of skewing the normal ladder", async () => {
@@ -465,6 +481,25 @@ describe("MarketEngine", () => {
     const reduceOnlyOrder = engine.registry.list().find((o) => o.isReduceOnly);
     expect(reduceOnlyOrder).toBeDefined();
     expect(reduceOnlyOrder?.side).toBe("sell"); // long position -> exit by selling
+  });
+
+  it("documents residual policy: inventory at the threshold remains open and normal quoting continues", async () => {
+    adapter.positions.push({
+      market: MARKET,
+      baseSize: 0.003,
+      markPrice: 60000,
+      unrealizedPnl: 0,
+      openOrderCount: 0,
+    });
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+    await engine.start();
+
+    const summary = await engine.runCycle();
+
+    expect(summary.reductionMode).toBe(false);
+    expect(summary.exitState).toBe("below_threshold");
+    expect(summary.reduceOnlyAction).toBe("none");
+    expect(summary.quotesPlaced).toBeGreaterThan(0);
   });
 
   it("blocks all new placements while reconciliation is degraded, without touching the exchange", async () => {
@@ -527,7 +562,7 @@ describe("MarketEngine", () => {
     const second = await engine.runCycle();
     expect(second.reconciliation.healthy).toBe(true);
     expect(second.blockedReason).toBeUndefined();
-    expect(second.quotesPlaced).toBe(2); // exactly the two vacated levels refilled
+    expect(second.quotesPlaced).toBe(0); // partial ladder waits for a policy refresh
     expect(engine.registry.get(filledOne.clientOrderId)?.state).toBe("FILLED");
     expect(engine.registry.get(filledTwo.clientOrderId)?.state).toBe("FILLED");
   });
@@ -737,7 +772,7 @@ describe("MarketEngine", () => {
 
       const summary = await engine.runCycle();
 
-      expect(summary.blockedReason).toMatch(/Session realized-PnL unavailable/);
+      expect(summary.blockedReason).toMatch(/Account realized-PnL unavailable/);
       expect(summary.blockedReason).toMatch(/network hiccup/);
       expect(summary.quotesPlaced).toBe(0);
       expect(summary.reduceOnlyAction).toBe("none");
@@ -750,7 +785,7 @@ describe("MarketEngine", () => {
       engine.markSessionPnlUnavailable("drain failed");
 
       const blocked = await engine.runCycle();
-      expect(blocked.blockedReason).toMatch(/Session realized-PnL unavailable/);
+      expect(blocked.blockedReason).toMatch(/Account realized-PnL unavailable/);
       expect(blocked.quotesPlaced).toBe(0);
 
       engine.confirmSessionPnlHealthy();
@@ -766,8 +801,8 @@ describe("MarketEngine", () => {
 
       const first = await engine.runCycle();
       const second = await engine.runCycle();
-      expect(first.blockedReason).toMatch(/Session realized-PnL unavailable/);
-      expect(second.blockedReason).toMatch(/Session realized-PnL unavailable/);
+      expect(first.blockedReason).toMatch(/Account realized-PnL unavailable/);
+      expect(second.blockedReason).toMatch(/Account realized-PnL unavailable/);
       expect(second.quotesPlaced).toBe(0);
     });
   });

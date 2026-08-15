@@ -12,8 +12,8 @@
  *
  * Session realized-PnL is wired to N1RealizedPnlSource (src/adapters/n1/N1RealizedPnlSource.ts),
  * which sums N1's own authoritative getAccountPnl() trading-PnL ledger — replacing the
- * always-zero stub this script used to carry (see git history / CLAUDE.md's now-resolved
- * follow-up item). RiskManager's per-market sessionLossCapUsd gate is therefore live and
+ * always-zero stub this script used to carry (see CLAUDE.md's now-resolved follow-up item).
+ * RiskManager's account-wide session-loss gate is therefore live and
  * functioning: MarketEngine.runCycle() blocks ALL new placement, including reduce-only exits,
  * whenever a PnL drain fails (MarketEngine.markSessionPnlUnavailable()) rather than silently
  * treating a broken feed as "$0 realized this cycle." Excludes settledFundingPnl, matching
@@ -98,6 +98,10 @@ export function createLiveShutdownHandler(options: {
           error(`[LIVE] ${market.market}: unresolved managed IDs: ${market.unresolved.join(", ")}`);
         }
       }
+      log(
+        "\n[LIVE] Positions were NOT flattened. Directly verify every position on the exchange " +
+          "and close positions manually where required.",
+      );
       log(
         "\n[LIVE] Reminder (SPEC.md Section 9 rule 4): before restarting this or any live " +
           "process, confirm genuinely flat state directly against the exchange — never assume " +
@@ -235,8 +239,8 @@ async function main(): Promise<void> {
   console.log(`Balances: ${JSON.stringify(adapter.getBalances())}`);
   console.log(`Margin: ${JSON.stringify(adapter.getMarginStatus())}`);
   console.log(
-    `Session realized-PnL: live N1 source initialized OK (anchor: ${pnlAnchorFilePath}); ` +
-      "sessionLossCapUsd is active and will block all new placement, including reduce-only " +
+    `Account realized-PnL: live N1 account-wide source initialized OK (anchor: ${pnlAnchorFilePath}); ` +
+      `account session loss cap is $${config.accountRisk.sessionLossCapUsd} and will block all new placement, including reduce-only ` +
       "exits, if a PnL drain ever fails mid-session.",
   );
   for (const marketConfig of enabled) {
@@ -250,8 +254,7 @@ async function main(): Promise<void> {
         `maxOrderNotionalUsd=${marketConfig.riskLimits.maxOrderNotionalUsd} ` +
         `maxLongPosition=${marketConfig.riskLimits.maxLongPosition} ` +
         `maxShortPosition=${marketConfig.riskLimits.maxShortPosition} ` +
-        `maxOpenOrders=${marketConfig.riskLimits.maxOpenOrders} ` +
-        `sessionLossCapUsd=${marketConfig.sessionLossCapUsd}`,
+        `maxOpenOrders=${marketConfig.riskLimits.maxOpenOrders}`,
     );
   }
 

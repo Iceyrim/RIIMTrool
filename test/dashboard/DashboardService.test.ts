@@ -64,7 +64,9 @@ describe("buildDashboardStatus", () => {
     expect(status.markets[0]?.reconciliation.healthy).toBe(true);
     expect(status.markets[0]?.position).toBeNull();
     expect(status.totalExposureUsd).toBe(0);
-    expect(status.markets[0]?.sessionRealizedPnlUsd).toBe(0);
+    expect(status.accountSessionRealizedPnlUsd).toBe(0);
+    expect(status.accountSessionLossCapUsd).toBe(15);
+    expect(status.markets[0]).not.toHaveProperty("sessionRealizedPnlUsd");
   });
 
   it("computes notional and total exposure straight from the adapter's live position, not a counter", async () => {
