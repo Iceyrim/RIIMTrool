@@ -67,7 +67,8 @@ import { createAlertBusFromEnv } from "../src/alerting/createAlertBusFromEnv.js"
 import { loadMarketsConfig } from "../src/config/loadConfig.js";
 import { toEngineMarketConfig } from "../src/config/toEngineMarketConfig.js";
 import { createDashboardServer } from "../src/dashboard/server.js";
-import type { DashboardMarket } from "../src/dashboard/DashboardService.js";
+import { buildDashboardStatus, type DashboardMarket } from "../src/dashboard/DashboardService.js";
+import { DashboardSnapshotPublisher } from "../src/dashboard/DashboardSnapshotSidecar.js";
 import { DashboardTelemetry } from "../src/dashboard/DashboardTelemetry.js";
 import { DashboardHistoryStore } from "../src/dashboard/DashboardHistoryStore.js";
 import { MarketEngine } from "../src/engine/MarketEngine.js";
@@ -76,6 +77,7 @@ import { PaperRunner, type PaperRunnerMarket } from "../src/paperRunner/PaperRun
 export function createLiveShutdownHandler(options: {
   runner: PaperRunner;
   closeDashboard: () => void | Promise<void>;
+  publishStopped?: () => void;
   exit: (code: number) => void;
   log?: (message: string) => void;
   error?: (message: string) => void;
@@ -91,6 +93,7 @@ export function createLiveShutdownHandler(options: {
     }
     shutdownPromise = (async () => {
       const result = await options.runner.shutdown();
+      options.publishStopped?.();
       await options.closeDashboard();
       log("\n=== [LIVE] Session report ===");
       log(JSON.stringify(result, null, 2));
@@ -306,6 +309,8 @@ async function main(): Promise<void> {
   }));
   const dashboardPort = Number(process.env.DASHBOARD_PORT ?? "4300");
   const dashboardServer = createDashboardServer(dashboardMarkets, { port: dashboardPort });
+  const snapshotPublisher = new DashboardSnapshotPublisher(join(process.cwd(), "state", "dashboard", "snapshots"), "n1", () => buildDashboardStatus(dashboardMarkets));
+  snapshotPublisher.start();
 
   const logFilePath = join(
     process.cwd(),
@@ -321,6 +326,7 @@ async function main(): Promise<void> {
   // STAGE 13
   const shutdown = createLiveShutdownHandler({
     runner,
+    publishStopped: () => snapshotPublisher.stop(),
     closeDashboard: () =>
       new Promise<void>((resolve, reject) =>
         dashboardServer.close((err) => (err ? reject(err) : resolve())),

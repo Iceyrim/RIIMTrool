@@ -1,5 +1,11 @@
 # Synthetic dashboard preview
 
+The optional multi-runner sidecar is started with `npm run dashboard:sidecar` and is fixed to
+`127.0.0.1:4400`. Existing embedded dashboards and their ports are unchanged. Runners publish
+atomic, read-only per-session files under `state/dashboard/snapshots`; the newest 20 files per
+venue/mode are retained. Explicitly stopped sessions remain viewable until superseded, while two
+simultaneously fresh running sessions for one venue/mode are reported as a conflict.
+
 This preview serves deterministic, in-memory sample data. It does not load configuration, connect
 to adapters or exchanges, read credentials, inspect live state, or expose trading controls.
 

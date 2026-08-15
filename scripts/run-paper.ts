@@ -39,7 +39,8 @@ import { createAlertBusFromEnv } from "../src/alerting/createAlertBusFromEnv.js"
 import { loadMarketsConfig } from "../src/config/loadConfig.js";
 import { toEngineMarketConfig } from "../src/config/toEngineMarketConfig.js";
 import { createDashboardServer } from "../src/dashboard/server.js";
-import type { DashboardMarket } from "../src/dashboard/DashboardService.js";
+import { buildDashboardStatus, type DashboardMarket } from "../src/dashboard/DashboardService.js";
+import { DashboardSnapshotPublisher } from "../src/dashboard/DashboardSnapshotSidecar.js";
 import { DashboardTelemetry } from "../src/dashboard/DashboardTelemetry.js";
 import { DashboardHistoryStore } from "../src/dashboard/DashboardHistoryStore.js";
 import { MarketEngine } from "../src/engine/MarketEngine.js";
@@ -132,6 +133,12 @@ async function main(): Promise<void> {
   }));
   const dashboardPort = Number(process.env.DASHBOARD_PORT ?? "4000");
   const dashboardServer = createDashboardServer(dashboardMarkets, { port: dashboardPort });
+  const snapshotPublisher = new DashboardSnapshotPublisher(
+    join(process.cwd(), "state", "dashboard", "snapshots"),
+    "n1-paper",
+    () => buildDashboardStatus(dashboardMarkets),
+  );
+  snapshotPublisher.start();
 
   const logFilePath = join(
     process.cwd(),
@@ -143,15 +150,17 @@ async function main(): Promise<void> {
 
   const runner = new PaperRunner(runnerMarkets, { intervalMs, durationMs, logFilePath, alertBus, telemetry });
 
-  const shutdown = (): void => {
-    const report = runner.stop();
-    dashboardServer.close();
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => shutdownPromise ??= (async () => {
+    const result = await runner.shutdown();
+    snapshotPublisher.stop();
+    await new Promise<void>((resolve) => dashboardServer.close(() => resolve()));
     console.log("\n=== Soak report ===");
-    console.log(JSON.stringify(report, null, 2));
-    process.exit(0);
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+    console.log(JSON.stringify(result, null, 2));
+    process.exit(result.successful ? 0 : 1);
+  })();
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
 
   console.log(`Starting paper run for markets: ${enabled.map((m) => m.symbol).join(", ")}`);
   console.log(

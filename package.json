@@ -8,6 +8,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "dashboard:sidecar": "tsx scripts/run-dashboard-sidecar.ts",
     "dashboard:preview": "tsx scripts/run-dashboard-preview.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
