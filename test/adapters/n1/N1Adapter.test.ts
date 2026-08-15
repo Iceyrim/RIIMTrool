@@ -28,6 +28,7 @@ vi.mock("@n1xyz/nord-ts", async (importOriginal) => {
 });
 
 // Imported after vi.mock so N1Adapter picks up the mocked SDK exports above.
+const { FillMode, Side } = await import("@n1xyz/nord-ts");
 const { N1Adapter } = await import("../../../src/adapters/n1/N1Adapter.js");
 
 const MARKET = "BTCUSD";
@@ -284,6 +285,40 @@ describe("N1Adapter", () => {
   });
 
   describe("placeOrder", () => {
+    it("maps post-only buy and sell orders identically except for the SDK side", async () => {
+      fakeUser.placeOrder.mockResolvedValue({ actionId: 1n, orderId: 42n, fills: [] });
+      const adapter = new N1Adapter(baseConfig());
+      await adapter.connect();
+
+      await adapter.placeOrder({
+        market: MARKET,
+        side: "buy",
+        type: "postOnly",
+        size: 0.01,
+        price: 60_000,
+        isReduceOnly: false,
+      });
+      await adapter.placeOrder({
+        market: MARKET,
+        side: "sell",
+        type: "postOnly",
+        size: 0.01,
+        price: 60_000,
+        isReduceOnly: false,
+      });
+
+      const buyCall = fakeUser.placeOrder.mock.calls[0]![0];
+      const sellCall = fakeUser.placeOrder.mock.calls[1]![0];
+
+      expect(buyCall).toMatchObject({ side: Side.Bid, fillMode: FillMode.PostOnly });
+      expect(sellCall).toMatchObject({ side: Side.Ask, fillMode: FillMode.PostOnly });
+
+      const { side: buySide, ...buyWithoutSide } = buyCall;
+      const { side: sellSide, ...sellWithoutSide } = sellCall;
+      expect([buySide, sellSide]).toEqual([Side.Bid, Side.Ask]);
+      expect(buyWithoutSide).toEqual(sellWithoutSide);
+    });
+
     it.each([true, false])("passes isReduceOnly=%s through to the N1 SDK", async (isReduceOnly) => {
       fakeUser.placeOrder.mockResolvedValue({ actionId: 1n, orderId: 42n, fills: [] });
       const adapter = new N1Adapter(baseConfig());
