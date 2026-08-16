@@ -57,6 +57,47 @@ describe("RealPerplMarketDataSource", () => {
     expect(source.getFunding("1").rate).toBe(0.00004); expect(() => source.getMarketState("20")).toThrow(/incomplete/);
   });
 
+  it("keeps received sparse market state available without completing omitted markets", async () => {
+    let clock = now; const socket = new Socket();
+    const source = new RealPerplMarketDataSource("https://local.invalid/api", "ws://local", 1_000, async () => response, () => socket, () => clock, () => 0.5);
+    await source.getMarkets(); const pending = source.connect(["1", "20"]); socket.open(); await pending; acknowledge(source);
+    source.ingest({ mt: 9, sid: 3000, sn: 1, d: { "1": { at, orl: 629513, mrk: 629934, bid: 629888, ask: 629889 } } });
+    clock += 60_000;
+    expect(source.getMarketState("1")).toMatchObject({ marketId: "1", timestamp: now });
+    expect(() => source.getMarketState("20")).toThrow(/incomplete/);
+  });
+
+  it("clears market-state readiness across disconnect and reconnect", async () => {
+    vi.useFakeTimers();
+    try {
+      const sockets: Socket[] = []; const source = new RealPerplMarketDataSource("https://local.invalid/api", "ws://local", 1_000, async () => response, () => { const socket = new Socket(); sockets.push(socket); return socket; }, () => now, () => 0.5);
+      await source.getMarkets(); const pending = source.connect(["1"]); sockets[0]!.open(); await pending;
+      source.ingest({ mt: 6, sn: 1, subs: subscriptions.slice(0, 4) });
+      source.ingest({ mt: 9, sid: 3000, sn: 2, d: { "1": { at, orl: 629513, mrk: 629934, bid: 629888, ask: 629889 } } });
+      expect(source.getMarketState("1").marketId).toBe("1");
+
+      sockets[0]!.listeners.get("close")?.({});
+      expect(() => source.getMarketState("1")).toThrow(/disconnected/);
+      await vi.advanceTimersByTimeAsync(1_000); sockets[1]!.open();
+      expect(() => source.getMarketState("1")).toThrow(/subscription.*incomplete/);
+      source.ingest({ mt: 6, sn: 1, subs: subscriptions.slice(0, 4) });
+      expect(() => source.getMarketState("1")).toThrow(/market state is incomplete/);
+      source.ingest({ mt: 9, sid: 3000, sn: 3, d: { "1": { at, orl: 629513, mrk: 629934, bid: 629888, ask: 629889 } } });
+      expect(source.getMarketState("1").sequence).toBe(3n);
+      await source.disconnect();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("continues to fail closed when an order book timestamp becomes stale", async () => {
+    let clock = now; const socket = new Socket();
+    const source = new RealPerplMarketDataSource("https://local.invalid/api", "ws://local", 1_000, async () => response, () => socket, () => clock, () => 0.5);
+    await source.getMarkets(); const pending = source.connect(["1"]); socket.open(); await pending;
+    source.ingest({ mt: 6, sn: 1, subs: subscriptions.slice(0, 4) });
+    source.ingest({ mt: 15, sid: 1000001, sn: 1, at, bid: [{ p: 1000, s: 1, o: 1 }], ask: [{ p: 1010, s: 1, o: 1 }] });
+    clock += 1_001;
+    expect(() => source.getOrderBook("1")).toThrow(/order book is stale/);
+  });
+
   it("applies atomic snapshots and accepts forward sequence gaps while rejecting non-increasing updates", async () => {
     const { source } = await connected(); acknowledge(source);
     source.ingest({ mt: 15, sid: 1000001, sn: 10, at, bid: [{ p: 1000, s: 100, o: 1 }, { p: 990, s: 50, o: 1 }], ask: [{ p: 1010, s: 200, o: 2 }] });

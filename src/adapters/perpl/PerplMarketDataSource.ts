@@ -247,7 +247,12 @@ export class RealPerplMarketDataSource implements PerplMarketDataSource {
     if (!this.connected) throw new ExchangeAdapterError("Perpl market data is disconnected"); const reason = this.invalid.get(marketId); if (reason) throw new ExchangeAdapterError(`Perpl market data invalid: ${reason}`);
     if (!value) throw new ExchangeAdapterError(`Perpl ${label} is incomplete`); if (this.now() - value.timestamp > this.staleAfterMs) throw new ExchangeAdapterError(`Perpl ${label} is stale`); return value;
   }
-  getMarketState(id: string): PerplMarketState { return this.requireFresh(id, this.states.get(id), "market state"); }
+  getMarketState(id: string): PerplMarketState {
+    if (!this.connected) throw new ExchangeAdapterError("Perpl market data is disconnected");
+    if (!this.acknowledged.has(`market-state@${CHAIN_ID}`)) throw new ExchangeAdapterError("Perpl market state subscription is incomplete");
+    const reason = this.invalid.get(id); if (reason) throw new ExchangeAdapterError(`Perpl market data invalid: ${reason}`);
+    const state = this.states.get(id); if (!state) throw new ExchangeAdapterError("Perpl market state is incomplete"); return state;
+  }
   getOrderBook(id: string): PerplOrderBook { return this.requireFresh(id, this.books.get(id), "order book"); }
   getFunding(id: string): PerplFunding { return this.requireFresh(id, this.funding.get(id), "funding"); }
   getRecentTrades(id: string, after?: { timestamp: number; ids: ReadonlySet<string> }): PerplTrade[] {
