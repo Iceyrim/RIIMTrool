@@ -4,7 +4,7 @@ accountRisk:
 markets:
   - symbol: BTCUSD
     exchange: perpl
-    exchangeSymbol: BTC-PERP
+    exchangeSymbol: BTC
     enabled: true
     orderSize: { min: 0.00155, max: 0.00232 }
     spreadBps: { normal: 5, min: 4, max: 7.5 }
@@ -15,7 +15,7 @@ markets:
     riskLimits: { maxLongPosition: 0.005, maxShortPosition: 0.005, maxOrderSize: 0.0025, maxOrderNotionalUsd: 160, maxOpenOrders: 12 }
   - symbol: ETHUSD
     exchange: perpl
-    exchangeSymbol: ETH-PERP
+    exchangeSymbol: ETH
     enabled: true
     orderSize: { min: 0.045, max: 0.068 }
     spreadBps: { normal: 5, min: 4, max: 7.5 }

@@ -2,13 +2,21 @@ export interface PerplMarketRaw {
   id?: string | number;
   market_id?: string | number;
   symbol?: string;
+  name?: string;
   ticker?: string;
   price_decimals?: number;
   size_decimals?: number;
   minimum_posting_size?: string | number;
   min_posting_size?: string | number;
+  min_posting_amount?: string | number;
   status?: string;
   is_open?: boolean;
+  config?: {
+    price_decimals?: number;
+    size_decimals?: number;
+    min_posting_amount?: string | number;
+    is_open?: boolean;
+  };
 }
 
 export interface PerplContextRaw {

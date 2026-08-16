@@ -2,8 +2,8 @@ import { ExchangeAdapterError } from "../AdapterError.js";
 import { finiteNumber, scaledToNumber, timestampMs } from "./mappers.js";
 import type { PerplCandleRaw, PerplChannel, PerplContextRaw, PerplMarketRaw, PerplWireMessage } from "./types.js";
 
-export const PERPL_REST_BASE_URL = "https://api.perpl.xyz";
-export const PERPL_MARKET_DATA_WS_URL = "wss://api.perpl.xyz/ws/v1/market-data";
+export const PERPL_REST_BASE_URL = "https://app.perpl.xyz/api";
+export const PERPL_MARKET_DATA_WS_URL = "wss://app.perpl.xyz/ws/v1/market-data";
 const CHANNELS: readonly PerplChannel[] = ["market-state", "order-book", "trades", "funding"];
 
 export interface PerplMarket {
@@ -25,7 +25,7 @@ export interface PerplMarketDataSource {
   getOrderBook(marketId: string): PerplOrderBook;
   getRecentTrades(marketId: string, after?: { timestamp: number; ids: ReadonlySet<string> }): PerplTrade[];
   getFunding(marketId: string): PerplFunding;
-  getCandles(marketId: string, params: { interval: string; fromMs?: number; toMs?: number }): Promise<PerplCandle[]>;
+  getCandles(marketId: string, params: { interval: string; fromMs: number; toMs: number }): Promise<PerplCandle[]>;
 }
 
 interface SocketLike {
@@ -51,16 +51,16 @@ function marketIdOf(raw: PerplMarketRaw): string {
   return String(id);
 }
 function mapMarket(raw: PerplMarketRaw): PerplMarket {
-  const symbol = raw.symbol ?? raw.ticker;
+  const symbol = [raw.symbol, raw.name].find((value) => typeof value === "string" && value.trim().length > 0)?.trim();
   if (!symbol) throw new ExchangeAdapterError("Perpl context omitted market symbol");
-  const priceDecimals = finiteNumber(raw.price_decimals, "price_decimals");
-  const sizeDecimals = finiteNumber(raw.size_decimals, "size_decimals");
-  const minimumRaw = raw.minimum_posting_size ?? raw.min_posting_size;
+  const priceDecimals = finiteNumber(raw.config?.price_decimals ?? raw.price_decimals, "price_decimals");
+  const sizeDecimals = finiteNumber(raw.config?.size_decimals ?? raw.size_decimals, "size_decimals");
+  const minimumRaw = raw.config?.min_posting_amount ?? raw.min_posting_amount ?? raw.minimum_posting_size ?? raw.min_posting_size;
   if (minimumRaw === undefined) throw new ExchangeAdapterError("Perpl context omitted minimum posting size");
   const minimumPostingSize = typeof minimumRaw === "string" && /^\d+$/.test(minimumRaw)
     ? scaledToNumber(minimumRaw, sizeDecimals, "minimum posting size") : finiteNumber(minimumRaw, "minimum posting size");
-  const open = raw.is_open ?? (raw.status === "open" || raw.status === "OPEN" || raw.status === "active");
-  if (!(minimumPostingSize > 0)) throw new ExchangeAdapterError("Perpl minimum posting size must be positive");
+  const open = raw.config?.is_open ?? raw.is_open ?? (raw.status === "open" || raw.status === "OPEN" || raw.status === "active");
+  if (minimumPostingSize < 0) throw new ExchangeAdapterError("Perpl minimum posting size must be non-negative");
   return { marketId: marketIdOf(raw), symbol, priceDecimals, sizeDecimals, minimumPostingSize, open };
 }
 
@@ -91,7 +91,7 @@ export class RealPerplMarketDataSource implements PerplMarketDataSource {
   ) {}
 
   private async json(path: string, query?: Record<string, string | number | undefined>): Promise<unknown> {
-    const url = new URL(path, this.restBaseUrl);
+    const url = new URL(`${this.restBaseUrl.replace(/\/$/, "")}/${path.replace(/^\//, "")}`);
     for (const [key, value] of Object.entries(query ?? {})) if (value !== undefined) url.searchParams.set(key, String(value));
     let response: Response;
     try { response = await this.fetchImpl(url, { method: "GET", credentials: "omit", redirect: "error" }); }
@@ -101,7 +101,7 @@ export class RealPerplMarketDataSource implements PerplMarketDataSource {
   }
 
   async getMarkets(): Promise<PerplMarket[]> {
-    const raw = await this.json("/v1/pub/context") as PerplContextRaw;
+    const raw = await this.json("v1/pub/context") as PerplContextRaw;
     const nested = raw.data;
     const list = raw.markets ?? (Array.isArray(nested) ? nested : nested?.markets);
     if (!Array.isArray(list) || list.length === 0) throw new ExchangeAdapterError("Perpl context contains no markets");
@@ -194,9 +194,9 @@ export class RealPerplMarketDataSource implements PerplMarketDataSource {
   getFunding(id: string): PerplFunding { return this.requireFresh(id, this.funding.get(id), "funding"); }
   getRecentTrades(id: string, after?: { timestamp: number; ids: ReadonlySet<string> }): PerplTrade[] { const all = this.trades.get(id); const latest = all?.at(-1); this.requireFresh(id, latest, "trades"); return (all ?? []).filter((t) => !after || t.timestamp > after.timestamp || (t.timestamp === after.timestamp && !after.ids.has(t.id))); }
 
-  async getCandles(marketId: string, params: { interval: string; fromMs?: number; toMs?: number }): Promise<PerplCandle[]> {
+  async getCandles(marketId: string, params: { interval: string; fromMs: number; toMs: number }): Promise<PerplCandle[]> {
     if (!this.markets.has(marketId)) throw new ExchangeAdapterError("Perpl candle market was not discovered");
-    const raw = await this.json("/v1/pub/candles", { market_id: marketId, interval: params.interval, from: params.fromMs, to: params.toMs });
+    const raw = await this.json(`v1/market-data/${marketId}/candles/${params.interval}/${params.fromMs}-${params.toMs}`);
     const list = Array.isArray(raw) ? raw : (record(raw, "candles").data ?? record(raw, "candles").candles);
     if (!Array.isArray(list)) throw new ExchangeAdapterError("Perpl candles are malformed");
     return (list as PerplCandleRaw[]).map((c) => ({ timestamp: timestampMs(c.timestamp ?? c.time), open: finiteNumber(c.open, "candle open"), high: finiteNumber(c.high, "candle high"), low: finiteNumber(c.low, "candle low"), close: finiteNumber(c.close, "candle close"), volume: finiteNumber(c.volume, "candle volume") }));
