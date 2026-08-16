@@ -49,4 +49,13 @@ describe("dashboard sidecar deployment", () => {
     expect(unit).not.toContain("ReadWritePaths=");
     expect(unit).not.toMatch(/run-(?:live|paper)|tailscale|0\.0\.0\.0/i);
   });
+
+  it("documents read-only ownership for installed artifacts and writable snapshot ownership", () => {
+    const guide = readFileSync(join(root, "docs/dashboard-sidecar-systemd.md"), "utf8");
+    expect(guide).toContain("install -d -o root -g riim-dashboard -m 0750 /opt/riim-dashboard");
+    expect(guide).toContain("install -o root -g riim-dashboard -m 0750 run-dashboard-sidecar.js /opt/riim-dashboard/run-dashboard-sidecar.js");
+    expect(guide).toContain("install -o root -g riim-dashboard -m 0640 dashboard.html /opt/riim-dashboard/dashboard.html");
+    expect(guide).toContain("install -d -o riim-dashboard -g riim-dashboard -m 2770 /var/lib/riim-dashboard/state/dashboard/snapshots");
+    expect(guide).toContain("with no write access");
+  });
 });

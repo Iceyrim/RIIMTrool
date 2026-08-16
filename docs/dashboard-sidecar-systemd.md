@@ -12,14 +12,18 @@ file appears. Install those two generated files under `/opt/riim-dashboard` and 
 Provision ownership before starting anything:
 
 ```sh
-install -d -o riim-dashboard -g riim-dashboard -m 2750 /opt/riim-dashboard
+install -d -o root -g riim-dashboard -m 0750 /opt/riim-dashboard
+install -o root -g riim-dashboard -m 0750 run-dashboard-sidecar.js /opt/riim-dashboard/run-dashboard-sidecar.js
+install -o root -g riim-dashboard -m 0640 dashboard.html /opt/riim-dashboard/dashboard.html
 install -d -o riim-dashboard -g riim-dashboard -m 2770 /var/lib/riim-dashboard
 install -d -o riim-dashboard -g riim-dashboard -m 2770 /var/lib/riim-dashboard/state
 install -d -o riim-dashboard -g riim-dashboard -m 2770 /var/lib/riim-dashboard/state/dashboard
 install -d -o riim-dashboard -g riim-dashboard -m 2770 /var/lib/riim-dashboard/state/dashboard/snapshots
 ```
 
-Every writable directory is setgid, so new directories and snapshot files inherit the
+The installed sidecar directory and artifacts are owned by `root:riim-dashboard`. Their modes give
+the service user only the read and execute access it needs, with no write access. Every writable
+state directory is owned by `riim-dashboard:riim-dashboard` and setgid, so new directories and snapshot files inherit the
 `riim-dashboard` group. The publisher forces snapshot mode `0640`; the unit also applies
 `UMask=0027`. `/opt/riim-dashboard` must contain only the two allowlisted artifact files.
 
