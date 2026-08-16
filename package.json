@@ -17,6 +17,7 @@
     "format": "prettier --write ."
   },
   "dependencies": {
+    "@noble/ed25519": "^2.3.0",
     "@n1xyz/nord-ts": "^0.7.4",
     "@solana/web3.js": "^1.98.4",
     "js-yaml": "^4.1.0",
