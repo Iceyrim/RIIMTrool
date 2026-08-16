@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import * as ed25519 from "@noble/ed25519";
-import type { PerplAuthHeaders, PerplSignedWsFrame } from "./authTypes.js";
+import type { PerplApiKeySignIn, PerplAuthHeaders } from "./authTypes.js";
 
 const encoder = new TextEncoder();
 ed25519.etc.sha512Sync = (...messages) => {
@@ -9,58 +9,74 @@ ed25519.etc.sha512Sync = (...messages) => {
   return hash.digest();
 };
 
-function hex(bytes: Uint8Array): string { return Buffer.from(bytes).toString("hex"); }
-
-export function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === "boolean" || typeof value === "string") return JSON.stringify(value);
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new TypeError("Canonical JSON cannot encode a non-finite number");
-    return JSON.stringify(value);
-  }
-  if (typeof value === "bigint") return JSON.stringify(value.toString());
-  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
-  if (value && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .filter(([, item]) => item !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right));
-    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
-  }
-  throw new TypeError(`Canonical JSON cannot encode ${typeof value}`);
+function uint(value: number, field: string): string {
+  if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`${field} must be a safe unsigned integer`);
+  return String(value);
 }
 
-export function canonicalRestPayload(method: string, path: string, timestamp: string | number | bigint, body?: unknown): string {
-  const normalizedMethod = method.trim().toUpperCase();
-  if (!/^[A-Z]+$/.test(normalizedMethod) || !path.startsWith("/") || path.includes("#")) throw new TypeError("Invalid REST signing input");
-  return [normalizedMethod, path, String(timestamp), body === undefined ? "" : canonicalJson(body)].join("\n");
+function required(value: string, field: string): string {
+  if (!value) throw new TypeError(`${field} is required`);
+  return value;
 }
 
-export function canonicalWsPayload<T extends Record<string, unknown>>(rq: string, timestamp: string | number | bigint, data: T): string {
-  if (!rq) throw new TypeError("rq is required");
-  return canonicalJson({ d: data, rq, ts: String(timestamp) });
+function base64url(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString("base64url");
+}
+
+export function canonicalRestPayload(
+  chainId: number,
+  method: string,
+  requestTarget: string,
+  timestamp: string,
+  nonce: string,
+  rawBody = "",
+): string {
+  const normalizedMethod = method.toUpperCase();
+  if (!/^[A-Z]+$/.test(normalizedMethod)) throw new TypeError("HTTP method is malformed");
+  if (!requestTarget.startsWith("/") || requestTarget.includes("#")) throw new TypeError("request-target is malformed");
+  if (!/^\d+$/.test(timestamp)) throw new TypeError("timestamp is malformed");
+  const bodyHash = createHash("sha256").update(rawBody).digest("hex");
+  return [uint(chainId, "chain_id"), normalizedMethod, requestTarget, timestamp, required(nonce, "nonce"), bodyHash].join("\n");
+}
+
+export function canonicalWsPayload(chainId: number, timestamp: string, nonce: string): string {
+  if (!/^\d+$/.test(timestamp)) throw new TypeError("timestamp is malformed");
+  return [uint(chainId, "chain_id"), "trading-ws-signin", timestamp, required(nonce, "nonce")].join("\n");
 }
 
 export class PerplSigner {
-  readonly publicKey: string;
-  private readonly privateKey: Uint8Array;
-
-  constructor(privateKey: Uint8Array, publicKey?: Uint8Array) {
+  constructor(
+    private readonly privateKey: Uint8Array,
+    private readonly apiKey: string,
+    private readonly chainId: number,
+  ) {
     if (privateKey.length !== 32) throw new TypeError("Perpl Ed25519 private key must contain 32 bytes");
     this.privateKey = Uint8Array.from(privateKey);
-    const derived = publicKey ?? ed25519.getPublicKey(this.privateKey);
-    if (derived.length !== 32) throw new TypeError("Perpl Ed25519 public key must contain 32 bytes");
-    this.publicKey = hex(derived);
+    required(apiKey, "api_key");
+    uint(chainId, "chain_id");
   }
 
   private sign(payload: string): string {
-    return hex(ed25519.sign(encoder.encode(payload), this.privateKey));
+    return base64url(ed25519.sign(encoder.encode(payload), this.privateKey));
   }
 
-  signRest(method: string, path: string, timestamp: string | number | bigint, body?: unknown): PerplAuthHeaders {
-    return { "x-perpl-public-key": this.publicKey, "x-perpl-timestamp": String(timestamp), "x-perpl-signature": this.sign(canonicalRestPayload(method, path, timestamp, body)) };
+  signRest(method: string, requestTarget: string, timestamp: string, nonce: string, rawBody = ""): PerplAuthHeaders {
+    return {
+      "X-API-Key": this.apiKey,
+      "X-API-Timestamp": timestamp,
+      "X-API-Nonce": nonce,
+      "X-API-Signature": this.sign(canonicalRestPayload(this.chainId, method, requestTarget, timestamp, nonce, rawBody)),
+    };
   }
 
-  signWs<T extends Record<string, unknown>>(rq: string, timestamp: string | number | bigint, data: T): PerplSignedWsFrame<T> {
-    const ts = String(timestamp);
-    return { rq, ts, pk: this.publicKey, d: data, sig: this.sign(canonicalWsPayload(rq, ts, data)) };
+  signWs(timestamp: string, nonce: string): PerplApiKeySignIn {
+    return {
+      mt: 29,
+      chain_id: this.chainId,
+      api_key: this.apiKey,
+      timestamp,
+      nonce,
+      signature: this.sign(canonicalWsPayload(this.chainId, timestamp, nonce)),
+    };
   }
 }

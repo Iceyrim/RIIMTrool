@@ -1,54 +1,69 @@
 import { ExchangeAdapterError } from "../AdapterError.js";
 
-export type PerplRequestKind = "place" | "cancel";
-export type PerplRequestResolution<T = unknown> = { state: "confirmed"; value: T } | { state: "rejected"; error: string } | { state: "ambiguous"; reason: string };
-export interface PerplOutcome<T = unknown> { rq: string; ok: boolean; result?: T; error?: string; order_id?: string; client_order_id?: string }
-export interface PerplCursor { timestamp: number; ids: ReadonlySet<string> }
+export type PerplRequestKind = "place" | "cancel" | "modify";
+export type PerplResolution = { state: "confirmed"; status: number; reason: number } | { state: "rejected"; source: "gateway" | "order"; error: string; reason?: number } | { state: "ambiguous"; reason: string };
+export interface PerplRequestIdentity { accountId: number; rq: number; sn: number }
+export interface PerplGatewayStatus { cid?: number; status: { code: number; error: string } }
+export interface PerplOrderOutcome { acc: number; rq: number; oid: number; st: number; sr: number }
+export type PerplRetry = { action: "same-rq"; rq: number } | { action: "new-rq"; rq: number } | { action: "wait" } | { action: "none"; reason: string };
 
-interface Pending { kind: PerplRequestKind; clientOrderId?: string; orderId?: string; sent: boolean; resolution?: PerplRequestResolution }
+interface Pending extends PerplRequestIdentity { kind: PerplRequestKind; orderId?: number; lb: number; sent: boolean; gatewayAccepted?: boolean; reconnected: boolean; retriedForSr32: boolean; resolution?: PerplResolution; firstFailure?: PerplOrderOutcome }
+interface AccountCounter { lfr: number; local: number }
+
+const definitiveStatuses = new Set([2,3,4,5,8,9,10]);
+function uint(value:number,field:string):number{if(!Number.isSafeInteger(value)||value<0)throw new ExchangeAdapterError(`Perpl ${field} is not a safe unsigned integer`);return value;}
 
 export class PerplTradingProtocol {
-  private nextRq = 1n;
-  private lastFinalizedRq = 0n;
-  private sequence?: bigint;
-  private connected = false;
-  private snapshotReady = false;
-  private pending = new Map<string, Pending>();
-  private clientOrderRq = new Map<string, string>();
-  private pnlCursor?: PerplCursor;
-  private fundingCursor?: PerplCursor;
+  private nextSn=1;
+  private lastHeartbeatSn?:number;
+  private connected=false;
+  private accounts=new Map<number,AccountCounter>();
+  private pendingBySn=new Map<number,Pending>();
+  private pendingByRequest=new Map<string,Pending>();
 
-  connect(): void { this.connected=true; this.snapshotReady=false; this.sequence=undefined; }
-  acceptSnapshot(sn: string|number|bigint): void { if(!this.connected) throw new ExchangeAdapterError("Perpl authenticated stream is disconnected"); this.sequence=this.parseSn(sn); this.snapshotReady=true; }
-  acceptUpdate(sn: string|number|bigint): void { if(!this.connected||!this.snapshotReady||this.sequence===undefined) throw new ExchangeAdapterError("Perpl authenticated update arrived before snapshot"); const next=this.parseSn(sn); if(next!==this.sequence+1n){this.snapshotReady=false;throw new ExchangeAdapterError("Perpl authenticated sequence gap is ambiguous");} this.sequence=next; }
-  disconnect(): void { this.connected=false; this.snapshotReady=false; this.sequence=undefined; for(const item of this.pending.values()) if(item.sent&&!item.resolution)item.resolution={state:"ambiguous",reason:"disconnected before correlated outcome"}; }
+  connect():void{this.connected=true;this.lastHeartbeatSn=undefined;for(const pending of this.pendingBySn.values())if(pending.sent&&!pending.resolution)pending.reconnected=true;}
+  acceptWalletSnapshot(sn:number,accounts:readonly {id:number;lfr:number}[]):void{if(!this.connected)throw new ExchangeAdapterError("Perpl authenticated stream is disconnected");this.lastHeartbeatSn=uint(sn,"wallet sequence");for(const account of accounts)this.updateAccount(account.id,account.lfr);}
+  acceptAccountUpdate(accountId:number,lfr:number):void{this.updateAccount(accountId,lfr);}
+  acceptHeartbeat(sn:number):void{if(!this.connected||this.lastHeartbeatSn===undefined)throw new ExchangeAdapterError("Perpl heartbeat arrived before wallet snapshot");const next=uint(sn,"heartbeat sequence");if(next!==this.lastHeartbeatSn+1){this.lastHeartbeatSn=undefined;throw new ExchangeAdapterError("Perpl heartbeat sequence gap requires reconnect");}this.lastHeartbeatSn=next;}
+  disconnect():void{this.connected=false;this.lastHeartbeatSn=undefined;for(const pending of this.pendingBySn.values())if(pending.sent&&!pending.resolution){pending.reconnected=true;pending.resolution={state:"ambiguous",reason:"disconnected before definitive order outcome"};}}
 
-  begin(kind: PerplRequestKind, params: { clientOrderId?: string; orderId?: string }={}): string {
-    if(kind==="place"&&!params.clientOrderId) throw new ExchangeAdapterError("Perpl place requires client order id");
-    if(params.clientOrderId){const existing=this.clientOrderRq.get(params.clientOrderId);if(existing)return existing;}
-    const rq=String(this.nextRq++); this.pending.set(rq,{kind,...params,sent:false}); if(params.clientOrderId)this.clientOrderRq.set(params.clientOrderId,rq); return rq;
+  begin(accountId:number,kind:PerplRequestKind,params:{orderId?:number;lb?:number}={}):PerplRequestIdentity{
+    const account=this.accounts.get(uint(accountId,"account id"));if(!account)throw new ExchangeAdapterError("Perpl account lfr is not initialized");
+    const rq=Math.max(account.local,account.lfr)+1;uint(rq,"rq");account.local=rq;
+    const sn=this.nextSn++;uint(sn,"outbound sn");const pending:Pending={accountId,rq,sn,kind,orderId:params.orderId,lb:uint(params.lb??0,"lb"),sent:false,reconnected:false,retriedForSr32:false};
+    this.pendingBySn.set(sn,pending);this.pendingByRequest.set(this.key(accountId,rq),pending);return{accountId,rq,sn};
   }
-  markSent(rq:string):void{const item=this.require(rq);item.sent=true;}
-  correlate<T>(outcome:PerplOutcome<T>):PerplRequestResolution<T>{
-    const item=this.require(outcome.rq); if(item.resolution)return item.resolution as PerplRequestResolution<T>;
-    if(!item.sent)throw new ExchangeAdapterError("Perpl outcome preceded request send");
-    if(item.clientOrderId&&outcome.client_order_id&&item.clientOrderId!==outcome.client_order_id)throw new ExchangeAdapterError("Perpl outcome client order correlation mismatch");
-    if(item.kind==="cancel"&&item.orderId&&outcome.order_id&&item.orderId!==outcome.order_id)throw new ExchangeAdapterError("Perpl cancel outcome order correlation mismatch");
-    item.resolution=outcome.ok?{state:"confirmed",value:outcome.result as T}:{state:"rejected",error:outcome.error??"rejected"}; return item.resolution as PerplRequestResolution<T>;
+  markSent(sn:number):void{this.bySn(sn).sent=true;}
+  correlateGateway(status:PerplGatewayStatus):PerplResolution|undefined{
+    if(status.cid===undefined)throw new ExchangeAdapterError("Perpl gateway status omitted cid");const pending=this.bySn(status.cid);if(!pending.sent)throw new ExchangeAdapterError("Perpl gateway status preceded request send");
+    if(status.status.code===0){pending.gatewayAccepted=true;return undefined;}
+    return pending.resolution={state:"rejected",source:"gateway",error:status.status.error||`status ${status.status.code}`};
   }
-  resolveCancelRace(rq:string, order:{open:boolean;filled:boolean}):PerplRequestResolution {
-    const item=this.require(rq); if(item.kind!=="cancel")throw new ExchangeAdapterError("Perpl request is not a cancellation");
-    if(order.filled)return item.resolution={state:"confirmed",value:{cancelled:false,filled:true}};
-    if(!order.open)return item.resolution={state:"confirmed",value:{cancelled:true,filled:false}};
-    return item.resolution={state:"ambiguous",reason:"order remains open after cancellation outcome"};
+  correlateOrder(order:PerplOrderOutcome):PerplResolution|undefined{
+    const pending=this.pendingByRequest.get(this.key(uint(order.acc,"order account"),uint(order.rq,"order rq")));if(!pending)return undefined;
+    if(pending.resolution?.state==="confirmed")return pending.resolution;
+    if(definitiveStatuses.has(order.st))return pending.resolution={state:"confirmed",status:order.st,reason:order.sr};
+    if(order.st===7){if(!pending.firstFailure)pending.firstFailure=order;if(!pending.resolution)return pending.resolution={state:"rejected",source:"order",error:"order failed",reason:order.sr};}
+    return pending.resolution;
   }
-  finalize(rq:string):PerplRequestResolution|undefined{const numeric=this.parseSn(rq);if(numeric<=this.lastFinalizedRq)return this.pending.get(rq)?.resolution;const item=this.require(rq);if(!item.resolution)return undefined;this.lastFinalizedRq=numeric;return item.resolution;}
-  setPnlCursor(entries:readonly {id:string;timestamp:number}[]):void{this.pnlCursor=this.advance(this.pnlCursor,entries);}
-  setFundingCursor(entries:readonly {id:string;timestamp:number}[]):void{this.fundingCursor=this.advance(this.fundingCursor,entries);}
-  unseenPnl<T extends {id:string;timestamp:number}>(entries:readonly T[]):T[]{return this.unseen(this.pnlCursor,entries);}
-  unseenFunding<T extends {id:string;timestamp:number}>(entries:readonly T[]):T[]{return this.unseen(this.fundingCursor,entries);}
-  private advance(cursor:PerplCursor|undefined,entries:readonly {id:string;timestamp:number}[]):PerplCursor|undefined{if(!entries.length)return cursor;const timestamp=Math.max(...entries.map((entry)=>entry.timestamp));return{timestamp,ids:new Set(entries.filter((entry)=>entry.timestamp===timestamp).map((entry)=>entry.id))};}
-  private unseen<T extends {id:string;timestamp:number}>(cursor:PerplCursor|undefined,entries:readonly T[]):T[]{return entries.filter((entry)=>!cursor||entry.timestamp>cursor.timestamp||(entry.timestamp===cursor.timestamp&&!cursor.ids.has(entry.id)));}
-  private require(rq:string):Pending{const item=this.pending.get(rq);if(!item)throw new ExchangeAdapterError(`Perpl outcome has unknown rq ${rq}`);return item;}
-  private parseSn(value:string|number|bigint):bigint{if(!/^\d+$/.test(String(value)))throw new ExchangeAdapterError("Perpl sequence is malformed");return BigInt(String(value));}
+  retry(sn:number,head:number):PerplRetry{
+    const pending=this.bySn(sn);uint(head,"head");
+    if(pending.resolution?.state==="confirmed"||pending.resolution?.state==="rejected"&&pending.resolution.source==="gateway")return{action:"none",reason:"request already has a definitive outcome"};
+    if(pending.firstFailure?.sr===32&&!pending.retriedForSr32){pending.retriedForSr32=true;return{action:"new-rq",rq:this.allocateRq(pending.accountId)};}
+    if(!pending.firstFailure&&(pending.lb===0||head<pending.lb))return{action:"same-rq",rq:pending.rq};
+    if(!pending.firstFailure&&pending.lb>0&&head>=pending.lb&&!pending.reconnected)return{action:"new-rq",rq:this.allocateRq(pending.accountId)};
+    if(pending.reconnected)return{action:"none",reason:"disconnect made expiry observation ambiguous"};
+    return{action:"wait"};
+  }
+  resolveCancellation(sn:number,order:{status:"open"|"filled"|"cancelled"|"absent"}):PerplResolution{
+    const pending=this.bySn(sn);if(pending.kind!=="cancel")throw new ExchangeAdapterError("Perpl request is not a cancellation");
+    if(order.status==="filled")return pending.resolution={state:"confirmed",status:4,reason:0};
+    if(order.status==="cancelled")return pending.resolution={state:"confirmed",status:5,reason:28};
+    return pending.resolution={state:"ambiguous",reason:order.status==="open"?"order remains open after cancellation":"absence alone does not prove cancellation"};
+  }
+  resolution(sn:number):PerplResolution|undefined{return this.bySn(sn).resolution;}
+  private updateAccount(accountId:number,lfr:number):void{accountId=uint(accountId,"account id");lfr=uint(lfr,"account lfr");const current=this.accounts.get(accountId);this.accounts.set(accountId,{lfr,local:Math.max(current?.local??0,lfr)});}
+  private allocateRq(accountId:number):number{const account=this.accounts.get(accountId);if(!account)throw new ExchangeAdapterError("Perpl account lfr is not initialized");const rq=Math.max(account.local,account.lfr)+1;uint(rq,"rq");account.local=rq;return rq;}
+  private bySn(sn:number):Pending{const pending=this.pendingBySn.get(uint(sn,"cid"));if(!pending)throw new ExchangeAdapterError(`Perpl gateway status has unknown cid ${sn}`);return pending;}
+  private key(accountId:number,rq:number):string{return`${accountId}:${rq}`;}
 }
