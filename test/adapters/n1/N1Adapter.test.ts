@@ -627,12 +627,12 @@ describe("N1Adapter", () => {
     it("paginates maker and taker streams, deduplicates tradeIds, filters [since, until), and preserves unknown markets", async () => {
       fakeNord.getTrades.mockImplementation(async ({ makerId, startInclusive }) => {
         if (makerId !== undefined && startInclusive === undefined) {
-          return { items: [trade(), trade({ tradeId: 2, time: "2026-01-01T00:00:00.000Z", price: 50, baseSize: 1 })], nextStartInclusive: 3 };
+          return { items: [trade({ tradeId: 3, marketId: 404, price: 25, baseSize: 4 }), trade({ tradeId: 2, time: "2026-01-01T00:00:00.000Z", price: 50, baseSize: 1 })], nextStartInclusive: 2 };
         }
         if (makerId !== undefined) {
-          return { items: [trade({ tradeId: 3, marketId: 404, price: 25, baseSize: 4 })] };
+          return { items: [trade({ tradeId: 2, time: "2026-01-01T00:00:00.000Z", price: 50, baseSize: 1 }), trade()] };
         }
-        return { items: [trade(), trade({ tradeId: 4, takerId: ACCOUNT_ID, makerId: 88, time: "2026-01-02T00:00:00.000Z" })] };
+        return { items: [trade({ tradeId: 4, takerId: ACCOUNT_ID, makerId: 88, time: "2026-01-02T00:00:00.000Z" }), trade()] };
       });
       const adapter = new N1Adapter(baseConfig());
       await adapter.connect();
@@ -664,7 +664,9 @@ describe("N1Adapter", () => {
     it.each([
       ["malformed row", { items: [trade({ price: Number.NaN })] }, /Malformed N1/],
       ["empty continuation page", { items: [], nextStartInclusive: 2 }, /empty page/],
-      ["repeated cursor", { items: [trade()], nextStartInclusive: 1 }, /repeated/],
+      ["malformed cursor", { items: [trade()], nextStartInclusive: 1.5 }, /Invalid N1/],
+      ["boundary-mismatched cursor", { items: [trade({ tradeId: 2 })], nextStartInclusive: 1 }, /page boundary/],
+      ["wrong-direction page", { items: [trade(), trade({ tradeId: 2 })] }, /Wrong-direction/],
     ])("rejects a %s without publishing partial totals", async (_label, response, message) => {
       fakeNord.getTrades.mockResolvedValue(response);
       const adapter = new N1Adapter(baseConfig());
@@ -672,10 +674,36 @@ describe("N1Adapter", () => {
       await expect(adapter.getAccountVolume({ since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z" })).rejects.toThrow(message);
     });
 
+    it("rejects a repeated cursor", async () => {
+      fakeNord.getTrades.mockImplementation(async ({ startInclusive }) => ({
+        items: startInclusive === undefined
+          ? [trade({ tradeId: 2 })]
+          : [trade({ tradeId: 2 }), trade()],
+        nextStartInclusive: startInclusive === undefined ? 2 : 1,
+      }));
+      const adapter = new N1Adapter(baseConfig());
+      await adapter.connect();
+      await expect(adapter.getAccountVolume({ since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z" })).rejects.toThrow(/repeated/);
+    });
+
+    it("rejects a duplicate-only continuation page", async () => {
+      fakeNord.getTrades.mockImplementation(async ({ startInclusive }) => ({
+        items: [trade({ tradeId: startInclusive ?? 2 })],
+        ...(startInclusive === undefined ? { nextStartInclusive: 2 } : {}),
+      }));
+      const adapter = new N1Adapter(baseConfig());
+      await adapter.connect();
+      await expect(adapter.getAccountVolume({ since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z" })).rejects.toThrow(/added no new trades/);
+    });
+
     it("rejects safety-cap exhaustion", async () => {
       fakeNord.getTrades.mockImplementation(async ({ startInclusive }) => ({
-        items: [trade({ tradeId: startInclusive ?? 0 })],
-        nextStartInclusive: (startInclusive ?? 0) + 1,
+        items: startInclusive === undefined
+          ? [trade({ tradeId: MAX_ACCOUNT_TRADE_PAGES_PER_STREAM + 1 })]
+          : [trade({ tradeId: startInclusive }), trade({ tradeId: startInclusive - 1 })],
+        nextStartInclusive: startInclusive === undefined
+          ? MAX_ACCOUNT_TRADE_PAGES_PER_STREAM + 1
+          : startInclusive - 1,
       }));
       const adapter = new N1Adapter(baseConfig());
       await adapter.connect();

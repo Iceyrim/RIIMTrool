@@ -411,6 +411,7 @@ export class N1Adapter implements ExchangeAdapter {
     for (const role of ["makerId", "takerId"] as const) {
       let cursor: number | undefined;
       const seenCursors = new Set<number>();
+      const seenTradeIds = new Set<number>();
       let exhausted = false;
       for (let pageNumber = 0; pageNumber < MAX_ACCOUNT_TRADE_PAGES_PER_STREAM; pageNumber++) {
         const response = await this.nord!.getTrades({
@@ -424,19 +425,44 @@ export class N1Adapter implements ExchangeAdapter {
         if (!response || !Array.isArray(response.items)) {
           throw new ExchangeAdapterError(`Malformed N1 ${role} trade page`);
         }
+        let previousTradeId: number | undefined;
+        let newTradeCount = 0;
         for (const trade of response.items) {
           if (!this.isValidAccountTrade(trade)) {
             throw new ExchangeAdapterError(`Malformed N1 ${role} trade row`);
           }
+          if (previousTradeId !== undefined && trade.tradeId > previousTradeId) {
+            throw new ExchangeAdapterError(`Wrong-direction N1 ${role} trade page`);
+          }
+          previousTradeId = trade.tradeId;
+          if (!seenTradeIds.has(trade.tradeId)) {
+            seenTradeIds.add(trade.tradeId);
+            newTradeCount++;
+          }
           byTradeId.set(trade.tradeId, trade);
         }
         const next = response.nextStartInclusive ?? undefined;
-        if (next === undefined) { exhausted = true; break; }
-        if (!Number.isSafeInteger(next) || next < 0 || seenCursors.has(next) || (cursor !== undefined && next <= cursor)) {
-          throw new ExchangeAdapterError(`Invalid or repeated N1 ${role} trade cursor ${String(next)}`);
+        if (next === undefined) {
+          if (pageNumber > 0 && newTradeCount === 0) {
+            throw new ExchangeAdapterError(`Incomplete N1 ${role} trade scan: continuation page added no new trades`);
+          }
+          exhausted = true;
+          break;
         }
         if (response.items.length === 0) {
           throw new ExchangeAdapterError(`Incomplete N1 ${role} trade scan: empty page has a continuation cursor`);
+        }
+        if (!Number.isSafeInteger(next) || next < 0) {
+          throw new ExchangeAdapterError(`Invalid N1 ${role} trade cursor ${String(next)}`);
+        }
+        if (next !== response.items.at(-1)!.tradeId) {
+          throw new ExchangeAdapterError(`N1 ${role} continuation cursor does not match page boundary`);
+        }
+        if (seenCursors.has(next) || (cursor !== undefined && next >= cursor)) {
+          throw new ExchangeAdapterError(`Invalid or repeated N1 ${role} trade cursor ${String(next)}`);
+        }
+        if (pageNumber > 0 && newTradeCount === 0) {
+          throw new ExchangeAdapterError(`Incomplete N1 ${role} trade scan: continuation page added no new trades`);
         }
         seenCursors.add(next);
         cursor = next;
