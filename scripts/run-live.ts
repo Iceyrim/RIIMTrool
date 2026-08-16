@@ -93,8 +93,16 @@ export function createLiveShutdownHandler(options: {
     }
     shutdownPromise = (async () => {
       const result = await options.runner.shutdown();
-      options.publishStopped?.();
-      await options.closeDashboard();
+      try {
+        options.publishStopped?.();
+      } catch (err) {
+        error(`[LIVE] Final dashboard snapshot publication failed: ${String(err)}`);
+      }
+      try {
+        await options.closeDashboard();
+      } catch (err) {
+        error(`[LIVE] Dashboard close failed (cleanup result is unaffected): ${String(err)}`);
+      }
       log("\n=== [LIVE] Session report ===");
       log(JSON.stringify(result, null, 2));
       if (!result.successful) {
@@ -115,7 +123,16 @@ export function createLiveShutdownHandler(options: {
       options.exit(result.successful ? 0 : 1);
     })().catch(async (err: unknown) => {
       error(`\n!!! [LIVE] SHUTDOWN FAILED; CLEANUP MAY BE INCOMPLETE: ${String(err)} !!!`);
-      await options.closeDashboard();
+      try {
+        options.publishStopped?.();
+      } catch (publishErr) {
+        error(`[LIVE] Final dashboard snapshot publication failed: ${String(publishErr)}`);
+      }
+      try {
+        await options.closeDashboard();
+      } catch (closeErr) {
+        error(`[LIVE] Dashboard close failed: ${String(closeErr)}`);
+      }
       options.exit(1);
     });
     return shutdownPromise;
@@ -329,7 +346,11 @@ async function main(): Promise<void> {
     publishStopped: () => snapshotPublisher.stop(),
     closeDashboard: () =>
       new Promise<void>((resolve, reject) =>
-        dashboardServer.close((err) => (err ? reject(err) : resolve())),
+        dashboardServer.close((err) =>
+          err && (err as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING"
+            ? reject(err)
+            : resolve(),
+        ),
       ),
     exit: (code) => process.exit(code),
   });

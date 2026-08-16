@@ -93,4 +93,29 @@ describe("live one-shot shutdown handling", () => {
     expect(exit).toHaveBeenCalledWith(1);
     expect(error.mock.calls.flat().join(" ")).toContain("managed-1");
   });
+
+  it("publishes, reports, and preserves the cleanup exit code when dashboard close fails", async () => {
+    const result = {
+      report: { startedAt: 0, endedAt: 1, cycles: 0, totalQuotesPlaced: 0, totalQuotesAttempted: 0, totalQuotesCancelled: 0, totalAnomalies: 0, finalAccountSessionRealizedPnlUsd: 0 },
+      cleanup: [], successful: true, positionsFlattened: false,
+      positionDisposition: "NOT_FLATTENED_REQUIRES_DIRECT_EXCHANGE_VERIFICATION_AND_MANUAL_CLOSURE",
+    } satisfies PaperRunnerShutdownResult;
+    const publishStopped = vi.fn();
+    const log = vi.fn();
+    const error = vi.fn();
+    const exit = vi.fn();
+    const handler = createLiveShutdownHandler({
+      runner: { shutdown: vi.fn(async () => result) } as unknown as PaperRunner,
+      publishStopped,
+      closeDashboard: vi.fn(async () => { throw Object.assign(new Error("not running"), { code: "ERR_SERVER_NOT_RUNNING" }); }),
+      exit, log, error,
+    });
+
+    await Promise.all([handler("SIGINT"), handler("SIGTERM")]);
+    expect(publishStopped).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls.flat().join(" ")).toContain("Session report");
+    expect(error.mock.calls.flat().join(" ")).toContain("Dashboard close failed");
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(0);
+  });
 });

@@ -1,9 +1,9 @@
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MarketEngine } from "../../src/engine/MarketEngine.js";
-import type { EngineMarketConfig } from "../../src/engine/types.js";
+import type { EngineMarketConfig, LocalOrder } from "../../src/engine/types.js";
 import { FakeExchangeAdapter } from "./fakeAdapter.js";
 
 const MARKET = "BTCUSD";
@@ -41,6 +41,10 @@ function tempPaths(): { stateFilePath: string; tradeLogFilePath: string } {
   };
 }
 
+function persistManagedOrders(stateFilePath: string, orders: LocalOrder[]): void {
+  writeFileSync(stateFilePath, JSON.stringify(orders), "utf-8");
+}
+
 describe("MarketEngine", () => {
   let adapter: FakeExchangeAdapter;
 
@@ -66,7 +70,25 @@ describe("MarketEngine", () => {
       state: "open",
     });
 
-    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+    const paths = tempPaths();
+    const now = Date.now();
+    persistManagedOrders(paths.stateFilePath, [
+      {
+        clientOrderId: "c1",
+        exchangeOrderId: "e1",
+        market: MARKET,
+        side: "buy",
+        type: "limit",
+        price: 59900,
+        size: 0.002,
+        filledSize: 0,
+        isReduceOnly: false,
+        state: "RESTING",
+        placedAt: now,
+        updatedAt: now,
+      },
+    ]);
+    const engine = new MarketEngine(adapter, testConfig(), paths);
     const startResult = await engine.start();
     expect(startResult.healthy).toBe(true);
     expect(engine.registry.list()).toHaveLength(1);
@@ -110,6 +132,8 @@ describe("MarketEngine", () => {
   });
 
   it("starting with 5/12 market orders allows at most 7 successful additions", async () => {
+    const now = Date.now();
+    const managedOrders: LocalOrder[] = [];
     for (let i = 0; i < 5; i++) {
       adapter.openOrders.push({
         exchangeOrderId: `existing-${i}`,
@@ -122,8 +146,24 @@ describe("MarketEngine", () => {
         isReduceOnly: false,
         state: "open",
       });
+      managedOrders.push({
+        clientOrderId: `managed-${i}`,
+        exchangeOrderId: `existing-${i}`,
+        market: MARKET,
+        side: i % 2 === 0 ? "buy" : "sell",
+        type: "limit",
+        price: 50_000 + i,
+        size: 0.001,
+        filledSize: 0,
+        isReduceOnly: false,
+        state: "RESTING",
+        placedAt: now,
+        updatedAt: now,
+      });
     }
-    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+    const paths = tempPaths();
+    persistManagedOrders(paths.stateFilePath, managedOrders);
+    const engine = new MarketEngine(adapter, testConfig(), paths);
     await engine.start();
     const summary = await engine.runCycle();
 

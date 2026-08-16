@@ -15,6 +15,11 @@ function tempTradeLogPath(): string {
   return join(dir, "trades.jsonl");
 }
 
+function tempRegistryPath(): string {
+  const dir = mkdtempSync(join(tmpdir(), "riimtrool-reconciliation-registry-test-"));
+  return join(dir, "orders.json");
+}
+
 function readTradeLog(path: string): TradeLogEntry[] {
   return readFileSync(path, "utf-8")
     .trim()
@@ -48,22 +53,21 @@ describe("Reconciliation.syncFromExchange (startup)", () => {
 
   beforeEach(() => {
     adapter = new FakeExchangeAdapter();
-    registry = new OrderRegistry(MARKET, "/dev/null");
+    registry = new OrderRegistry(MARKET, tempRegistryPath());
     reconciliation = new Reconciliation(adapter, registry, MARKET, new TradeLog("/dev/null"));
   });
 
-  it("discards stale local content that disagrees with exchange truth", async () => {
+  it("records a confirmed absent zero-fill managed order as CANCELLED", async () => {
     // Local file claims an order resting that the exchange has never heard of.
     registry.upsert(localOrder({ clientOrderId: "phantom", exchangeOrderId: "999" }));
 
     const result = await reconciliation.syncFromExchange();
 
     expect(result.healthy).toBe(true);
-    expect(registry.get("phantom")).toBeUndefined();
-    expect(registry.list()).toHaveLength(0);
+    expect(registry.get("phantom")?.state).toBe("CANCELLED");
   });
 
-  it("adopts an order the exchange shows resting even if local had no record of it at all", async () => {
+  it("flags but never adopts an exchange-only unmanaged order", async () => {
     adapter.openOrders.push({
       exchangeOrderId: "e42",
       market: MARKET,
@@ -78,7 +82,11 @@ describe("Reconciliation.syncFromExchange (startup)", () => {
 
     const result = await reconciliation.syncFromExchange();
     expect(result.openOrderCount).toBe(1);
-    expect(registry.findByExchangeOrderId("e42")?.state).toBe("RESTING");
+    expect(result.healthy).toBe(false);
+    expect(result.anomalies).toEqual([
+      expect.objectContaining({ kind: "EXCHANGE_ORDER_NOT_LOCAL", exchangeOrderId: "e42" }),
+    ]);
+    expect(registry.findByExchangeOrderId("e42")).toBeUndefined();
   });
 
   it("resolves a local-only order via fill-replay: a discovered fill becomes FILLED/CANCELLED, not silently kept as RESTING", async () => {
@@ -100,11 +108,20 @@ describe("Reconciliation.syncFromExchange (startup)", () => {
     expect(resolved?.state).toBe("FILLED");
   });
 
-  it("drops a local-only order with no fill history at all — genuinely never happened", async () => {
+  it("preserves an absent zero-fill managed order as CANCELLED after restart", async () => {
     registry.upsert(localOrder({ clientOrderId: "c1", exchangeOrderId: "e1" }));
     // no fills configured for e1
     await reconciliation.syncFromExchange();
-    expect(registry.get("c1")).toBeUndefined();
+    expect(registry.get("c1")?.state).toBe("CANCELLED");
+  });
+
+  it("keeps startup absence ambiguous when fill lookup fails", async () => {
+    registry.upsert(localOrder({ clientOrderId: "c1", exchangeOrderId: "e1" }));
+    adapter.getOrderFillsError = new Error("network blip");
+    const result = await reconciliation.syncFromExchange();
+    expect(result.healthy).toBe(false);
+    expect(result.anomalies[0]?.kind).toBe("LOCAL_ORDER_NOT_ON_EXCHANGE");
+    expect(registry.get("c1")?.state).toBe("RESTING");
   });
 
   it("logs the resolved fill to the trade log (SPEC 7), tagged with source and reduce-only status", async () => {
@@ -198,14 +215,13 @@ describe("Reconciliation.checkAgainstExchange (runtime)", () => {
     expect(registry.findByExchangeOrderId("surprise")).toBeUndefined();
   });
 
-  it("flags a local RESTING order the exchange no longer shows, with no fill evidence at all", async () => {
+  it("resolves a confirmed absent zero-fill managed order as CANCELLED", async () => {
     registry.upsert(localOrder({ clientOrderId: "c1", exchangeOrderId: "gone" }));
     // No fills configured for "gone" — adapter.getOrderFills() returns [] by default.
     const result = await reconciliation.checkAgainstExchange();
-    expect(result.healthy).toBe(false);
-    expect(result.anomalies[0]?.kind).toBe("LOCAL_ORDER_NOT_ON_EXCHANGE");
-    // Genuinely unexplained: the registry entry is left untouched, still RESTING.
-    expect(registry.get("c1")?.state).toBe("RESTING");
+    expect(result.healthy).toBe(true);
+    expect(result.anomalies).toHaveLength(0);
+    expect(registry.get("c1")?.state).toBe("CANCELLED");
   });
 
   it("resolves a local RESTING order into FILLED, not an anomaly, when it fully filled before vanishing", async () => {
@@ -318,10 +334,10 @@ describe("Reconciliation.checkAgainstExchange (runtime)", () => {
     await reconciliation.checkAgainstExchange();
     expect(reconciliation.getHealthyStreak()).toBe(2);
 
-    adapter.openOrders = []; // exchange order vanishes without local knowing
+    adapter.openOrders = []; // exchange confirms absence; successful zero-fill replay resolves cancellation
     await reconciliation.checkAgainstExchange();
-    expect(reconciliation.getHealthyStreak()).toBe(0);
-    expect(reconciliation.getDegradedStreak()).toBe(1);
+    expect(reconciliation.getHealthyStreak()).toBe(3);
+    expect(reconciliation.getDegradedStreak()).toBe(0);
   });
 
   it("logs a fill resolved via resolveVanishedOrder to the trade log (SPEC 7)", async () => {

@@ -28,8 +28,8 @@ export interface ReconciliationResult {
  * (Section 4.2) — nothing in this class reaches across markets on its own.
  *
  * Deliberately implements two different behaviors, not one function with a flag:
- *  - syncFromExchange(): startup only. Exchange is unconditionally ground truth; local state is
- *    discarded and reseeded. Mismatches are expected and silently corrected.
+ *  - syncFromExchange(): startup only. Exchange state confirms which already-managed orders are
+ *    still open, but exchange-only orders are never adopted into the managed registry.
  *  - checkAgainstExchange(): every runtime cycle. Local state is now trusted as live; mismatches
  *    are strict anomalies, logged rather than silently adopted — EXCEPT a local RESTING order the
  *    exchange no longer shows, which gets the same fill-replay treatment syncFromExchange gives
@@ -76,32 +76,38 @@ export class Reconciliation {
     const exchangeOrders = this.adapter.getOpenOrders(this.market);
     const localOrders = this.registry.list();
 
-    const seeded: LocalOrder[] = exchangeOrders.map((exchangeOrder) => {
+    const anomalies: ReconciliationAnomaly[] = [];
+    const seeded: LocalOrder[] = exchangeOrders.flatMap((exchangeOrder) => {
       const matchingLocal = localOrders.find(
         (o) => o.exchangeOrderId === exchangeOrder.exchangeOrderId,
       );
-      return {
-        clientOrderId:
-          matchingLocal?.clientOrderId ??
-          exchangeOrder.clientOrderId ??
-          exchangeOrder.exchangeOrderId,
+      if (!matchingLocal) {
+        anomalies.push({
+          kind: "EXCHANGE_ORDER_NOT_LOCAL",
+          exchangeOrderId: exchangeOrder.exchangeOrderId,
+          detail: `Exchange shows unmanaged order ${exchangeOrder.exchangeOrderId} resting on ${this.market}; it was not adopted`,
+        });
+        return [];
+      }
+      return [{
+        clientOrderId: matchingLocal.clientOrderId,
         exchangeOrderId: exchangeOrder.exchangeOrderId,
         market: this.market,
         side: exchangeOrder.side,
         // N1's live open-orders view can't report fill mode; fall back to whatever local memory
         // we have, and "limit" as a last resort (every resting order behaves as one regardless
         // of how it was originally placed).
-        type: matchingLocal?.type ?? exchangeOrder.type ?? "limit",
+        type: matchingLocal.type ?? exchangeOrder.type ?? "limit",
         price: exchangeOrder.price,
         size: exchangeOrder.size,
         filledSize: exchangeOrder.filledSize,
         // Exchange can't report reduce-only status either (see adapter doc comment) — trust
         // local memory if we have it, default false for an order we have no record of at all.
-        isReduceOnly: matchingLocal?.isReduceOnly ?? false,
+        isReduceOnly: matchingLocal.isReduceOnly,
         state: "RESTING",
-        placedAt: matchingLocal?.placedAt ?? now,
+        placedAt: matchingLocal.placedAt,
         updatedAt: now,
-      };
+      }];
     });
 
     const localOnly = localOrders.filter(
@@ -119,28 +125,29 @@ export class Reconciliation {
       try {
         fills = await this.adapter.getOrderFills(order.exchangeOrderId, this.market);
       } catch {
-        // Can't resolve this one — leave it out of the reseeded set rather than guessing either
-        // way. A startup sync that can't fully resolve every order is itself worth surfacing;
-        // callers should treat an exception from this method as startup-blocking, not this
-        // per-order case, which we deliberately don't let block the rest of the sync.
+        seeded.push(order);
+        anomalies.push({
+          kind: "LOCAL_ORDER_NOT_ON_EXCHANGE",
+          exchangeOrderId: order.exchangeOrderId,
+          detail: `Exchange confirms managed order ${order.exchangeOrderId} absent on ${this.market}, but fill lookup failed; terminal state remains ambiguous`,
+        });
         continue;
       }
       const filledSize = fills.reduce((sum, f) => sum + f.size, 0);
-      if (filledSize > 0) {
-        for (const fill of fills) {
-          this.tradeLog.record(fill, {
-            isReduceOnly: order.isReduceOnly,
-            clientOrderId: order.clientOrderId,
-            source: "reconciliation",
-          });
-        }
-        seeded.push({
-          ...order,
-          filledSize,
-          state: filledSize >= order.size ? "FILLED" : "CANCELLED",
-          updatedAt: now,
+      const resolvedFilledSize = Math.max(order.filledSize, filledSize);
+      for (const fill of fills) {
+        this.tradeLog.record(fill, {
+          isReduceOnly: order.isReduceOnly,
+          clientOrderId: order.clientOrderId,
+          source: "reconciliation",
         });
       }
+      seeded.push({
+        ...order,
+        filledSize: resolvedFilledSize,
+        state: resolvedFilledSize >= order.size ? "FILLED" : "CANCELLED",
+        updatedAt: now,
+      });
     }
 
     this.registry.replaceAll(seeded);
@@ -148,16 +155,14 @@ export class Reconciliation {
 
     const result: ReconciliationResult = {
       market: this.market,
-      // Startup sync always concludes healthy by construction — it just resolved every
-      // discrepancy it found, rather than merely detecting them.
-      healthy: true,
-      openOrderCount: seeded.filter((o) => o.state === "RESTING").length,
-      anomalies: [],
+      healthy: anomalies.length === 0,
+      openOrderCount: exchangeOrders.length,
+      anomalies,
       checkedAt: now,
     };
     this.lastResult = result;
-    this.healthyStreak = 1;
-    this.degradedStreak = 0;
+    this.healthyStreak = result.healthy ? 1 : 0;
+    this.degradedStreak = result.healthy ? 0 : 1;
     return result;
   }
 
@@ -241,11 +246,7 @@ export class Reconciliation {
     }
 
     const filledSize = fills.reduce((sum, f) => sum + f.size, 0);
-    if (filledSize <= 0) {
-      // Vanished with zero fill evidence at all — genuinely unexplained, keep blocking.
-      return false;
-    }
-
+    const resolvedFilledSize = Math.max(local.filledSize, filledSize);
     for (const fill of fills) {
       this.tradeLog.record(fill, {
         isReduceOnly: local.isReduceOnly,
@@ -256,8 +257,8 @@ export class Reconciliation {
 
     this.registry.upsert({
       ...local,
-      filledSize,
-      state: filledSize >= local.size ? "FILLED" : "CANCELLED",
+      filledSize: resolvedFilledSize,
+      state: resolvedFilledSize >= local.size ? "FILLED" : "CANCELLED",
       updatedAt: now,
     });
     return true;
