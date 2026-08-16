@@ -67,6 +67,16 @@ describe("RealPerplMarketDataSource", () => {
     expect(() => source.getMarketState("20")).toThrow(/incomplete/);
   });
 
+  it("keeps received sparse funding available without completing omitted markets", async () => {
+    let clock = now; const socket = new Socket();
+    const source = new RealPerplMarketDataSource("https://local.invalid/api", "ws://local", 1_000, async () => response, () => socket, () => clock, () => 0.5);
+    await source.getMarkets(); const pending = source.connect(["1", "20"]); socket.open(); await pending; acknowledge(source);
+    source.ingest({ mt: 10, sid: 3000, sn: 1, d: { "1": { at, rate: 40, div: 1 } } });
+    clock += 60_000;
+    expect(source.getFunding("1")).toMatchObject({ marketId: "1", rate: 0.00004, timestamp: now });
+    expect(() => source.getFunding("20")).toThrow(/incomplete/);
+  });
+
   it("clears market-state readiness across disconnect and reconnect", async () => {
     vi.useFakeTimers();
     try {
@@ -84,6 +94,27 @@ describe("RealPerplMarketDataSource", () => {
       expect(() => source.getMarketState("1")).toThrow(/market state is incomplete/);
       source.ingest({ mt: 9, sid: 3000, sn: 3, d: { "1": { at, orl: 629513, mrk: 629934, bid: 629888, ask: 629889 } } });
       expect(source.getMarketState("1").sequence).toBe(3n);
+      await source.disconnect();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("clears funding readiness across disconnect and reconnect", async () => {
+    vi.useFakeTimers();
+    try {
+      const sockets: Socket[] = []; const source = new RealPerplMarketDataSource("https://local.invalid/api", "ws://local", 1_000, async () => response, () => { const socket = new Socket(); sockets.push(socket); return socket; }, () => now, () => 0.5);
+      await source.getMarkets(); const pending = source.connect(["1"]); sockets[0]!.open(); await pending;
+      source.ingest({ mt: 6, sn: 1, subs: subscriptions.slice(0, 4) });
+      source.ingest({ mt: 10, sid: 3000, sn: 2, d: { "1": { at, rate: 40, div: 1 } } });
+      expect(source.getFunding("1").marketId).toBe("1");
+
+      sockets[0]!.listeners.get("close")?.({});
+      expect(() => source.getFunding("1")).toThrow(/disconnected/);
+      await vi.advanceTimersByTimeAsync(1_000); sockets[1]!.open();
+      expect(() => source.getFunding("1")).toThrow(/subscription.*incomplete/);
+      source.ingest({ mt: 6, sn: 1, subs: subscriptions.slice(0, 4) });
+      expect(() => source.getFunding("1")).toThrow(/funding is incomplete/);
+      source.ingest({ mt: 10, sid: 3000, sn: 3, d: { "1": { at, rate: 40, div: 1 } } });
+      expect(source.getFunding("1").sequence).toBe(3n);
       await source.disconnect();
     } finally { vi.useRealTimers(); }
   });
