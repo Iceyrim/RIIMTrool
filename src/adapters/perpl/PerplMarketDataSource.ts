@@ -41,6 +41,11 @@ function unsigned(value: unknown, field: string): bigint {
   if (!/^\d+$/.test(String(value))) throw new ExchangeAdapterError(`Perpl ${field} is malformed`);
   return BigInt(String(value));
 }
+function safeSequence(value: unknown): bigint {
+  const sequence = unsigned(value, "sn");
+  if (sequence > BigInt(Number.MAX_SAFE_INTEGER)) throw new ExchangeAdapterError("Perpl sn is malformed");
+  return sequence;
+}
 function scaled(value: unknown, decimals: number, field: string): number {
   if (typeof value !== "number" && typeof value !== "string" && typeof value !== "bigint") throw new ExchangeAdapterError(`Perpl ${field} is malformed`);
   return scaledToNumber(value, decimals, field);
@@ -156,7 +161,7 @@ export class RealPerplMarketDataSource implements PerplMarketDataSource {
     const mt = finiteNumber(message.mt, "mt");
     if (mt === 6) { this.acknowledge(message); return; }
     if (![9, 10, 15, 16, 17, 18].includes(mt)) return;
-    const sid = unsigned(message.sid, "sid"); const sequence = unsigned(message.sn, "sn");
+    const sid = unsigned(message.sid, "sid"); const sequence = safeSequence(message.sn);
     if (mt === 9 || mt === 10) this.ingestChain(mt, sid, sequence, message.d);
     else this.ingestMarketStream(mt, sid, sequence, message);
   }
@@ -209,7 +214,8 @@ export class RealPerplMarketDataSource implements PerplMarketDataSource {
   }
   private ingestBook(marketId: string, mt: number, sequence: bigint, message: PerplWireMessage): void {
     const stream = `order-book@${marketId}`; const previous = this.streamSequence.get(stream);
-    if (mt === 16 && (previous === undefined || sequence !== previous + 1n || !this.bookLevels.has(marketId))) throw new ExchangeAdapterError(`Perpl sequence gap for ${stream}`);
+    if (mt === 16 && (previous === undefined || !this.bookLevels.has(marketId))) throw new ExchangeAdapterError(`Perpl ${stream} update arrived before snapshot`);
+    if (mt === 16 && sequence <= previous!) throw new ExchangeAdapterError(`Perpl non-increasing sequence for ${stream}`);
     if (mt === 15 && previous !== undefined && sequence <= previous) throw new ExchangeAdapterError(`Perpl stale snapshot for ${stream}`);
     const at = blockTimestamp(message.at, "order-book.at"); const market = this.markets.get(marketId)!;
     const next = mt === 15 ? { bids: new Map<bigint, bigint>(), asks: new Map<bigint, bigint>() } : { bids: new Map(this.bookLevels.get(marketId)!.bids), asks: new Map(this.bookLevels.get(marketId)!.asks) };

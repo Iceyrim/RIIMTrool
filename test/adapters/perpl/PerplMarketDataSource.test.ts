@@ -57,14 +57,37 @@ describe("RealPerplMarketDataSource", () => {
     expect(source.getFunding("1").rate).toBe(0.00004); expect(() => source.getMarketState("20")).toThrow(/incomplete/);
   });
 
-  it("applies atomic snapshots and upsert/deletion deltas and fails on gaps or crossing", async () => {
+  it("applies atomic snapshots and accepts forward sequence gaps while rejecting non-increasing updates", async () => {
     const { source } = await connected(); acknowledge(source);
     source.ingest({ mt: 15, sid: 1000001, sn: 10, at, bid: [{ p: 1000, s: 100, o: 1 }, { p: 990, s: 50, o: 1 }], ask: [{ p: 1010, s: 200, o: 2 }] });
-    source.ingest({ mt: 16, sid: 1000001, sn: 11, at, bid: [{ p: 1000, s: 0, o: 0 }], ask: [{ p: 1020, s: 300, o: 1 }] });
+    source.ingest({ mt: 16, sid: 1000001, sn: 13, at, bid: [{ p: 1000, s: 0, o: 0 }], ask: [{ p: 1020, s: 300, o: 1 }] });
     expect(source.getOrderBook("1")).toMatchObject({ bids: [{ price: 99, size: 0.5 }], asks: [{ price: 101, size: 2 }, { price: 102, size: 3 }] });
-    expect(() => source.ingest({ mt: 16, sid: 1000001, sn: 13, at, bid: [], ask: [] })).toThrow(/gap/); expect(() => source.getOrderBook("1")).toThrow(/invalid/);
+    expect(() => source.ingest({ mt: 16, sid: 1000001, sn: 13, at, bid: [], ask: [] })).toThrow(/non-increasing/); expect(() => source.getOrderBook("1")).toThrow(/invalid/);
     const crossed = await connected(["1"]); crossed.source.ingest({ mt: 6, sn: 1, subs: subscriptions.slice(0, 4) });
     expect(() => crossed.source.ingest({ mt: 15, sid: 1000001, sn: 1, at, bid: [{ p: 1010, s: 1, o: 1 }], ask: [{ p: 1000, s: 1, o: 1 }] })).toThrow(/crossed/);
+  });
+
+  it("accepts forward gaps and rejects duplicate or decreasing sequences for every realtime stream", async () => {
+    const marketState = await connected(); acknowledge(marketState.source);
+    marketState.source.ingest({ mt: 9, sid: 3000, sn: 10, d: { "1": { at, orl: 629513, mrk: 629934, bid: 629888, ask: 629889 } } });
+    marketState.source.ingest({ mt: 9, sid: 3000, sn: 20, d: { "1": { at, orl: 629513, mrk: 629934, bid: 629888, ask: 629889 } } });
+    expect(() => marketState.source.ingest({ mt: 9, sid: 3000, sn: 20, d: {} })).toThrow(/non-increasing/);
+
+    const funding = await connected(); acknowledge(funding.source);
+    funding.source.ingest({ mt: 10, sid: 3000, sn: 10, d: { "1": { at, rate: 40, div: 1 } } });
+    funding.source.ingest({ mt: 10, sid: 3000, sn: 20, d: { "1": { at, rate: 40, div: 1 } } });
+    expect(() => funding.source.ingest({ mt: 10, sid: 3000, sn: 19, d: {} })).toThrow(/non-increasing/);
+
+    const trades = await connected(); acknowledge(trades.source);
+    const trade = { at: { ...at, tx: 6, txid: "8e2dd8da", l: 6 }, p: 629888, s: 329, sd: 2 };
+    trades.source.ingest({ mt: 17, sid: 2000001, sn: 10, d: [trade] });
+    trades.source.ingest({ mt: 18, sid: 2000001, sn: 20, d: [] });
+    expect(() => trades.source.ingest({ mt: 18, sid: 2000001, sn: 19, d: [] })).toThrow(/non-increasing/);
+  });
+
+  it("rejects realtime sequence numbers outside the safe-integer range", async () => {
+    const { source } = await connected(); acknowledge(source);
+    expect(() => source.ingest({ mt: 9, sid: 3000, sn: "9007199254740992", d: {} })).toThrow(/sn is malformed/);
   });
 
   it("ingests mt:17 trades with stable verified transaction identity and per-stream freshness", async () => {
