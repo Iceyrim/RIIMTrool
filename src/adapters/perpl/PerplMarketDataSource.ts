@@ -1,15 +1,12 @@
 import { ExchangeAdapterError } from "../AdapterError.js";
-import { finiteNumber, scaledToNumber, timestampMs } from "./mappers.js";
-import type { PerplCandleRaw, PerplChannel, PerplContextRaw, PerplMarketRaw, PerplWireMessage } from "./types.js";
+import { blockTimestamp, finiteNumber, scaledToNumber, timestampMs } from "./mappers.js";
+import type { PerplCandleRaw, PerplContextRaw, PerplMarketRaw, PerplStreamKind, PerplSubscriptionRequest, PerplWireMessage } from "./types.js";
 
 export const PERPL_REST_BASE_URL = "https://app.perpl.xyz/api";
 export const PERPL_MARKET_DATA_WS_URL = "wss://app.perpl.xyz/ws/v1/market-data";
-const CHANNELS: readonly PerplChannel[] = ["market-state", "order-book", "trades", "funding"];
+const CHAIN_ID = 143;
 
-export interface PerplMarket {
-  marketId: string; symbol: string; priceDecimals: number; sizeDecimals: number;
-  minimumPostingSize: number; open: boolean;
-}
+export interface PerplMarket { marketId: string; symbol: string; priceDecimals: number; sizeDecimals: number; minimumPostingSize: number; open: boolean }
 export interface PerplBookLevel { price: number; size: number }
 export interface PerplOrderBook { marketId: string; bids: PerplBookLevel[]; asks: PerplBookLevel[]; sequence: bigint; timestamp: number }
 export interface PerplTrade { id: string; marketId: string; takerSide: "buy" | "sell"; price: number; size: number; timestamp: number; sequence: bigint }
@@ -18,11 +15,8 @@ export interface PerplFunding { marketId: string; rate: number; timestamp: numbe
 export interface PerplCandle { timestamp: number; open: number; high: number; low: number; close: number; volume: number }
 
 export interface PerplMarketDataSource {
-  connect(marketIds: readonly string[]): Promise<void>;
-  disconnect(): Promise<void>;
-  getMarkets(): Promise<PerplMarket[]>;
-  getMarketState(marketId: string): PerplMarketState;
-  getOrderBook(marketId: string): PerplOrderBook;
+  connect(marketIds: readonly string[]): Promise<void>; disconnect(): Promise<void>; getMarkets(): Promise<PerplMarket[]>;
+  getMarketState(marketId: string): PerplMarketState; getOrderBook(marketId: string): PerplOrderBook;
   getRecentTrades(marketId: string, after?: { timestamp: number; ids: ReadonlySet<string> }): PerplTrade[];
   getFunding(marketId: string): PerplFunding;
   getCandles(marketId: string, params: { interval: string; fromMs: number; toMs: number }): Promise<PerplCandle[]>;
@@ -39,11 +33,17 @@ function record(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ExchangeAdapterError(`Perpl ${label} is malformed`);
   return value as Record<string, unknown>;
 }
-function scaledValue(value: unknown, field: string): string | number | bigint {
-  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "bigint") {
-    throw new ExchangeAdapterError(`Perpl ${field} is malformed`);
-  }
+function array(value: unknown, label: string): unknown[] {
+  if (!Array.isArray(value)) throw new ExchangeAdapterError(`Perpl ${label} is malformed`);
   return value;
+}
+function unsigned(value: unknown, field: string): bigint {
+  if (!/^\d+$/.test(String(value))) throw new ExchangeAdapterError(`Perpl ${field} is malformed`);
+  return BigInt(String(value));
+}
+function scaled(value: unknown, decimals: number, field: string): number {
+  if (typeof value !== "number" && typeof value !== "string" && typeof value !== "bigint") throw new ExchangeAdapterError(`Perpl ${field} is malformed`);
+  return scaledToNumber(value, decimals, field);
 }
 function marketIdOf(raw: PerplMarketRaw): string {
   const id = raw.market_id ?? raw.id;
@@ -57,9 +57,8 @@ function mapMarket(raw: PerplMarketRaw): PerplMarket {
   const sizeDecimals = finiteNumber(raw.config?.size_decimals ?? raw.size_decimals, "size_decimals");
   const minimumRaw = raw.config?.min_posting_amount ?? raw.min_posting_amount ?? raw.minimum_posting_size ?? raw.min_posting_size;
   if (minimumRaw === undefined) throw new ExchangeAdapterError("Perpl context omitted minimum posting size");
-  const minimumPostingSize = typeof minimumRaw === "string" && /^\d+$/.test(minimumRaw)
-    ? scaledToNumber(minimumRaw, sizeDecimals, "minimum posting size") : finiteNumber(minimumRaw, "minimum posting size");
-  const open = raw.config?.is_open ?? raw.is_open ?? (raw.status === "open" || raw.status === "OPEN" || raw.status === "active");
+  const minimumPostingSize = typeof minimumRaw === "string" && /^\d+$/.test(minimumRaw) ? scaledToNumber(minimumRaw, sizeDecimals, "minimum posting size") : finiteNumber(minimumRaw, "minimum posting size");
+  const open = raw.config?.is_open ?? raw.is_open ?? ["open", "OPEN", "active"].includes(raw.status ?? "");
   if (minimumPostingSize < 0) throw new ExchangeAdapterError("Perpl minimum posting size must be non-negative");
   return { marketId: marketIdOf(raw), symbol, priceDecimals, sizeDecimals, minimumPostingSize, open };
 }
@@ -68,26 +67,29 @@ export class RealPerplMarketDataSource implements PerplMarketDataSource {
   private markets = new Map<string, PerplMarket>();
   private states = new Map<string, PerplMarketState>();
   private books = new Map<string, PerplOrderBook>();
+  private bookLevels = new Map<string, { bids: Map<bigint, bigint>; asks: Map<bigint, bigint> }>();
   private trades = new Map<string, PerplTrade[]>();
   private funding = new Map<string, PerplFunding>();
-  private sequences = new Map<string, bigint>();
+  private streamSequence = new Map<string, bigint>();
   private invalid = new Map<string, string>();
+  private acknowledged = new Set<string>();
+  private sidToStream = new Map<bigint, string>();
+  private chainSid = new Map<PerplStreamKind, bigint>();
   private socket?: SocketLike;
   private connected = false;
   private deliberatelyClosed = false;
   private reconnectAttempt = 0;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private subscribedMarketIds: string[] = [];
+  private expectedStreams = new Set<string>();
   private requestTimes: number[] = [];
+  private generation = 0;
 
   constructor(
-    private readonly restBaseUrl = PERPL_REST_BASE_URL,
-    private readonly wsUrl = PERPL_MARKET_DATA_WS_URL,
-    private readonly staleAfterMs = 15_000,
-    private readonly fetchImpl: FetchLike = fetch,
+    private readonly restBaseUrl = PERPL_REST_BASE_URL, private readonly wsUrl = PERPL_MARKET_DATA_WS_URL,
+    private readonly staleAfterMs = 15_000, private readonly fetchImpl: FetchLike = fetch,
     private readonly socketFactory: SocketFactory = (url) => new WebSocket(url) as unknown as SocketLike,
-    private readonly now: () => number = Date.now,
-    private readonly random: () => number = Math.random,
+    private readonly now: () => number = Date.now, private readonly random: () => number = Math.random,
   ) {}
 
   private async json(path: string, query?: Record<string, string | number | undefined>): Promise<unknown> {
@@ -99,106 +101,150 @@ export class RealPerplMarketDataSource implements PerplMarketDataSource {
     if (!response.ok) throw new ExchangeAdapterError(`Perpl public GET returned HTTP ${response.status}`, undefined, response.status >= 500);
     return response.json();
   }
-
   async getMarkets(): Promise<PerplMarket[]> {
-    const raw = await this.json("v1/pub/context") as PerplContextRaw;
-    const nested = raw.data;
+    const raw = await this.json("v1/pub/context") as PerplContextRaw; const nested = raw.data;
     const list = raw.markets ?? (Array.isArray(nested) ? nested : nested?.markets);
     if (!Array.isArray(list) || list.length === 0) throw new ExchangeAdapterError("Perpl context contains no markets");
-    const mapped = list.map(mapMarket);
-    this.markets = new Map(mapped.map((market) => [market.marketId, market]));
-    return mapped;
+    const mapped = list.map(mapMarket); this.markets = new Map(mapped.map((market) => [market.marketId, market])); return mapped;
   }
-
   async connect(marketIds: readonly string[]): Promise<void> {
-    if (marketIds.length * CHANNELS.length > 16) throw new ExchangeAdapterError("Perpl subscription limit exceeded (16)");
+    if (2 + marketIds.length * 2 > 16) throw new ExchangeAdapterError("Perpl subscription limit exceeded (16)");
     for (const id of marketIds) if (!this.markets.has(id)) throw new ExchangeAdapterError(`Perpl market id ${id} was not dynamically discovered`);
-    this.subscribedMarketIds = [...marketIds]; this.deliberatelyClosed = false;
+    this.subscribedMarketIds = [...marketIds]; this.expectedStreams = new Set(this.subscriptionStreams()); this.deliberatelyClosed = false;
     await this.openSocket();
   }
-
+  private subscriptionStreams(): string[] {
+    return [`market-state@${CHAIN_ID}`, `funding@${CHAIN_ID}`, ...this.subscribedMarketIds.flatMap((id) => [`order-book@${id}`, `trades@${id}`])];
+  }
+  private clearRealtime(): void {
+    this.states.clear(); this.books.clear(); this.bookLevels.clear(); this.trades.clear(); this.funding.clear(); this.streamSequence.clear();
+    this.invalid.clear(); this.acknowledged.clear(); this.sidToStream.clear(); this.chainSid.clear();
+  }
   private async openSocket(): Promise<void> {
+    const generation = ++this.generation; this.clearRealtime();
     await new Promise<void>((resolve, reject) => {
       const socket = this.socketFactory(this.wsUrl); this.socket = socket;
-      socket.addEventListener("open", () => { this.connected = true; this.reconnectAttempt = 0; try { this.subscribe(); resolve(); } catch (e) { reject(e); } });
-      socket.addEventListener("message", (event) => { try { this.ingest(typeof event.data === "string" ? event.data : String(event.data)); } catch (e) { for (const id of this.subscribedMarketIds) this.invalid.set(id, String(e)); } });
-      socket.addEventListener("close", () => { this.connected = false; for (const id of this.subscribedMarketIds) this.invalid.set(id, "disconnected"); if (!this.deliberatelyClosed) this.scheduleReconnect(); });
-      socket.addEventListener("error", () => { this.connected = false; });
+      socket.addEventListener("open", () => { if (generation !== this.generation) return; this.connected = true; try { this.subscribe(socket); resolve(); } catch (error) { reject(error); } });
+      socket.addEventListener("message", (event) => { if (generation !== this.generation) return; try { this.ingest(typeof event.data === "string" ? event.data : String(event.data)); } catch (error) { this.failAll(String(error)); } });
+      socket.addEventListener("close", () => { if (generation !== this.generation) return; this.connected = false; this.failAll("disconnected"); if (!this.deliberatelyClosed) this.scheduleReconnect(generation); });
+      socket.addEventListener("error", () => { if (generation === this.generation) { this.connected = false; this.failAll("socket error"); } });
     });
   }
-
-  private subscribe(): void {
+  private subscribe(socket: SocketLike): void {
     const now = this.now(); this.requestTimes = this.requestTimes.filter((time) => now - time < 60_000);
     if (this.requestTimes.length >= 10) throw new ExchangeAdapterError("Perpl subscription request limit exceeded (10/minute)");
     this.requestTimes.push(now);
-    this.socket?.send(JSON.stringify({ op: "subscribe", subscriptions: this.subscribedMarketIds.flatMap((market_id) => CHANNELS.map((channel) => ({ channel, market_id }))) }));
+    const frame: PerplSubscriptionRequest = { mt: 5, subs: this.subscriptionStreams().map((stream) => ({ stream, subscribe: true })) };
+    socket.send(JSON.stringify(frame));
   }
-
-  private scheduleReconnect(): void {
-    const delays = [1000, 2000, 4000, 8000, 16000, 32000, 60000];
-    const base = delays[Math.min(this.reconnectAttempt++, delays.length - 1)]!;
+  private scheduleReconnect(generation: number): void {
+    const delays = [1000, 2000, 4000, 8000, 16000, 32000, 60000]; const base = delays[Math.min(this.reconnectAttempt++, delays.length - 1)]!;
     const delay = Math.round(base * (0.8 + this.random() * 0.4));
-    this.reconnectTimer = setTimeout(() => { void this.openSocket().catch(() => this.scheduleReconnect()); }, delay);
+    this.reconnectTimer = setTimeout(() => { if (generation !== this.generation || this.deliberatelyClosed) return; void this.openSocket().catch(() => this.scheduleReconnect(this.generation)); }, delay);
   }
-
-  async disconnect(): Promise<void> { this.deliberatelyClosed = true; this.connected = false; if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.socket?.close(); }
+  async disconnect(): Promise<void> {
+    this.deliberatelyClosed = true; this.connected = false; ++this.generation; if (this.reconnectTimer) clearTimeout(this.reconnectTimer); this.clearRealtime(); this.socket?.close();
+  }
+  private failAll(reason: string): void { for (const id of this.subscribedMarketIds) this.invalid.set(id, reason); }
 
   /** Public solely for deterministic offline transport tests. */
   ingest(payload: string | PerplWireMessage): void {
-    let marketId = "";
-    try {
-      const preview = typeof payload === "string" ? JSON.parse(payload) as PerplWireMessage : payload;
-      marketId = String(preview.market_id ?? preview.marketId ?? "");
-      this.ingestValidated(preview);
-    } catch (error) {
-      if (marketId) this.invalid.set(marketId, String(error));
-      throw error instanceof ExchangeAdapterError ? error : new ExchangeAdapterError(`Perpl message is malformed: ${String(error)}`);
-    }
+    try { this.ingestValidated(typeof payload === "string" ? JSON.parse(payload) as PerplWireMessage : payload); }
+    catch (error) { this.failAll(String(error)); throw error instanceof ExchangeAdapterError ? error : new ExchangeAdapterError(`Perpl message is malformed: ${String(error)}`); }
   }
-
   private ingestValidated(message: PerplWireMessage): void {
-    const channel = message.channel ?? message.type; const marketId = String(message.market_id ?? message.marketId ?? "");
-    if (!CHANNELS.includes(channel as PerplChannel) || !this.markets.has(marketId)) throw new ExchangeAdapterError("Perpl message has unknown channel or market");
-    const seqRaw = message.sequence ?? message.seq; if (seqRaw === undefined || !/^\d+$/.test(String(seqRaw))) throw new ExchangeAdapterError("Perpl message has malformed sequence");
-    const sequence = BigInt(String(seqRaw)); const key = `${marketId}:${channel}`; const previous = this.sequences.get(key);
-    if (previous !== undefined && sequence !== previous + 1n) { this.invalid.set(marketId, "sequence gap"); this.subscribe(); throw new ExchangeAdapterError(`Perpl sequence gap for ${key}`); }
-    const timestamp = timestampMs(message.timestamp ?? message.ts); const data = record(message.data, `${channel} data`); const market = this.markets.get(marketId)!;
-    this.sequences.set(key, sequence); this.invalid.delete(marketId);
-    if (channel === "market-state") {
-      const open = data.is_open ?? data.open; if (open !== true) throw new ExchangeAdapterError("Perpl market is not open");
-      this.states.set(marketId, { marketId, markPrice: scaledToNumber(scaledValue(data.mark_price, "mark price"), market.priceDecimals, "mark price"), indexPrice: scaledToNumber(scaledValue(data.index_price, "index price"), market.priceDecimals, "index price"), open: true, timestamp, sequence });
-    } else if (channel === "order-book") {
-      const levels = (side: "bids" | "asks") => {
-        const raw = data[side]; if (!Array.isArray(raw) || raw.length === 0) throw new ExchangeAdapterError(`Perpl ${side} are incomplete`);
-        return raw.map((item) => { const level = Array.isArray(item) ? { price: item[0], size: item[1] } : record(item, "book level"); const price = scaledToNumber(scaledValue(level.price, "book price"), market.priceDecimals, "book price"); const size = scaledToNumber(scaledValue(level.size, "book size"), market.sizeDecimals, "book size"); if (!(price > 0 && size > 0)) throw new ExchangeAdapterError("Perpl book level is invalid"); return { price, size }; });
-      };
-      const bids = levels("bids").sort((a,b) => b.price-a.price), asks = levels("asks").sort((a,b) => a.price-b.price);
-      if (bids[0]!.price >= asks[0]!.price) throw new ExchangeAdapterError("Perpl order book is crossed");
-      this.books.set(marketId, { marketId, bids, asks, sequence, timestamp });
-    } else if (channel === "trades") {
-      const items = Array.isArray(data.trades) ? data.trades : [data]; const target = this.trades.get(marketId) ?? [];
-      for (const item of items) { const trade = record(item, "trade"); const id = String(trade.id ?? trade.trade_id ?? ""); const side = String(trade.taker_side ?? trade.side).toLowerCase(); if (!id || (side !== "buy" && side !== "sell")) throw new ExchangeAdapterError("Perpl trade is malformed"); target.push({ id, marketId, takerSide: side, price: scaledToNumber(scaledValue(trade.price, "trade price"), market.priceDecimals, "trade price"), size: scaledToNumber(scaledValue(trade.size, "trade size"), market.sizeDecimals, "trade size"), timestamp: timestampMs(trade.timestamp ?? timestamp), sequence }); }
-      this.trades.set(marketId, target.slice(-1000));
-    } else this.funding.set(marketId, { marketId, rate: finiteNumber(data.rate ?? data.funding_rate, "funding rate"), timestamp, sequence });
+    const mt = finiteNumber(message.mt, "mt");
+    if (mt === 6) { this.acknowledge(message); return; }
+    if (![9, 10, 15, 16, 17, 18].includes(mt)) return;
+    const sid = unsigned(message.sid, "sid"); const sequence = unsigned(message.sn, "sn");
+    if (mt === 9 || mt === 10) this.ingestChain(mt, sid, sequence, message.d);
+    else this.ingestMarketStream(mt, sid, sequence, message);
   }
-
+  private acknowledge(message: PerplWireMessage): void {
+    unsigned(message.sn, "subscription acknowledgement sn"); const entries = array(message.subs, "subscription acknowledgement subs");
+    for (const raw of entries) {
+      const entry = record(raw, "subscription acknowledgement"); const stream = typeof entry.stream === "string" ? entry.stream : "";
+      if (!this.expectedStreams.has(stream) || this.acknowledged.has(stream)) throw new ExchangeAdapterError(`Perpl unexpected subscription acknowledgement: ${stream}`);
+      const status = record(entry.status, `subscription ${stream} status`); if (finiteNumber(status.code, `subscription ${stream} status code`) !== 0) throw new ExchangeAdapterError(`Perpl subscription failed for ${stream}: ${String(status.error ?? status.code)}`);
+      const sid = unsigned(entry.sid, `subscription ${stream} sid`); this.acknowledged.add(stream);
+      if (stream.startsWith("market-state@")) this.chainSid.set("market-state", sid);
+      else if (stream.startsWith("funding@")) this.chainSid.set("funding", sid);
+      else {
+        const previous = this.sidToStream.get(sid); if (previous && previous !== stream) throw new ExchangeAdapterError(`Perpl SID ${sid} was bound to multiple streams`);
+        this.sidToStream.set(sid, stream);
+      }
+    }
+    if (entries.length !== this.expectedStreams.size || this.acknowledged.size !== this.expectedStreams.size) throw new ExchangeAdapterError("Perpl subscription acknowledgement is incomplete");
+    this.reconnectAttempt = 0;
+  }
+  private ingestChain(mt: number, sid: bigint, sequence: bigint, rawData: unknown): void {
+    const kind: PerplStreamKind = mt === 9 ? "market-state" : "funding"; const stream = `${kind}@${CHAIN_ID}`;
+    if (!this.acknowledged.has(stream)) throw new ExchangeAdapterError(`Perpl ${stream} arrived before acknowledgement`);
+    const bound = this.chainSid.get(kind); const otherKind: PerplStreamKind = mt === 9 ? "funding" : "market-state";
+    if (bound !== undefined && bound !== sid && bound !== this.chainSid.get(otherKind)) throw new ExchangeAdapterError(`Perpl ${stream} used an unexpected SID`);
+    this.chainSid.set(kind, sid); this.trackMonotonic(stream, sequence);
+    const data = record(rawData, `${kind} data`); const staged: Array<[string, PerplMarketState | PerplFunding]> = [];
+    for (const [marketId, raw] of Object.entries(data)) {
+      if (!this.subscribedMarketIds.includes(marketId)) continue; const market = this.markets.get(marketId)!; const item = record(raw, `${kind} ${marketId}`); const at = blockTimestamp(item.at, `${kind}.at`);
+      if (kind === "market-state") {
+        const bid = scaled(item.bid, market.priceDecimals, "market-state bid"); const ask = scaled(item.ask, market.priceDecimals, "market-state ask");
+        if (!(bid > 0 && ask > bid)) throw new ExchangeAdapterError(`Perpl market-state ${marketId} is crossed or invalid`);
+        staged.push([marketId, { marketId, markPrice: scaled(item.mrk, market.priceDecimals, "mark price"), indexPrice: scaled(item.orl, market.priceDecimals, "oracle price"), open: market.open, timestamp: at.timestamp, sequence }]);
+      } else {
+        const divisor = finiteNumber(item.div, "funding divisor"); const rate = finiteNumber(item.rate, "funding rate");
+        if (!Number.isInteger(rate) || !Number.isInteger(divisor) || divisor <= 0) throw new ExchangeAdapterError("Perpl funding rate is malformed");
+        staged.push([marketId, { marketId, rate: rate / divisor / 1_000_000, timestamp: at.timestamp, sequence }]);
+      }
+    }
+    for (const [id, value] of staged) { if (kind === "market-state") this.states.set(id, value as PerplMarketState); else this.funding.set(id, value as PerplFunding); this.invalid.delete(id); }
+  }
+  private ingestMarketStream(mt: number, sid: bigint, sequence: bigint, message: PerplWireMessage): void {
+    const stream = this.sidToStream.get(sid); if (!stream || !this.acknowledged.has(stream)) throw new ExchangeAdapterError(`Perpl message used unbound SID ${sid}`);
+    const split = stream.lastIndexOf("@"); const kind = stream.slice(0, split) as PerplStreamKind; const marketId = stream.slice(split + 1); const expectedMt = kind === "order-book" ? (mt === 15 || mt === 16) : (mt === 17 || mt === 18);
+    if (!expectedMt) throw new ExchangeAdapterError(`Perpl mt ${mt} does not match ${stream}`);
+    if (kind === "order-book") this.ingestBook(marketId, mt, sequence, message); else this.ingestTrades(marketId, mt, sequence, message.d);
+  }
+  private trackMonotonic(stream: string, sequence: bigint): void {
+    const previous = this.streamSequence.get(stream); if (previous !== undefined && sequence <= previous) throw new ExchangeAdapterError(`Perpl non-increasing sequence for ${stream}`); this.streamSequence.set(stream, sequence);
+  }
+  private ingestBook(marketId: string, mt: number, sequence: bigint, message: PerplWireMessage): void {
+    const stream = `order-book@${marketId}`; const previous = this.streamSequence.get(stream);
+    if (mt === 16 && (previous === undefined || sequence !== previous + 1n || !this.bookLevels.has(marketId))) throw new ExchangeAdapterError(`Perpl sequence gap for ${stream}`);
+    if (mt === 15 && previous !== undefined && sequence <= previous) throw new ExchangeAdapterError(`Perpl stale snapshot for ${stream}`);
+    const at = blockTimestamp(message.at, "order-book.at"); const market = this.markets.get(marketId)!;
+    const next = mt === 15 ? { bids: new Map<bigint, bigint>(), asks: new Map<bigint, bigint>() } : { bids: new Map(this.bookLevels.get(marketId)!.bids), asks: new Map(this.bookLevels.get(marketId)!.asks) };
+    const apply = (raw: unknown, side: Map<bigint, bigint>, label: string) => { for (const value of array(raw, label)) { const level = record(value, `${label} level`); const p = unsigned(level.p, `${label} price`); const s = unsigned(level.s, `${label} size`); const orders = unsigned(level.o, `${label} order count`); if (p <= 0n) throw new ExchangeAdapterError(`Perpl ${label} price is invalid`); if (orders === 0n) side.delete(p); else { if (s <= 0n) throw new ExchangeAdapterError(`Perpl ${label} size is invalid`); side.set(p, s); } } };
+    apply(message.bid, next.bids, "bid"); apply(message.ask, next.asks, "ask");
+    if (next.bids.size === 0 || next.asks.size === 0) throw new ExchangeAdapterError("Perpl order book is incomplete");
+    const bids = [...next.bids].map(([p, s]) => ({ price: scaledToNumber(p, market.priceDecimals, "book price"), size: scaledToNumber(s, market.sizeDecimals, "book size") })).sort((a, b) => b.price - a.price);
+    const asks = [...next.asks].map(([p, s]) => ({ price: scaledToNumber(p, market.priceDecimals, "book price"), size: scaledToNumber(s, market.sizeDecimals, "book size") })).sort((a, b) => a.price - b.price);
+    if (bids[0]!.price >= asks[0]!.price) throw new ExchangeAdapterError("Perpl order book is crossed");
+    this.bookLevels.set(marketId, next); this.books.set(marketId, { marketId, bids, asks, sequence, timestamp: at.timestamp }); this.streamSequence.set(stream, sequence); this.invalid.delete(marketId);
+  }
+  private ingestTrades(marketId: string, mt: number, sequence: bigint, rawData: unknown): void {
+    const stream = `trades@${marketId}`; const previous = this.streamSequence.get(stream);
+    if (mt === 18 && previous === undefined) throw new ExchangeAdapterError(`Perpl ${stream} update arrived before snapshot`); this.trackMonotonic(stream, sequence);
+    const market = this.markets.get(marketId)!; const mapped = array(rawData, "trades").map((raw): PerplTrade => {
+      const trade = record(raw, "trade"); const at = record(trade.at, "trade.at"); const parsed = blockTimestamp(at, "trade.at");
+      const tx = unsigned(at.tx, "trade.at.tx"); const txid = typeof at.txid === "string" && /^[0-9a-f]+$/i.test(at.txid) ? at.txid.toLowerCase() : "";
+      const log = at.l === undefined ? undefined : unsigned(at.l, "trade.at.l"); if (!txid) throw new ExchangeAdapterError("Perpl trade has no stable transaction identity");
+      const side = finiteNumber(trade.sd, "trade side"); if (side !== 1 && side !== 2) throw new ExchangeAdapterError("Perpl trade side is malformed");
+      return { id: `${parsed.block}:${tx}:${txid}:${log === undefined ? "-" : log}`, marketId, takerSide: side === 1 ? "buy" : "sell", price: scaled(trade.p, market.priceDecimals, "trade price"), size: scaled(trade.s, market.sizeDecimals, "trade size"), timestamp: parsed.timestamp, sequence };
+    });
+    const base = mt === 17 ? [] : (this.trades.get(marketId) ?? []); const byId = new Map(base.map((trade) => [trade.id, trade])); for (const trade of mapped) byId.set(trade.id, trade);
+    this.trades.set(marketId, [...byId.values()].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id)).slice(-1000)); this.invalid.delete(marketId);
+  }
   private requireFresh<T extends { timestamp: number }>(marketId: string, value: T | undefined, label: string): T {
-    if (!this.connected) throw new ExchangeAdapterError("Perpl market data is disconnected");
-    const reason = this.invalid.get(marketId); if (reason) throw new ExchangeAdapterError(`Perpl market data invalid: ${reason}`);
-    if (!value) throw new ExchangeAdapterError(`Perpl ${label} is incomplete`);
-    if (this.now() - value.timestamp > this.staleAfterMs) throw new ExchangeAdapterError(`Perpl ${label} is stale`);
-    return value;
+    if (!this.connected) throw new ExchangeAdapterError("Perpl market data is disconnected"); const reason = this.invalid.get(marketId); if (reason) throw new ExchangeAdapterError(`Perpl market data invalid: ${reason}`);
+    if (!value) throw new ExchangeAdapterError(`Perpl ${label} is incomplete`); if (this.now() - value.timestamp > this.staleAfterMs) throw new ExchangeAdapterError(`Perpl ${label} is stale`); return value;
   }
   getMarketState(id: string): PerplMarketState { return this.requireFresh(id, this.states.get(id), "market state"); }
   getOrderBook(id: string): PerplOrderBook { return this.requireFresh(id, this.books.get(id), "order book"); }
   getFunding(id: string): PerplFunding { return this.requireFresh(id, this.funding.get(id), "funding"); }
-  getRecentTrades(id: string, after?: { timestamp: number; ids: ReadonlySet<string> }): PerplTrade[] { const all = this.trades.get(id); const latest = all?.at(-1); this.requireFresh(id, latest, "trades"); return (all ?? []).filter((t) => !after || t.timestamp > after.timestamp || (t.timestamp === after.timestamp && !after.ids.has(t.id))); }
-
+  getRecentTrades(id: string, after?: { timestamp: number; ids: ReadonlySet<string> }): PerplTrade[] { const all = this.trades.get(id); const latest = all?.at(-1); this.requireFresh(id, latest, "trades"); return (all ?? []).filter((trade) => !after || trade.timestamp > after.timestamp || (trade.timestamp === after.timestamp && !after.ids.has(trade.id))); }
   async getCandles(marketId: string, params: { interval: string; fromMs: number; toMs: number }): Promise<PerplCandle[]> {
-    if (!this.markets.has(marketId)) throw new ExchangeAdapterError("Perpl candle market was not discovered");
-    const raw = await this.json(`v1/market-data/${marketId}/candles/${params.interval}/${params.fromMs}-${params.toMs}`);
-    const list = Array.isArray(raw) ? raw : (record(raw, "candles").data ?? record(raw, "candles").candles);
-    if (!Array.isArray(list)) throw new ExchangeAdapterError("Perpl candles are malformed");
+    if (!this.markets.has(marketId)) throw new ExchangeAdapterError("Perpl candle market was not discovered"); const raw = await this.json(`v1/market-data/${marketId}/candles/${params.interval}/${params.fromMs}-${params.toMs}`);
+    const list = Array.isArray(raw) ? raw : (record(raw, "candles").data ?? record(raw, "candles").candles); if (!Array.isArray(list)) throw new ExchangeAdapterError("Perpl candles are malformed");
     return (list as PerplCandleRaw[]).map((c) => ({ timestamp: timestampMs(c.timestamp ?? c.time), open: finiteNumber(c.open, "candle open"), high: finiteNumber(c.high, "candle high"), low: finiteNumber(c.low, "candle low"), close: finiteNumber(c.close, "candle close"), volume: finiteNumber(c.volume, "candle volume") }));
   }
 }

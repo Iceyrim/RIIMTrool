@@ -45,3 +45,18 @@ export function timestampMs(value: unknown, field = "timestamp"): number {
   }
   return Math.trunc(result);
 }
+
+export interface ParsedBlockTimestamp { block: bigint; timestamp: number }
+
+export function blockTimestamp(value: unknown, field = "at"): ParsedBlockTimestamp {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ExchangeAdapterError(`Perpl ${field} is malformed`);
+  }
+  const at = value as Record<string, unknown>;
+  if (!/^\d+$/.test(String(at.b)) || !/^\d+$/.test(String(at.t))) {
+    throw new ExchangeAdapterError(`Perpl ${field} is malformed`);
+  }
+  const block = BigInt(String(at.b));
+  if (block <= 0n) throw new ExchangeAdapterError(`Perpl ${field}.b is invalid`);
+  return { block, timestamp: timestampMs(at.t, `${field}.t`) };
+}

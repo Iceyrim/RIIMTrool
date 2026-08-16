@@ -34,16 +34,10 @@ export interface PerplCandleRaw {
   volume?: string | number;
 }
 
-export type PerplChannel = "market-state" | "order-book" | "trades" | "funding";
+export type PerplStreamKind = "market-state" | "funding" | "order-book" | "trades";
 
-export interface PerplWireMessage {
-  channel?: string;
-  type?: string;
-  market_id?: string | number;
-  marketId?: string | number;
-  sequence?: string | number;
-  seq?: string | number;
-  timestamp?: string | number;
-  ts?: string | number;
-  data?: unknown;
-}
+export interface PerplBlockTimestamp { b: number; t: number }
+export interface PerplBlockTxLogTimestamp extends PerplBlockTimestamp { tx: number; txid: string; l?: number }
+export interface PerplSubscription { stream: string; subscribe: true }
+export interface PerplSubscriptionRequest { mt: 5; subs: PerplSubscription[] }
+export interface PerplWireMessage { mt?: unknown; sid?: unknown; sn?: unknown; subs?: unknown; at?: unknown; d?: unknown; bid?: unknown; ask?: unknown }
