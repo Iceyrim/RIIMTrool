@@ -33,6 +33,7 @@ export const SNAPSHOT_FRESH_MS = 10_000;
 export const SNAPSHOT_MAX_FILES_PER_EXCHANGE = 20;
 export const SNAPSHOT_FILE_MODE = 0o640;
 export const SNAPSHOT_DIRECTORY_MODE = 0o2770;
+export const DASHBOARD_SNAPSHOT_DIRECTORY = "/var/lib/riim-dashboard/state/dashboard/snapshots";
 
 function safePart(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, "_");

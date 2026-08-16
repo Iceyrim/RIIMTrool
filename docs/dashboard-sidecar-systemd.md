@@ -23,9 +23,8 @@ Every writable directory is setgid, so new directories and snapshot files inheri
 `riim-dashboard` group. The publisher forces snapshot mode `0640`; the unit also applies
 `UMask=0027`. `/opt/riim-dashboard` must contain only the two allowlisted artifact files.
 
-The unit's working directory is `/opt/riim-dashboard`, while its writable snapshot path is under
-`/var/lib/riim-dashboard`. Before activation, the operator must provide a host-managed path mapping
-(for example, a bind mount) from `/opt/riim-dashboard/state/dashboard/snapshots` to that writable
-directory. Creating that mapping, daemon reloads, enable/start/restart commands, proxy routes, and
-Tailscale changes are intentionally not performed or prescribed here. Restart policy applies only
-to `riim-dashboard.service`; it has no dependency on any trading unit.
+Runners publish directly to `/var/lib/riim-dashboard/state/dashboard/snapshots`; the sidecar reads
+that same fixed path. The unit confines the path with `ReadOnlyPaths`, so the sidecar cannot alter
+runner snapshots. No path mapping is required. Daemon reloads, enable/start/restart commands, proxy
+routes, and Tailscale changes are intentionally not performed or prescribed here. Restart policy
+applies only to `riim-dashboard.service`; it has no dependency on any trading unit.

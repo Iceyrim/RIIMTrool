@@ -45,6 +45,8 @@ describe("dashboard sidecar deployment", () => {
     const unit = readFileSync(join(root, "deploy/systemd/riim-dashboard.service"), "utf8");
     expect(unit).toContain("ExecStart=/usr/bin/node /opt/riim-dashboard/run-dashboard-sidecar.js");
     expect(unit).toContain("Restart=on-failure");
+    expect(unit).toContain("ReadOnlyPaths=/var/lib/riim-dashboard/state/dashboard/snapshots");
+    expect(unit).not.toContain("ReadWritePaths=");
     expect(unit).not.toMatch(/run-(?:live|paper)|tailscale|0\.0\.0\.0/i);
   });
 });

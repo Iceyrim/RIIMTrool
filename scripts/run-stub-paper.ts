@@ -33,7 +33,7 @@ import { loadMarketsConfig } from "../src/config/loadConfig.js";
 import { toEngineMarketConfig } from "../src/config/toEngineMarketConfig.js";
 import { createDashboardServer } from "../src/dashboard/server.js";
 import { buildDashboardStatus, type DashboardMarket } from "../src/dashboard/DashboardService.js";
-import { DashboardSnapshotPublisher } from "../src/dashboard/DashboardSnapshotSidecar.js";
+import { DASHBOARD_SNAPSHOT_DIRECTORY, DashboardSnapshotPublisher } from "../src/dashboard/DashboardSnapshotSidecar.js";
 import { DashboardTelemetry } from "../src/dashboard/DashboardTelemetry.js";
 import { DashboardHistoryStore } from "../src/dashboard/DashboardHistoryStore.js";
 import { MarketEngine } from "../src/engine/MarketEngine.js";
@@ -112,7 +112,7 @@ async function main(): Promise<void> {
   }));
   const dashboardPort = Number(process.env.DASHBOARD_PORT ?? "4100");
   const dashboardServer = createDashboardServer(dashboardMarkets, { port: dashboardPort });
-  const snapshotPublisher = new DashboardSnapshotPublisher(join(process.cwd(), "state", "dashboard", "snapshots"), "stub-paper", () => buildDashboardStatus(dashboardMarkets));
+  const snapshotPublisher = new DashboardSnapshotPublisher(DASHBOARD_SNAPSHOT_DIRECTORY, "stub-paper", () => buildDashboardStatus(dashboardMarkets));
   snapshotPublisher.start();
 
   const logFilePath = join(
