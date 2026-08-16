@@ -455,9 +455,6 @@ export class N1Adapter implements ExchangeAdapter {
         if (!Number.isSafeInteger(next) || next < 0) {
           throw new ExchangeAdapterError(`Invalid N1 ${role} trade cursor ${String(next)}`);
         }
-        if (next !== response.items.at(-1)!.tradeId) {
-          throw new ExchangeAdapterError(`N1 ${role} continuation cursor does not match page boundary`);
-        }
         if (seenCursors.has(next) || (cursor !== undefined && next >= cursor)) {
           throw new ExchangeAdapterError(`Invalid or repeated N1 ${role} trade cursor ${String(next)}`);
         }

@@ -627,12 +627,12 @@ describe("N1Adapter", () => {
     it("paginates maker and taker streams, deduplicates tradeIds, filters [since, until), and preserves unknown markets", async () => {
       fakeNord.getTrades.mockImplementation(async ({ makerId, startInclusive }) => {
         if (makerId !== undefined && startInclusive === undefined) {
-          return { items: [trade({ tradeId: 3, marketId: 404, price: 25, baseSize: 4 }), trade({ tradeId: 2, time: "2026-01-01T00:00:00.000Z", price: 50, baseSize: 1 })], nextStartInclusive: 2 };
+          return { items: [trade({ tradeId: 3, marketId: 404, price: 25, baseSize: 4 }), trade({ tradeId: 2, time: "2026-01-01T00:00:00.000Z", price: 50, baseSize: 1 })], nextStartInclusive: 1 };
         }
         if (makerId !== undefined) {
-          return { items: [trade({ tradeId: 2, time: "2026-01-01T00:00:00.000Z", price: 50, baseSize: 1 }), trade()] };
+          return { items: [trade({ tradeId: 2, time: "2026-01-01T00:00:00.000Z", price: 50, baseSize: 1 }), trade({ tradeId: 0 })] };
         }
-        return { items: [trade({ tradeId: 4, takerId: ACCOUNT_ID, makerId: 88, time: "2026-01-02T00:00:00.000Z" }), trade()] };
+        return { items: [trade({ tradeId: 4, takerId: ACCOUNT_ID, makerId: 88, time: "2026-01-02T00:00:00.000Z" }), trade({ tradeId: 0 })] };
       });
       const adapter = new N1Adapter(baseConfig());
       await adapter.connect();
@@ -665,7 +665,7 @@ describe("N1Adapter", () => {
       ["malformed row", { items: [trade({ price: Number.NaN })] }, /Malformed N1/],
       ["empty continuation page", { items: [], nextStartInclusive: 2 }, /empty page/],
       ["malformed cursor", { items: [trade()], nextStartInclusive: 1.5 }, /Invalid N1/],
-      ["boundary-mismatched cursor", { items: [trade({ tradeId: 2 })], nextStartInclusive: 1 }, /page boundary/],
+      ["negative cursor", { items: [trade()], nextStartInclusive: -1 }, /Invalid N1/],
       ["wrong-direction page", { items: [trade(), trade({ tradeId: 2 })] }, /Wrong-direction/],
     ])("rejects a %s without publishing partial totals", async (_label, response, message) => {
       fakeNord.getTrades.mockResolvedValue(response);
@@ -677,9 +677,9 @@ describe("N1Adapter", () => {
     it("rejects a repeated cursor", async () => {
       fakeNord.getTrades.mockImplementation(async ({ startInclusive }) => ({
         items: startInclusive === undefined
-          ? [trade({ tradeId: 2 })]
-          : [trade({ tradeId: 2 }), trade()],
-        nextStartInclusive: startInclusive === undefined ? 2 : 1,
+          ? [trade({ tradeId: 4 })]
+          : [trade({ tradeId: 2 })],
+        nextStartInclusive: 3,
       }));
       const adapter = new N1Adapter(baseConfig());
       await adapter.connect();
@@ -688,7 +688,7 @@ describe("N1Adapter", () => {
 
     it("rejects a duplicate-only continuation page", async () => {
       fakeNord.getTrades.mockImplementation(async ({ startInclusive }) => ({
-        items: [trade({ tradeId: startInclusive ?? 2 })],
+        items: [trade({ tradeId: 3 })],
         ...(startInclusive === undefined ? { nextStartInclusive: 2 } : {}),
       }));
       const adapter = new N1Adapter(baseConfig());
@@ -699,8 +699,8 @@ describe("N1Adapter", () => {
     it("rejects safety-cap exhaustion", async () => {
       fakeNord.getTrades.mockImplementation(async ({ startInclusive }) => ({
         items: startInclusive === undefined
-          ? [trade({ tradeId: MAX_ACCOUNT_TRADE_PAGES_PER_STREAM + 1 })]
-          : [trade({ tradeId: startInclusive }), trade({ tradeId: startInclusive - 1 })],
+          ? [trade({ tradeId: MAX_ACCOUNT_TRADE_PAGES_PER_STREAM + 103 })]
+          : [trade({ tradeId: startInclusive + 100 })],
         nextStartInclusive: startInclusive === undefined
           ? MAX_ACCOUNT_TRADE_PAGES_PER_STREAM + 1
           : startInclusive - 1,
