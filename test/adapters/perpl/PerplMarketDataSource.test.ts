@@ -97,6 +97,38 @@ describe("RealPerplMarketDataSource", () => {
     expect(() => source.ingest({ mt: 18, sid: 2000001, sn: 20, d: [] })).toThrow(/non-increasing/);
   });
 
+  it("keeps a successfully snapshotted quiet trade stream healthy without recent executions", async () => {
+    let clock = now; const socket = new Socket();
+    const source = new RealPerplMarketDataSource("https://local.invalid/api", "ws://local", 1_000, async () => response, () => socket, () => clock, () => 0.5);
+    await source.getMarkets(); const pending = source.connect(["1"]); socket.open(); await pending;
+    expect(() => source.getRecentTrades("1")).toThrow(/subscription.*incomplete/);
+    source.ingest({ mt: 6, sn: 1, subs: subscriptions.slice(0, 4) });
+    expect(() => source.getRecentTrades("1")).toThrow(/snapshot.*incomplete/);
+    source.ingest({ mt: 17, sid: 2000001, sn: 1, d: [] });
+    clock += 60_000;
+    expect(source.getRecentTrades("1")).toEqual([]);
+  });
+
+  it("clears cached trades and requires a fresh snapshot after reconnect", async () => {
+    vi.useFakeTimers();
+    try {
+      const sockets: Socket[] = []; const source = new RealPerplMarketDataSource("https://local.invalid/api", "ws://local", 1_000, async () => response, () => { const socket = new Socket(); sockets.push(socket); return socket; }, () => now, () => 0.5);
+      await source.getMarkets(); const pending = source.connect(["1"]); sockets[0]!.open(); await pending;
+      source.ingest({ mt: 6, sn: 1, subs: subscriptions.slice(0, 4) });
+      source.ingest({ mt: 17, sid: 2000001, sn: 2, d: [{ at: { ...at, tx: 6, txid: "8e2dd8da", l: 6 }, p: 629888, s: 329, sd: 2 }] });
+      expect(source.getRecentTrades("1")).toHaveLength(1);
+
+      sockets[0]!.listeners.get("close")?.({});
+      expect(() => source.getRecentTrades("1")).toThrow(/disconnected/);
+      await vi.advanceTimersByTimeAsync(1_000); sockets[1]!.open();
+      source.ingest({ mt: 6, sn: 1, subs: subscriptions.slice(0, 4) });
+      expect(() => source.getRecentTrades("1")).toThrow(/snapshot.*incomplete/);
+      source.ingest({ mt: 17, sid: 2000001, sn: 3, d: [] });
+      expect(source.getRecentTrades("1")).toEqual([]);
+      await source.disconnect();
+    } finally { vi.useRealTimers(); }
+  });
+
   it("clears readiness on disconnect and enforces the corrected subscription cap", async () => {
     const { source } = await connected(); acknowledge(source); source.ingest({ mt: 15, sid: 1000001, sn: 1, at, bid: [{ p: 1000, s: 1, o: 1 }], ask: [{ p: 1010, s: 1, o: 1 }] }); await source.disconnect(); expect(() => source.getOrderBook("1")).toThrow(/disconnected/);
     const many = new RealPerplMarketDataSource("https://local.invalid", "ws://local", 10, async () => ({ ok: true, status: 200, json: async () => ({ markets: Array.from({ length: 8 }, (_, i) => ({ ...context.markets[0], market_id: String(i), symbol: `M${i}` })) }) }) as Response, () => new Socket());

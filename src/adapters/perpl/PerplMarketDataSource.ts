@@ -74,6 +74,7 @@ export class RealPerplMarketDataSource implements PerplMarketDataSource {
   private books = new Map<string, PerplOrderBook>();
   private bookLevels = new Map<string, { bids: Map<bigint, bigint>; asks: Map<bigint, bigint> }>();
   private trades = new Map<string, PerplTrade[]>();
+  private tradeSnapshotsReady = new Set<string>();
   private funding = new Map<string, PerplFunding>();
   private streamSequence = new Map<string, bigint>();
   private invalid = new Map<string, string>();
@@ -123,7 +124,7 @@ export class RealPerplMarketDataSource implements PerplMarketDataSource {
   }
   private clearRealtime(): void {
     this.states.clear(); this.books.clear(); this.bookLevels.clear(); this.trades.clear(); this.funding.clear(); this.streamSequence.clear();
-    this.invalid.clear(); this.acknowledged.clear(); this.sidToStream.clear(); this.chainSid.clear();
+    this.tradeSnapshotsReady.clear(); this.invalid.clear(); this.acknowledged.clear(); this.sidToStream.clear(); this.chainSid.clear();
   }
   private async openSocket(): Promise<void> {
     const generation = ++this.generation; this.clearRealtime();
@@ -238,7 +239,9 @@ export class RealPerplMarketDataSource implements PerplMarketDataSource {
       return { id: `${parsed.block}:${tx}:${txid}:${log === undefined ? "-" : log}`, marketId, takerSide: side === 1 ? "buy" : "sell", price: scaled(trade.p, market.priceDecimals, "trade price"), size: scaled(trade.s, market.sizeDecimals, "trade size"), timestamp: parsed.timestamp, sequence };
     });
     const base = mt === 17 ? [] : (this.trades.get(marketId) ?? []); const byId = new Map(base.map((trade) => [trade.id, trade])); for (const trade of mapped) byId.set(trade.id, trade);
-    this.trades.set(marketId, [...byId.values()].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id)).slice(-1000)); this.invalid.delete(marketId);
+    this.trades.set(marketId, [...byId.values()].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id)).slice(-1000));
+    if (mt === 17) this.tradeSnapshotsReady.add(marketId);
+    this.invalid.delete(marketId);
   }
   private requireFresh<T extends { timestamp: number }>(marketId: string, value: T | undefined, label: string): T {
     if (!this.connected) throw new ExchangeAdapterError("Perpl market data is disconnected"); const reason = this.invalid.get(marketId); if (reason) throw new ExchangeAdapterError(`Perpl market data invalid: ${reason}`);
@@ -247,7 +250,13 @@ export class RealPerplMarketDataSource implements PerplMarketDataSource {
   getMarketState(id: string): PerplMarketState { return this.requireFresh(id, this.states.get(id), "market state"); }
   getOrderBook(id: string): PerplOrderBook { return this.requireFresh(id, this.books.get(id), "order book"); }
   getFunding(id: string): PerplFunding { return this.requireFresh(id, this.funding.get(id), "funding"); }
-  getRecentTrades(id: string, after?: { timestamp: number; ids: ReadonlySet<string> }): PerplTrade[] { const all = this.trades.get(id); const latest = all?.at(-1); this.requireFresh(id, latest, "trades"); return (all ?? []).filter((trade) => !after || trade.timestamp > after.timestamp || (trade.timestamp === after.timestamp && !after.ids.has(trade.id))); }
+  getRecentTrades(id: string, after?: { timestamp: number; ids: ReadonlySet<string> }): PerplTrade[] {
+    if (!this.connected) throw new ExchangeAdapterError("Perpl market data is disconnected");
+    const reason = this.invalid.get(id); if (reason) throw new ExchangeAdapterError(`Perpl market data invalid: ${reason}`);
+    if (!this.acknowledged.has(`trades@${id}`)) throw new ExchangeAdapterError("Perpl trades subscription is incomplete");
+    if (!this.tradeSnapshotsReady.has(id)) throw new ExchangeAdapterError("Perpl trades snapshot is incomplete");
+    return (this.trades.get(id) ?? []).filter((trade) => !after || trade.timestamp > after.timestamp || (trade.timestamp === after.timestamp && !after.ids.has(trade.id)));
+  }
   async getCandles(marketId: string, params: { interval: string; fromMs: number; toMs: number }): Promise<PerplCandle[]> {
     if (!this.markets.has(marketId)) throw new ExchangeAdapterError("Perpl candle market was not discovered"); const raw = await this.json(`v1/market-data/${marketId}/candles/${params.interval}/${params.fromMs}-${params.toMs}`);
     const list = Array.isArray(raw) ? raw : (record(raw, "candles").data ?? record(raw, "candles").candles); if (!Array.isArray(list)) throw new ExchangeAdapterError("Perpl candles are malformed");
