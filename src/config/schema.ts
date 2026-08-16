@@ -45,7 +45,7 @@ export const marketConfigSchema = z
     // (SPEC.md Section 11, src/adapters/risex/), the real second exchange. Adding either here is
     // the one expected, SPEC-sanctioned touchpoint outside the adapter's own directory; nothing in
     // src/engine/, src/dashboard/, or src/paperRunner/ needs to know these literals exist.
-    exchange: z.enum(["n1", "stub", "risex"]),
+    exchange: z.enum(["n1", "stub", "risex", "perpl"]),
     exchangeSymbol: z.string().min(1),
     enabled: z.boolean(),
     orderSize: orderSizeSchema,

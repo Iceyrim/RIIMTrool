@@ -122,6 +122,17 @@ describe("buildDashboardStatus", () => {
     expect(status.totalExposureUsd).toBeCloseTo(0.002 * 60000 + 1 * 3000);
   });
 
+  it("labels Perpl PAPER and isolates identical symbols by exchangeId", async () => {
+    const perpl = new FakeExchangeAdapter();
+    Object.defineProperty(perpl, "exchangeId", { value: "perpl-paper" });
+    perpl.marketPrices.set("BTCUSD", { market: "BTCUSD", mark: 60_000, index: 60_000 });
+    const n1 = await buildMarket("BTCUSD", adapter);
+    const perplMarket = await buildMarket("BTCUSD", perpl);
+    const status = buildDashboardStatus([n1, perplMarket]);
+    expect(status.accounts.find((account) => account.exchangeId === "perpl-paper")?.label).toBe("Perpl PAPER");
+    expect(status.markets.filter((market) => market.market === "BTCUSD").map((market) => market.exchangeId)).toEqual(["fake", "perpl-paper"]);
+  });
+
   it("surfaces reconciliation anomalies and a degraded status without touching the exchange", async () => {
     const market = await buildMarket("BTCUSD", adapter);
     adapter.openOrders.push({

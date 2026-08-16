@@ -72,7 +72,7 @@ export interface MarketStatus {
 
 export interface DashboardAccountStatus {
   exchangeId: string;
-  venue: "N1" | "RISEx" | "Unknown";
+  venue: "N1" | "RISEx" | "Perpl" | "Unknown";
   mode: "LIVE" | "PAPER" | "UNKNOWN";
   label: string;
   balances: DashboardMetric<NormalizedBalance[]>;
@@ -117,6 +117,9 @@ function venueMode(exchangeId: string): Pick<DashboardAccountStatus, "venue" | "
   if (exchangeId === "risex") return { venue: "RISEx", mode: "LIVE", label: "RISEx LIVE" };
   if (exchangeId === "risex-paper") {
     return { venue: "RISEx", mode: "PAPER", label: "RISEx PAPER" };
+  }
+  if (exchangeId === "perpl-paper") {
+    return { venue: "Perpl", mode: "PAPER", label: "Perpl PAPER" };
   }
   return { venue: "Unknown", mode: "UNKNOWN", label: exchangeId };
 }

@@ -1,0 +1,26 @@
+# Perpl public-data validation; execution and all account state remain local paper simulation.
+accountRisk:
+  sessionLossCapUsd: 6
+markets:
+  - symbol: BTCUSD
+    exchange: perpl
+    exchangeSymbol: BTC-PERP
+    enabled: true
+    orderSize: { min: 0.00155, max: 0.00232 }
+    spreadBps: { normal: 5, min: 4, max: 7.5 }
+    exitSpreadBps: 2.5
+    quoteLevels: 5
+    levelSpacingBps: [2, 3, 4, 7, 10]
+    inventoryReductionThresholdBase: 0.003
+    riskLimits: { maxLongPosition: 0.005, maxShortPosition: 0.005, maxOrderSize: 0.0025, maxOrderNotionalUsd: 160, maxOpenOrders: 12 }
+  - symbol: ETHUSD
+    exchange: perpl
+    exchangeSymbol: ETH-PERP
+    enabled: true
+    orderSize: { min: 0.045, max: 0.068 }
+    spreadBps: { normal: 5, min: 4, max: 7.5 }
+    exitSpreadBps: 2.5
+    quoteLevels: 5
+    levelSpacingBps: [2, 3, 4, 7, 10]
+    inventoryReductionThresholdBase: 0.09
+    riskLimits: { maxLongPosition: 0.15, maxShortPosition: 0.15, maxOrderSize: 0.075, maxOrderNotionalUsd: 160, maxOpenOrders: 12 }

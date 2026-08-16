@@ -17,7 +17,7 @@ describe("dashboard static safety", () => {
   const source = readFileSync(new URL("../../src/dashboard/dashboard.html", import.meta.url), "utf8");
 
   it("uses only the approved cached venue filters and no unsafe HTML interpolation", () => {
-    expect(source.match(/<option value="(?:n1-live|risex-paper)">/g)).toHaveLength(2);
+    expect(source.match(/<option value="(?:n1-live|risex-paper|perpl-paper)">/g)).toHaveLength(3);
     expect(source).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
   });
 

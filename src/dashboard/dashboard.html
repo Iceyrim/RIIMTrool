@@ -26,7 +26,7 @@
       </aside>
       <div class="mobile-bar"><strong>QuantaBot</strong><select class="mobile-nav" id="mobile-nav" aria-label="Mobile navigation"><option value="dashboard">Dashboard</option><option value="positions-orders">Positions &amp; Orders</option><option value="history">History</option><option value="alerts">Alerts</option><option value="settings">Settings</option></select></div>
       <main>
-        <header class="top"><div><span class="eyebrow">Read-only telemetry</span><h1 id="view-heading">Dashboard</h1><p class="subtitle" id="view-subtitle">Multi-market market-making overview</p></div><div class="tools"><span class="sync" id="sync">Last sync: loading…</span><select class="dex" id="dex" aria-label="Filter cached telemetry by DEX"><option value="n1-live">N1 LIVE</option><option value="risex-paper">RISEx PAPER</option></select><span class="alert-indicator" id="alert-indicator" role="status" aria-label="Alert status">●</span></div></header>
+        <header class="top"><div><span class="eyebrow">Read-only telemetry</span><h1 id="view-heading">Dashboard</h1><p class="subtitle" id="view-subtitle">Multi-market market-making overview</p></div><div class="tools"><span class="sync" id="sync">Last sync: loading…</span><select class="dex" id="dex" aria-label="Filter cached telemetry by DEX"><option value="n1-live">N1 LIVE</option><option value="risex-paper">RISEx PAPER</option><option value="perpl-paper">Perpl PAPER</option></select><span class="alert-indicator" id="alert-indicator" role="status" aria-label="Alert status">●</span></div></header>
         <div id="error" role="alert"></div>
         <div class="view" data-view-panel="dashboard">
         <section class="section"><div class="section-head"><h2>Account</h2><span id="account-label">Cached account snapshot</span></div><div class="grid metrics" id="account-metrics"></div></section>
@@ -51,7 +51,7 @@
       const number=(v,d=4)=>Number.isFinite(v)?Number(v).toLocaleString(undefined,{maximumFractionDigits:d}):"Unavailable";
       const age=ms=>{const s=Math.max(0,Math.floor(ms/1000));return s<60?`${s}s`:s<3600?`${Math.floor(s/60)}m`:`${Math.floor(s/3600)}h`};
       const venue=a=>a?`${a.venue} ${a.mode}`:"Unavailable";
-      const selectedAccount=status=>status.accounts.find(a=>$("dex").value==="n1-live"?a.venue==="N1"&&a.mode==="LIVE":a.venue==="RISEx"&&a.mode==="PAPER");
+      const selectedAccount=status=>status.accounts.find(a=>a.exchangeId===({"n1-live":"n1","risex-paper":"risex-paper","perpl-paper":"perpl-paper"}[$("dex").value]));
       const selectedMarkets=status=>{const a=selectedAccount(status);return a?status.markets.filter(m=>m.exchangeId===a.exchangeId):[]};
       function reason(metric,fallback){return metric&&!metric.available?metric.sourceNeeded:fallback}
       function metric(parent,label,value,detail,className=""){const box=node("article","card metric-card");box.append(node("span","label",label),node("strong",`value ${className}`,value));if(detail)box.append(node("span","reason",detail));parent.append(box)}

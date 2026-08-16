@@ -34,6 +34,11 @@ describe("loadMarketsConfig", () => {
     expect(config.markets.map((m) => m.symbol)).toEqual(["BTCUSD", "ETHUSD"]);
   });
 
+  it("admits the shipped Perpl paper-only validation config", () => {
+    const config = loadMarketsConfig(join(process.cwd(), "config", "markets.perpl-validation.yaml"));
+    expect(config.markets.every((market) => market.exchange === "perpl")).toBe(true);
+  });
+
   it("loads a valid minimal config", () => {
     const config = loadMarketsConfig(writeTempConfig(validYaml));
     expect(config.markets).toHaveLength(1);
