@@ -38,6 +38,11 @@ describe("dashboard static safety", () => {
     expect(source).toContain("money(Math.abs(o.size*o.price))");
   });
 
+  it("labels confirmed-fill size in USD and derives notional without changing cached base size", () => {
+    expect(source).toMatch(/Trade history[\s\S]*<th>SIZE \(USD\)<\/th>/);
+    expect(source).toContain("money(Math.abs(f.size*f.price))");
+  });
+
   it("owns content in five client-side views while preserving filters and locked settings", () => {
     for (const view of ["dashboard", "positions-orders", "history", "alerts", "settings"]) {
       expect(source).toContain(`data-view-panel="${view}"`);
@@ -48,7 +53,11 @@ describe("dashboard static safety", () => {
     expect(source).toMatch(/data-view-panel="alerts"[\s\S]*Telegram \/ operational health/);
     expect(source).toMatch(/data-view-panel="settings"[\s\S]*Settings are read-only placeholders/);
     expect(source).toContain('id="dex"');
-    expect(source).toContain('data-range="1d"');
+    expect(source).toMatch(/<header class="top">[\s\S]*id="dex"[\s\S]*id="alert-indicator"[\s\S]*<\/header>/);
+    expect(source).toMatch(/id="volume-metrics"[\s\S]*aria-label="Account PnL and Volume chart timeframe"[\s\S]*Account PnL[\s\S]*>Volume</);
+    for (const range of ["24h", "7d", "30d"]) expect(source).toContain(`data-range="${range}"`);
+    expect(source).toContain('data-range="allTime" disabled aria-describedby="all-time-limit"');
+    expect(source).toContain("ALL TIME unavailable — durable chart history retains at most 90 days.");
     expect(source).toContain('type="button" disabled>Editing locked</button>');
   });
 

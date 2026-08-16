@@ -58,6 +58,44 @@ describe("DashboardTelemetry", () => {
     ]);
   });
 
+  it("publishes all windows atomically and marks every complete cached total stale on failure", async () => {
+    const adapter = new FakeExchangeAdapter();
+    const read = vi.spyOn(adapter, "getAccountVolume")
+      .mockResolvedValueOnce([{ market: "BTCUSD", since: "s", until: "u", baseVolume: 1, quoteVolume: 1 }])
+      .mockResolvedValueOnce([{ market: "BTCUSD", since: "s", until: "u", baseVolume: 2, quoteVolume: 2 }])
+      .mockResolvedValueOnce([{ market: "BTCUSD", since: "s", until: "u", baseVolume: 3, quoteVolume: 3 }])
+      .mockResolvedValueOnce([{ market: "BTCUSD", since: "s", until: "u", baseVolume: 4, quoteVolume: 4 }]);
+    const telemetry = new DashboardTelemetry(adapter, true);
+    telemetry.refreshIfDue(1_000_000);
+    await vi.waitFor(() => expect(telemetry.snapshot().volumes.allTime.available).toBe(true));
+
+    read.mockRejectedValue(new Error("incomplete scan"));
+    telemetry.refreshIfDue(1_300_000);
+    await vi.waitFor(() => expect(telemetry.snapshot().volumes["24h"].stale).toBe(true));
+
+    for (const window of ["24h", "7d", "30d", "allTime"] as const) {
+      const cached = telemetry.snapshot().volumes[window];
+      expect(cached.available).toBe(true);
+      expect(cached.stale).toBe(true);
+      expect(cached.error).toContain("incomplete scan");
+    }
+  });
+
+  it("publishes no window when ordering validation fails and reports unavailable without a prior cache", async () => {
+    const adapter = new FakeExchangeAdapter();
+    const totals = [2, 1, 3, 4];
+    vi.spyOn(adapter, "getAccountVolume").mockImplementation(async () => {
+      const quoteVolume = totals.shift()!;
+      return [{ market: "BTCUSD", since: "s", until: "u", baseVolume: 1, quoteVolume }];
+    });
+    const telemetry = new DashboardTelemetry(adapter, true);
+    telemetry.refreshIfDue(1_000_000);
+    await vi.waitFor(() => expect(telemetry.snapshot().volumes["24h"].error).toContain("ordering"));
+    for (const window of ["24h", "7d", "30d", "allTime"] as const) {
+      expect(telemetry.snapshot().volumes[window]).toMatchObject({ available: false, stale: false, value: null });
+    }
+  });
+
   it("records at most one runner-owned account sample every five minutes", () => {
     const store = new DashboardHistoryStore(mkdtempSync(`${tmpdir()}/riimtrool-telemetry-`), "n1-paper");
     const telemetry = new DashboardTelemetry(new FakeExchangeAdapter(), false, 100, store);

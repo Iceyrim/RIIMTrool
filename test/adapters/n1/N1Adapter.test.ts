@@ -29,7 +29,7 @@ vi.mock("@n1xyz/nord-ts", async (importOriginal) => {
 
 // Imported after vi.mock so N1Adapter picks up the mocked SDK exports above.
 const { FillMode, Side } = await import("@n1xyz/nord-ts");
-const { N1Adapter } = await import("../../../src/adapters/n1/N1Adapter.js");
+const { MAX_ACCOUNT_TRADE_PAGES_PER_STREAM, N1Adapter } = await import("../../../src/adapters/n1/N1Adapter.js");
 
 const MARKET = "BTCUSD";
 const MARKET_ID = 0;
@@ -41,6 +41,7 @@ interface FakeNordInstance {
   getOrderTrades: ReturnType<typeof vi.fn>;
   getMarketStats: ReturnType<typeof vi.fn>;
   getAccountVolume: ReturnType<typeof vi.fn>;
+  getTrades: ReturnType<typeof vi.fn>;
   getTimestamp: ReturnType<typeof vi.fn>;
 }
 
@@ -69,6 +70,7 @@ function makeFakeNord(overrides: Partial<FakeNordInstance> = {}): FakeNordInstan
     getOrderTrades: vi.fn(),
     getMarketStats: vi.fn(),
     getAccountVolume: vi.fn(),
+    getTrades: vi.fn(),
     getTimestamp: vi.fn().mockResolvedValue(FAKE_NOW_SEC),
     ...overrides,
   };
@@ -616,43 +618,22 @@ describe("N1Adapter", () => {
   });
 
   describe("getAccountVolume", () => {
-    it("scopes the query by marketId and maps rows back to logical symbols", async () => {
-      fakeNord.getAccountVolume.mockResolvedValue([
-        { marketId: MARKET_ID, volumeBase: 1.5, volumeQuote: 90000 },
-      ]);
-      const adapter = new N1Adapter(baseConfig());
-      await adapter.connect();
-
-      const rows = await adapter.getAccountVolume({
-        market: MARKET,
-        since: "2026-01-01T00:00:00Z",
-        until: "2026-01-02T00:00:00Z",
-      });
-
-      expect(fakeNord.getAccountVolume).toHaveBeenCalledWith(
-        expect.objectContaining({
-          accountId: ACCOUNT_ID,
-          marketId: MARKET_ID,
-          marketIds: [MARKET_ID],
-        }),
-      );
-      expect(rows).toEqual([
-        {
-          market: MARKET,
-          marketId: MARKET_ID,
-          since: "2026-01-01T00:00:00Z",
-          until: "2026-01-02T00:00:00Z",
-          baseVolume: 1.5,
-          quoteVolume: 90000,
-        },
-      ]);
+    const trade = (overrides: Record<string, unknown> = {}) => ({
+      time: "2026-01-01T12:00:00.000Z", actionId: 1, tradeId: 1,
+      takerId: 99, takerSide: "bid", makerId: ACCOUNT_ID, marketId: MARKET_ID,
+      marketMode: "clob", orderId: 10, price: 100, baseSize: 2, ...overrides,
     });
 
-    it("preserves authoritative totals and IDs for mixed known and historical unknown markets", async () => {
-      fakeNord.getAccountVolume.mockResolvedValue([
-        { marketId: MARKET_ID, volumeBase: 1.5, volumeQuote: 90000 },
-        { marketId: 404, volumeBase: 2, volumeQuote: 125000 },
-      ]);
+    it("paginates maker and taker streams, deduplicates tradeIds, filters [since, until), and preserves unknown markets", async () => {
+      fakeNord.getTrades.mockImplementation(async ({ makerId, startInclusive }) => {
+        if (makerId !== undefined && startInclusive === undefined) {
+          return { items: [trade(), trade({ tradeId: 2, time: "2026-01-01T00:00:00.000Z", price: 50, baseSize: 1 })], nextStartInclusive: 3 };
+        }
+        if (makerId !== undefined) {
+          return { items: [trade({ tradeId: 3, marketId: 404, price: 25, baseSize: 4 })] };
+        }
+        return { items: [trade(), trade({ tradeId: 4, takerId: ACCOUNT_ID, makerId: 88, time: "2026-01-02T00:00:00.000Z" })] };
+      });
       const adapter = new N1Adapter(baseConfig());
       await adapter.connect();
 
@@ -662,23 +643,45 @@ describe("N1Adapter", () => {
       });
 
       expect(rows).toEqual([
-        expect.objectContaining({ market: MARKET, marketId: MARKET_ID, quoteVolume: 90000 }),
-        expect.objectContaining({ market: null, marketId: 404, quoteVolume: 125000 }),
+        expect.objectContaining({ market: MARKET, marketId: MARKET_ID, baseVolume: 3, quoteVolume: 250 }),
+        expect.objectContaining({ market: null, marketId: 404, baseVolume: 4, quoteVolume: 100 }),
       ]);
-      expect(rows.reduce((sum, row) => sum + row.baseVolume, 0)).toBe(3.5);
-      expect(rows.reduce((sum, row) => sum + row.quoteVolume, 0)).toBe(215000);
+      expect(fakeNord.getTrades).toHaveBeenCalledTimes(3);
+      expect(fakeNord.getTrades).toHaveBeenCalledWith(expect.objectContaining({ makerId: ACCOUNT_ID, pageSize: 50, paginationMode: "tradeId" }));
+      expect(fakeNord.getAccountVolume).not.toHaveBeenCalled();
     });
 
-    it("passes an empty marketIds array when no market is specified (account-wide query)", async () => {
-      fakeNord.getAccountVolume.mockResolvedValue([]);
+    it("single-flights and caches one complete scan across concurrent volume windows", async () => {
+      fakeNord.getTrades.mockResolvedValue({ items: [trade()] });
       const adapter = new N1Adapter(baseConfig());
       await adapter.connect();
+      const until = "2026-01-02T00:00:00Z";
+      await Promise.all(["2026-01-01T00:00:00Z", "2025-12-01T00:00:00Z", "1970-01-01T00:00:00Z"]
+        .map((since) => adapter.getAccountVolume({ since, until })));
+      expect(fakeNord.getTrades).toHaveBeenCalledTimes(2);
+    });
 
-      await adapter.getAccountVolume({ since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z" });
+    it.each([
+      ["malformed row", { items: [trade({ price: Number.NaN })] }, /Malformed N1/],
+      ["empty continuation page", { items: [], nextStartInclusive: 2 }, /empty page/],
+      ["repeated cursor", { items: [trade()], nextStartInclusive: 1 }, /repeated/],
+    ])("rejects a %s without publishing partial totals", async (_label, response, message) => {
+      fakeNord.getTrades.mockResolvedValue(response);
+      const adapter = new N1Adapter(baseConfig());
+      await adapter.connect();
+      await expect(adapter.getAccountVolume({ since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z" })).rejects.toThrow(message);
+    });
 
-      expect(fakeNord.getAccountVolume).toHaveBeenCalledWith(
-        expect.objectContaining({ marketId: undefined, marketIds: [] }),
-      );
+    it("rejects safety-cap exhaustion", async () => {
+      fakeNord.getTrades.mockImplementation(async ({ startInclusive }) => ({
+        items: [trade({ tradeId: startInclusive ?? 0 })],
+        nextStartInclusive: (startInclusive ?? 0) + 1,
+      }));
+      const adapter = new N1Adapter(baseConfig());
+      await adapter.connect();
+      await expect(adapter.getAccountVolume({ since: "1970-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z" }))
+        .rejects.toThrow(`${MAX_ACCOUNT_TRADE_PAGES_PER_STREAM}-page safety cap`);
+      expect(fakeNord.getTrades).toHaveBeenCalledTimes(MAX_ACCOUNT_TRADE_PAGES_PER_STREAM);
     });
   });
 });

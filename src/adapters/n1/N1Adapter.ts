@@ -1,5 +1,6 @@
 import "../../utils/polyfills.js";
 import { Nord, NordUser, Side } from "@n1xyz/nord-ts";
+import type { TradeFromApi } from "@n1xyz/nord-ts";
 import { Connection } from "@solana/web3.js";
 import type {
   AccountVolume,
@@ -44,6 +45,16 @@ export interface N1AdapterConfig {
  * refreshAccountState(), so there is no cost to erring on the early side. */
 const SESSION_REFRESH_MARGIN_SEC = 3600n;
 const MAX_CLIENT_ORDER_ID = 2n ** 63n;
+const ACCOUNT_TRADES_PAGE_SIZE = 50;
+/** Hard telemetry-only bound: at most 1,000 pages per maker/taker stream (100,000 rows before
+ * cross-stream tradeId deduplication). Hitting it rejects the entire scan; partial totals are
+ * never returned or cached. */
+export const MAX_ACCOUNT_TRADE_PAGES_PER_STREAM = 1_000;
+
+interface AccountTradeScan {
+  until: string;
+  trades: readonly TradeFromApi[];
+}
 
 /** Walks an Error's `.cause` chain (bounded depth) and joins every message into one string, so a
  * doubly-wrapped SDK error (e.g. nord-ts's own `NordError("Failed to place order", { cause })`)
@@ -84,6 +95,8 @@ export class N1Adapter implements ExchangeAdapter {
    * session, or undefined if no session has ever been established yet. Tracked so ensureSession()
    * can decide when to proactively renew without re-deriving it from the SDK each time. */
   private sessionExpiresAtSec?: bigint;
+  private accountTradeScan?: AccountTradeScan;
+  private accountTradeScanInFlight?: Promise<AccountTradeScan>;
 
   constructor(private readonly config: N1AdapterConfig) {
     this.registry = new MarketRegistry(config.markets);
@@ -350,25 +363,100 @@ export class N1Adapter implements ExchangeAdapter {
     until: string;
   }): Promise<AccountVolume[]> {
     this.assertConnected();
-    const marketId = params.market ? this.registry.marketIdFor(params.market) : undefined;
-    const rows = await this.nord!.getAccountVolume({
-      accountId: this.accountId!,
-      since: params.since,
-      until: params.until,
+    const sinceMs = Date.parse(params.since);
+    const untilMs = Date.parse(params.until);
+    if (!Number.isFinite(sinceMs) || !Number.isFinite(untilMs) || sinceMs > untilMs) {
+      throw new ExchangeAdapterError("Invalid N1 account-volume time window");
+    }
+    const requestedMarketId = params.market ? this.registry.marketIdFor(params.market) : undefined;
+    const scan = await this.getCompleteAccountTradeScan(params.until);
+    const totals = new Map<number, { base: number; quote: number }>();
+    for (const trade of scan.trades) {
+      const timeMs = Date.parse(trade.time);
+      if (timeMs < sinceMs || timeMs >= untilMs) continue;
+      if (requestedMarketId !== undefined && trade.marketId !== requestedMarketId) continue;
+      const current = totals.get(trade.marketId) ?? { base: 0, quote: 0 };
+      current.base += Math.abs(trade.baseSize);
+      current.quote += Math.abs(trade.baseSize) * trade.price;
+      if (!Number.isFinite(current.base) || !Number.isFinite(current.quote)) {
+        throw new ExchangeAdapterError(`Non-finite N1 volume total for marketId ${trade.marketId}`);
+      }
+      totals.set(trade.marketId, current);
+    }
+    return [...totals.entries()].sort(([a], [b]) => a - b).map(([marketId, total]) => ({
+      market: this.registry.symbolForVolume(marketId),
       marketId,
-      // GetAccountVolumeQuery's type requires marketIds even though Nord.getAccountVolume only
-      // actually destructures the deprecated singular `marketId` at runtime — the SDK's type
-      // and its own implementation disagree here. Passing an empty array satisfies the type
-      // without changing behavior.
-      marketIds: marketId !== undefined ? [marketId] : [],
-    });
-    return rows.map((row) => ({
-      market: this.registry.symbolForVolume(row.marketId),
-      marketId: row.marketId,
       since: params.since,
       until: params.until,
-      baseVolume: row.volumeBase,
-      quoteVolume: row.volumeQuote,
+      baseVolume: total.base,
+      quoteVolume: total.quote,
     }));
+  }
+
+  private getCompleteAccountTradeScan(until: string): Promise<AccountTradeScan> {
+    if (this.accountTradeScan?.until === until) return Promise.resolve(this.accountTradeScan);
+    if (this.accountTradeScanInFlight) return this.accountTradeScanInFlight.then((scan) => {
+      if (scan.until !== until) return this.getCompleteAccountTradeScan(until);
+      return scan;
+    });
+    const scan = this.scanAccountTrades(until);
+    this.accountTradeScanInFlight = scan;
+    void scan.then((complete) => { this.accountTradeScan = complete; }, () => undefined)
+      .finally(() => { if (this.accountTradeScanInFlight === scan) this.accountTradeScanInFlight = undefined; });
+    return scan;
+  }
+
+  private async scanAccountTrades(until: string): Promise<AccountTradeScan> {
+    const byTradeId = new Map<number, TradeFromApi>();
+    for (const role of ["makerId", "takerId"] as const) {
+      let cursor: number | undefined;
+      const seenCursors = new Set<number>();
+      let exhausted = false;
+      for (let pageNumber = 0; pageNumber < MAX_ACCOUNT_TRADE_PAGES_PER_STREAM; pageNumber++) {
+        const response = await this.nord!.getTrades({
+          [role]: this.accountId!,
+          since: new Date(0).toISOString(),
+          until,
+          pageSize: ACCOUNT_TRADES_PAGE_SIZE,
+          startInclusive: cursor,
+          paginationMode: "tradeId",
+        });
+        if (!response || !Array.isArray(response.items)) {
+          throw new ExchangeAdapterError(`Malformed N1 ${role} trade page`);
+        }
+        for (const trade of response.items) {
+          if (!this.isValidAccountTrade(trade)) {
+            throw new ExchangeAdapterError(`Malformed N1 ${role} trade row`);
+          }
+          byTradeId.set(trade.tradeId, trade);
+        }
+        const next = response.nextStartInclusive ?? undefined;
+        if (next === undefined) { exhausted = true; break; }
+        if (!Number.isSafeInteger(next) || next < 0 || seenCursors.has(next) || (cursor !== undefined && next <= cursor)) {
+          throw new ExchangeAdapterError(`Invalid or repeated N1 ${role} trade cursor ${String(next)}`);
+        }
+        if (response.items.length === 0) {
+          throw new ExchangeAdapterError(`Incomplete N1 ${role} trade scan: empty page has a continuation cursor`);
+        }
+        seenCursors.add(next);
+        cursor = next;
+      }
+      if (!exhausted) {
+        throw new ExchangeAdapterError(
+          `Incomplete N1 ${role} trade scan: exceeded ${MAX_ACCOUNT_TRADE_PAGES_PER_STREAM}-page safety cap`,
+        );
+      }
+    }
+    return { until, trades: [...byTradeId.values()].sort((a, b) => a.tradeId - b.tradeId) };
+  }
+
+  private isValidAccountTrade(trade: TradeFromApi): boolean {
+    return Number.isSafeInteger(trade.tradeId) && trade.tradeId >= 0
+      && Number.isSafeInteger(trade.marketId) && trade.marketId >= 0
+      && Number.isFinite(Date.parse(trade.time))
+      && Number.isFinite(trade.price) && trade.price >= 0
+      && Number.isFinite(trade.baseSize) && trade.baseSize >= 0
+      && Number.isSafeInteger(trade.makerId) && Number.isSafeInteger(trade.takerId)
+      && (trade.makerId === this.accountId || trade.takerId === this.accountId);
   }
 }

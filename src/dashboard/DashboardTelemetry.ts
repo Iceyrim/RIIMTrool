@@ -38,7 +38,6 @@ export class DashboardTelemetry {
   private readonly volumes = new Map<VolumeWindow, VolumeTelemetry>();
   private refreshInFlight = false;
   private nextRefreshAt = 0;
-  private nextAllTimeAt = 0;
   private nextAccountSampleAt = 0;
   private failureCount = 0;
 
@@ -86,8 +85,7 @@ export class DashboardTelemetry {
   refreshIfDue(now = Date.now()): void {
     if (this.refreshInFlight || now < this.nextRefreshAt) return;
     this.refreshInFlight = true;
-    const includeAllTime = this.supportsAllTime && now >= this.nextAllTimeAt;
-    void this.refresh(now, includeAllTime).finally(() => { this.refreshInFlight = false; });
+    void this.refresh(now).finally(() => { this.refreshInFlight = false; });
   }
 
   snapshot(now = Date.now()): DashboardTelemetrySnapshot {
@@ -113,9 +111,9 @@ export class DashboardTelemetry {
     });
   }
 
-  private async refresh(now: number, includeAllTime: boolean): Promise<void> {
+  private async refresh(now: number): Promise<void> {
     const until = new Date(now).toISOString();
-    const requested: VolumeWindow[] = [...WINDOWS, ...(includeAllTime ? ["allTime" as const] : [])];
+    const requested: VolumeWindow[] = [...WINDOWS, ...(this.supportsAllTime ? ["allTime" as const] : [])];
     const reads = requested.map((window) => this.adapter.getAccountVolume({
       since: new Date(window === "allTime" ? 0 : now - WINDOW_MS[window]).toISOString(),
       until,
@@ -128,38 +126,32 @@ export class DashboardTelemetry {
         allReads,
         new Promise<never>((_, reject) => { timer = setTimeout(() => { timedOut = true; reject(new Error("volume refresh timed out after 5000ms")); }, TIMEOUT_MS); }),
       ]);
-      let failed = false;
-      requested.forEach((window, index) => {
-        const result = results[index]!;
-        if (result.status === "fulfilled") {
-          this.volumes.set(window, { available: true, value: result.value, updatedAt: now, stale: false });
-          return;
-        }
-        failed = true;
-        const message = String(result.reason);
-        const previous = this.volumes.get(window)!;
-        this.volumes.set(window, window === "allTime"
-          ? this.unavailable(`All-time volume unavailable: ${message}`, message)
-          : previous.available ? { ...previous, stale: true, error: message } : this.unavailable(`${window} volume unavailable: ${message}`, message));
+      const rejected = results.find((result) => result.status === "rejected");
+      if (rejected?.status === "rejected") throw rejected.reason;
+      const complete = results.map((result) => {
+        if (result.status !== "fulfilled") throw new Error("volume read did not complete");
+        return result.value;
       });
-      this.failureCount = failed ? this.failureCount + 1 : 0;
-      this.nextRefreshAt = now + (failed
-        ? Math.min(ONE_HOUR, FIVE_MINUTES * 2 ** Math.min(this.failureCount - 1, 4))
-        : FIVE_MINUTES);
-      if (includeAllTime) this.nextAllTimeAt = now + ONE_HOUR;
+      const totals = complete.map((rows) => rows.reduce((sum, row) => sum + row.quoteVolume, 0));
+      if (totals.some((total) => !Number.isFinite(total) || total < 0)
+        || totals.some((total, index) => index > 0 && total < totals[index - 1]!)) {
+        throw new Error("volume scan violated 24H <= 7D <= 30D <= All Time ordering");
+      }
+      requested.forEach((window, index) => {
+        this.volumes.set(window, { available: true, value: complete[index]!, updatedAt: now, stale: false });
+      });
+      this.failureCount = 0;
+      this.nextRefreshAt = now + FIVE_MINUTES;
     } catch (error) {
       const message = String(error);
       for (const window of requested) {
         const previous = this.volumes.get(window)!;
-        this.volumes.set(window, window === "allTime"
-          ? this.unavailable(`All-time volume unavailable: ${message}`, message)
-          : previous.available
+        this.volumes.set(window, previous.available
           ? { ...previous, stale: true, error: message }
           : this.unavailable(`${window} volume unavailable: ${message}`, message));
       }
       this.failureCount++;
       this.nextRefreshAt = now + Math.min(ONE_HOUR, FIVE_MINUTES * 2 ** Math.min(this.failureCount - 1, 4));
-      if (includeAllTime) this.nextAllTimeAt = now + ONE_HOUR;
     } finally {
       if (timer) clearTimeout(timer);
       // A timeout reports failure at five seconds, but the single-flight gate remains held until
