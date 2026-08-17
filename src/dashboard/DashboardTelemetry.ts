@@ -10,6 +10,7 @@ export interface VolumeTelemetry {
   value: AccountVolume[] | null;
   updatedAt?: number;
   stale: boolean;
+  partial?: boolean;
   error?: string;
   sourceNeeded?: string;
 }
@@ -41,6 +42,9 @@ export class DashboardTelemetry {
   private nextAllTimeAt = 0;
   private nextAccountSampleAt = 0;
   private failureCount = 0;
+  private readonly tradeCache = new Map<string, TradeLogEntry & { tradeId?: string }>();
+  private tradeCursor?: string;
+  private tradeSince = new Date(0).toISOString();
 
   constructor(
     private readonly adapter: ExchangeAdapter,
@@ -114,59 +118,80 @@ export class DashboardTelemetry {
   }
 
   private async refresh(now: number, includeAllTime: boolean): Promise<void> {
+    if (this.adapter.getAccountTradeHistoryPage) {
+      await this.refreshFromTradeHistory(now, includeAllTime);
+      return;
+    }
     const until = new Date(now).toISOString();
     const requested: VolumeWindow[] = [...WINDOWS, ...(includeAllTime ? ["allTime" as const] : [])];
-    const reads = requested.map((window) => this.adapter.getAccountVolume({
-      since: new Date(window === "allTime" ? 0 : now - WINDOW_MS[window]).toISOString(),
-      until,
+    const results = await Promise.all(requested.map(async (window) => {
+      try {
+        const value = await this.withDeadline(this.adapter.getAccountVolume({
+          since: new Date(window === "allTime" ? 0 : now - WINDOW_MS[window]).toISOString(), until,
+        }));
+        return { window, value } as const;
+      } catch (error) { return { window, error } as const; }
     }));
-    const allReads = Promise.allSettled(reads);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let timedOut = false;
-    try {
-      const results = await Promise.race([
-        allReads,
-        new Promise<never>((_, reject) => { timer = setTimeout(() => { timedOut = true; reject(new Error("volume refresh timed out after 5000ms")); }, TIMEOUT_MS); }),
-      ]);
-      let failed = false;
-      requested.forEach((window, index) => {
-        const result = results[index]!;
-        if (result.status === "fulfilled") {
-          this.volumes.set(window, { available: true, value: result.value, updatedAt: now, stale: false });
-          return;
-        }
+    let failed = false;
+    for (const result of results) {
+      if ("value" in result) this.volumes.set(result.window, { available: true, value: result.value, updatedAt: now, stale: false });
+      else {
         failed = true;
-        const message = String(result.reason);
-        const previous = this.volumes.get(window)!;
-        this.volumes.set(window, window === "allTime"
-          ? this.unavailable(`All-time volume unavailable: ${message}`, message)
-          : previous.available ? { ...previous, stale: true, error: message } : this.unavailable(`${window} volume unavailable: ${message}`, message));
-      });
-      this.failureCount = failed ? this.failureCount + 1 : 0;
-      this.nextRefreshAt = now + (failed
-        ? Math.min(ONE_HOUR, FIVE_MINUTES * 2 ** Math.min(this.failureCount - 1, 4))
-        : FIVE_MINUTES);
+        const previous = this.volumes.get(result.window)!;
+        this.volumes.set(result.window, previous.available ? { ...previous, stale: true, error: String(result.error) } : this.unavailable(`${result.window} volume unavailable: ${String(result.error)}`, String(result.error)));
+      }
+    }
+    this.failureCount = failed ? this.failureCount + 1 : 0;
+    this.nextRefreshAt = now + (failed ? Math.min(ONE_HOUR, FIVE_MINUTES * 2 ** Math.min(this.failureCount - 1, 4)) : FIVE_MINUTES);
+    if (includeAllTime) this.nextAllTimeAt = now + ONE_HOUR;
+  }
+
+  private async refreshFromTradeHistory(now: number, includeAllTime: boolean): Promise<void> {
+    const until = new Date(now).toISOString();
+    try {
+      const controller = new AbortController();
+      const page = await this.withDeadline(this.adapter.getAccountTradeHistoryPage!({ since: this.tradeSince, until, cursor: this.tradeCursor, signal: controller.signal }), controller);
+      for (const trade of page.trades) {
+        const key = trade.tradeId ?? `${trade.exchangeOrderId}:${trade.timestamp}:${trade.market}:${trade.size}:${trade.price}`;
+        this.tradeCache.set(key, trade);
+      }
+      this.tradeCursor = page.nextCursor;
+      if (!this.tradeCursor) {
+        const newest = Math.max(...[...this.tradeCache.values()].map((trade) => trade.timestamp), now);
+        this.tradeSince = new Date(Math.max(0, newest - 1)).toISOString();
+      }
+      const allWindows: VolumeWindow[] = [...WINDOWS, ...(includeAllTime ? ["allTime" as const] : [])];
+      for (const window of allWindows) {
+        const start = window === "allTime" ? 0 : now - WINDOW_MS[window];
+        const byMarket = new Map<string, AccountVolume>();
+        for (const trade of this.tradeCache.values()) if (trade.timestamp >= start && trade.timestamp < now) {
+          const row = byMarket.get(trade.market) ?? { market: trade.market, since: new Date(start).toISOString(), until, baseVolume: 0, quoteVolume: 0 };
+          row.baseVolume += trade.size; row.quoteVolume += trade.size * trade.price; byMarket.set(trade.market, row);
+        }
+        this.volumes.set(window, { available: true, value: [...byMarket.values()], updatedAt: now, stale: false, partial: Boolean(this.tradeCursor) });
+      }
+      this.failureCount = 0;
+      this.nextRefreshAt = now + FIVE_MINUTES;
       if (includeAllTime) this.nextAllTimeAt = now + ONE_HOUR;
     } catch (error) {
       const message = String(error);
-      for (const window of requested) {
+      for (const window of [...WINDOWS, ...(includeAllTime ? ["allTime" as const] : [])]) {
         const previous = this.volumes.get(window)!;
-        this.volumes.set(window, window === "allTime"
-          ? this.unavailable(`All-time volume unavailable: ${message}`, message)
-          : previous.available
-          ? { ...previous, stale: true, error: message }
-          : this.unavailable(`${window} volume unavailable: ${message}`, message));
+        this.volumes.set(window, previous.available ? { ...previous, stale: true, error: message } : this.unavailable(`${window} volume unavailable: ${message}`, message));
       }
       this.failureCount++;
       this.nextRefreshAt = now + Math.min(ONE_HOUR, FIVE_MINUTES * 2 ** Math.min(this.failureCount - 1, 4));
       if (includeAllTime) this.nextAllTimeAt = now + ONE_HOUR;
-    } finally {
-      if (timer) clearTimeout(timer);
-      // A timeout reports failure at five seconds, but the single-flight gate remains held until
-      // the underlying adapter promises settle; without cancellation support, releasing it here
-      // could overlap a second refresh with calls that are still running.
-      if (timedOut) await Promise.allSettled(reads);
     }
+  }
+
+  private async withDeadline<T>(promise: Promise<T>, controller?: AbortController): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([promise, new Promise<T>((_, reject) => {
+        timer = setTimeout(() => { controller?.abort(); reject(new Error("volume refresh timed out after 5000ms")); }, TIMEOUT_MS);
+      })]);
+    } finally { if (timer) clearTimeout(timer); }
   }
 
   private unavailable(sourceNeeded: string, error?: string): VolumeTelemetry {

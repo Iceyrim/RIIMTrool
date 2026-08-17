@@ -58,6 +58,20 @@ describe("DashboardTelemetry", () => {
     ]);
   });
 
+  it("marks locally derived totals partial until cursor backfill completes", async () => {
+    const adapter = new FakeExchangeAdapter();
+    const pages = [
+      { trades: [{ tradeId: "t1", exchangeOrderId: "o1", market: "BTCUSD", side: "buy" as const, size: 1, price: 10, timestamp: 1 }], nextCursor: "next" },
+      { trades: [], nextCursor: undefined },
+    ];
+    (adapter as ExchangeAdapter).getAccountTradeHistoryPage = vi.fn(async () => pages.shift()!);
+    const telemetry = new DashboardTelemetry(adapter, true);
+    telemetry.refreshIfDue(2_000);
+    await vi.waitFor(() => expect(telemetry.snapshot().volumes["24h"].partial).toBe(true));
+    telemetry.refreshIfDue(302_000);
+    await vi.waitFor(() => expect(telemetry.snapshot().volumes["24h"].partial).toBe(false));
+  });
+
   it("records at most one runner-owned account sample every five minutes", () => {
     const store = new DashboardHistoryStore(mkdtempSync(`${tmpdir()}/riimtrool-telemetry-`), "n1-paper");
     const telemetry = new DashboardTelemetry(new FakeExchangeAdapter(), false, 100, store);

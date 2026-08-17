@@ -106,6 +106,12 @@ export interface AccountVolume {
   quoteVolume: number;
 }
 
+export interface AccountTradeHistoryPage {
+  trades: NormalizedFill[];
+  /** Opaque cursor for the next page; absent when the history is exhausted. */
+  nextCursor?: string;
+}
+
 export interface PlaceOrderParams {
   market: string;
   side: OrderSide;
@@ -181,4 +187,13 @@ export interface ExchangeAdapter {
     since: string;
     until: string;
   }): Promise<AccountVolume[]>;
+
+  /** Optional paginated account history. Adapters without this capability keep using
+   * getAccountVolume() and therefore remain compatible with the dashboard. */
+  getAccountTradeHistoryPage?(params: {
+    since: string;
+    until: string;
+    cursor?: string;
+    signal?: AbortSignal;
+  }): Promise<AccountTradeHistoryPage>;
 }

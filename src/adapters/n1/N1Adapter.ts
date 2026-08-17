@@ -371,4 +371,39 @@ export class N1Adapter implements ExchangeAdapter {
       quoteVolume: row.volumeQuote,
     }));
   }
+
+  async getAccountTradeHistoryPage(params: {
+    since: string;
+    until: string;
+    cursor?: string;
+  }): Promise<{ trades: NormalizedFill[]; nextCursor?: string }> {
+    this.assertConnected();
+    const state = params.cursor
+      ? JSON.parse(params.cursor) as { market: number; role: number; start?: number }
+      : { market: 0, role: 0, start: undefined };
+    const marketIds = this.config.markets.map(({ symbol }) => this.registry.marketIdFor(symbol));
+    const roles: Array<"takerId" | "makerId"> = ["takerId", "makerId"];
+    if (state.market >= marketIds.length) return { trades: [] };
+    const response = await this.nord!.getTrades({
+      marketId: marketIds[state.market],
+      [roles[state.role]!]: this.accountId!,
+      since: params.since,
+      until: params.until,
+      startInclusive: state.start,
+      pageSize: 100,
+      paginationMode: "tradeId",
+    });
+    let next: { market: number; role: number; start?: number } | undefined;
+    if (response.nextStartInclusive !== undefined && response.nextStartInclusive !== null) {
+      next = { ...state, start: response.nextStartInclusive };
+    } else if (state.role + 1 < roles.length) {
+      next = { market: state.market, role: state.role + 1 };
+    } else if (state.market + 1 < marketIds.length) {
+      next = { market: state.market + 1, role: 0 };
+    }
+    return {
+      trades: response.items.map((trade) => mapFill(trade, this.registry, this.accountId!)),
+      nextCursor: next ? JSON.stringify(next) : undefined,
+    };
+  }
 }
