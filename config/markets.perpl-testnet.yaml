@@ -1,0 +1,16 @@
+# Phase-1 testnet-only read/calldata-preview configuration. The runner maps these
+# official testnet symbols to fixed Perpl perpetual IDs and cannot submit orders.
+accountRisk:
+  sessionLossCapUsd: 6
+markets:
+  - symbol: BTCUSD
+    exchange: perpl
+    exchangeSymbol: BTC
+    enabled: true
+    orderSize: { min: 0.00155, max: 0.00232 }
+    spreadBps: { normal: 5, min: 4, max: 7.5 }
+    exitSpreadBps: 2.5
+    quoteLevels: 5
+    levelSpacingBps: [2, 3, 4, 7, 10]
+    inventoryReductionThresholdBase: 0.003
+    riskLimits: { maxLongPosition: 0.005, maxShortPosition: 0.005, maxOrderSize: 0.0025, maxOrderNotionalUsd: 160, maxOpenOrders: 12 }

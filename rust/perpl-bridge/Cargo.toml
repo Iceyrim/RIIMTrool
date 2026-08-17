@@ -1,0 +1,19 @@
+[package]
+name = "riim-perpl-bridge"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[dependencies]
+alloy = { version = "2.0.4", default-features = false, features = ["contract", "provider-http", "reqwest", "reqwest-rustls-tls", "rpc", "rpc-client", "rpc-types"] }
+alloy-sol-types = { version = "1.5.7", default-features = false, features = ["more-tuple-impls"] }
+fastnum = "0.7.4"
+futures = "0.3.32"
+hex = "0.4.3"
+perpl-sdk = { git = "https://github.com/PerplFoundation/dex-sdk", rev = "76890f93b38a157f9c74b709be278608a60a60af", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.52.2", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+perpl-sdk = { git = "https://github.com/PerplFoundation/dex-sdk", rev = "76890f93b38a157f9c74b709be278608a60a60af", default-features = false, features = ["test-utils"] }
