@@ -58,6 +58,8 @@ describe("dashboard static safety", () => {
     for (const range of ["24h", "7d", "30d"]) expect(source).toContain(`data-range="${range}"`);
     expect(source).toContain('data-range="allTime" disabled aria-describedby="all-time-limit"');
     expect(source).toContain("ALL TIME unavailable — durable chart history retains at most 90 days.");
+    expect(source).toMatch(/<section class="section"><div class="chart-controls"[\s\S]*data-range="24h"[\s\S]*data-range="7d"[\s\S]*data-range="30d"[\s\S]*data-range="allTime" disabled/);
+    expect(source).toContain("<th>SIZE (USD)</th>");
     expect(source).toContain('type="button" disabled>Editing locked</button>');
   });
 

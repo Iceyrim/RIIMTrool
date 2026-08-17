@@ -24,6 +24,7 @@ import {
   mapMarketPrice,
   mapOpenOrder,
   mapPosition,
+  n1SideToOrderSide,
   orderSideToN1Side,
   orderTypeToFillMode,
 } from "./mappers.js";
@@ -54,6 +55,13 @@ export const MAX_ACCOUNT_TRADE_PAGES_PER_STREAM = 1_000;
 interface AccountTradeScan {
   until: string;
   trades: readonly TradeFromApi[];
+}
+
+interface AccountTradeCursor {
+  role: 0 | 1;
+  start?: number;
+  pages: number;
+  seenTradeIds: number[];
 }
 
 /** Walks an Error's `.cause` chain (bounded depth) and joins every message into one string, so a
@@ -471,6 +479,39 @@ export class N1Adapter implements ExchangeAdapter {
       }
     }
     return { until, trades: [...byTradeId.values()].sort((a, b) => a.tradeId - b.tradeId) };
+  }
+
+  async getAccountTradeHistoryPage(params: { since: string; until: string; cursor?: string }): Promise<{ trades: NormalizedFill[]; nextCursor?: string }> {
+    this.assertConnected();
+    const sinceMs = Date.parse(params.since), untilMs = Date.parse(params.until);
+    if (!Number.isFinite(sinceMs) || !Number.isFinite(untilMs) || sinceMs > untilMs) throw new ExchangeAdapterError("Invalid N1 account-trade time window");
+    let state: AccountTradeCursor = { role: 0, pages: 0, seenTradeIds: [] };
+    if (params.cursor) {
+      try { state = JSON.parse(params.cursor) as AccountTradeCursor; } catch (error) { throw new ExchangeAdapterError(`Malformed N1 trade cursor: ${String(error)}`); }
+      if ((state.role !== 0 && state.role !== 1) || !Number.isSafeInteger(state.pages) || state.pages < 0 || !Array.isArray(state.seenTradeIds) || state.seenTradeIds.some((id) => !Number.isSafeInteger(id) || id < 0) || (state.start !== undefined && (!Number.isSafeInteger(state.start) || state.start < 0))) throw new ExchangeAdapterError("Malformed N1 trade cursor state");
+    }
+    if (state.pages >= MAX_ACCOUNT_TRADE_PAGES_PER_STREAM) throw new ExchangeAdapterError(`Incomplete N1 trade scan: exceeded ${MAX_ACCOUNT_TRADE_PAGES_PER_STREAM}-page safety cap`);
+    const roles: Array<"takerId" | "makerId"> = ["takerId", "makerId"];
+    const response = await this.nord!.getTrades({ [roles[state.role]!]: this.accountId!, since: params.since, until: params.until, startInclusive: state.start, pageSize: ACCOUNT_TRADES_PAGE_SIZE, paginationMode: "tradeId" });
+    if (!response || !Array.isArray(response.items)) throw new ExchangeAdapterError("Malformed N1 trade page");
+    const seen = new Set(state.seenTradeIds), trades: NormalizedFill[] = [];
+    let previousTradeId: number | undefined, newTradeCount = 0;
+    for (const trade of response.items) {
+      if (!this.isValidAccountTrade(trade)) throw new ExchangeAdapterError("Malformed N1 account trade row");
+      if (previousTradeId !== undefined && trade.tradeId > previousTradeId) throw new ExchangeAdapterError("Wrong-direction N1 account trade page");
+      previousTradeId = trade.tradeId;
+      if (seen.has(trade.tradeId)) continue;
+      seen.add(trade.tradeId); newTradeCount++;
+      const market = this.registry.symbolForVolume(trade.marketId);
+      if (market !== null) trades.push(mapFill(trade, this.registry, this.accountId!));
+      else { const n1Side = trade.takerId === this.accountId ? trade.takerSide : trade.takerSide === "bid" ? "ask" : "bid"; trades.push({ exchangeOrderId: String(trade.orderId), tradeId: String(trade.tradeId), market: `N1:${trade.marketId}`, side: n1SideToOrderSide(n1Side), price: trade.price, size: trade.baseSize, timestamp: Date.parse(trade.time) }); }
+    }
+    const nextStart = response.nextStartInclusive ?? undefined;
+    if (nextStart !== undefined && (!Number.isSafeInteger(nextStart) || nextStart < 0 || (state.start !== undefined && nextStart >= state.start))) throw new ExchangeAdapterError(`Invalid or repeated N1 trade cursor ${String(nextStart)}`);
+    if (nextStart !== undefined && response.items.length === 0) throw new ExchangeAdapterError("Incomplete N1 trade scan: empty page has a continuation cursor");
+    if (state.start !== undefined && newTradeCount === 0) throw new ExchangeAdapterError("Incomplete N1 trade scan: continuation page added no new trades");
+    const next: AccountTradeCursor | undefined = nextStart !== undefined ? { ...state, start: nextStart, pages: state.pages + 1, seenTradeIds: [...seen] } : state.role === 0 ? { role: 1, pages: 0, seenTradeIds: [...seen] } : undefined;
+    return { trades, nextCursor: next ? JSON.stringify(next) : undefined };
   }
 
   private isValidAccountTrade(trade: TradeFromApi): boolean {

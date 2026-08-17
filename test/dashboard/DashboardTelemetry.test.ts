@@ -28,6 +28,7 @@ describe("DashboardTelemetry", () => {
     telemetry.refreshIfDue(200);
     expect(telemetry.snapshot(350).uptimeMs).toBe(250);
     expect(adapter.getAccountVolume).toHaveBeenCalledTimes(3);
+    expect(telemetry.snapshot().volumes["24h"].partial).toBe(true);
   });
 
   it("caches successful windows and suppresses refreshes for five minutes", async () => {

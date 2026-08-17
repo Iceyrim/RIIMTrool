@@ -10,6 +10,7 @@ export interface VolumeTelemetry {
   value: AccountVolume[] | null;
   updatedAt?: number;
   stale: boolean;
+  partial?: boolean;
   error?: string;
   sourceNeeded?: string;
 }
@@ -114,6 +115,10 @@ export class DashboardTelemetry {
   private async refresh(now: number): Promise<void> {
     const until = new Date(now).toISOString();
     const requested: VolumeWindow[] = [...WINDOWS, ...(this.supportsAllTime ? ["allTime" as const] : [])];
+    for (const window of requested) {
+      const previous = this.volumes.get(window)!;
+      this.volumes.set(window, { ...previous, partial: true });
+    }
     const reads = requested.map((window) => this.adapter.getAccountVolume({
       since: new Date(window === "allTime" ? 0 : now - WINDOW_MS[window]).toISOString(),
       until,
@@ -138,7 +143,7 @@ export class DashboardTelemetry {
         throw new Error("volume scan violated 24H <= 7D <= 30D <= All Time ordering");
       }
       requested.forEach((window, index) => {
-        this.volumes.set(window, { available: true, value: complete[index]!, updatedAt: now, stale: false });
+        this.volumes.set(window, { available: true, value: complete[index]!, updatedAt: now, stale: false, partial: false });
       });
       this.failureCount = 0;
       this.nextRefreshAt = now + FIVE_MINUTES;
@@ -147,7 +152,7 @@ export class DashboardTelemetry {
       for (const window of requested) {
         const previous = this.volumes.get(window)!;
         this.volumes.set(window, previous.available
-          ? { ...previous, stale: true, error: message }
+          ? { ...previous, stale: true, partial: true, error: message }
           : this.unavailable(`${window} volume unavailable: ${message}`, message));
       }
       this.failureCount++;
@@ -162,6 +167,6 @@ export class DashboardTelemetry {
   }
 
   private unavailable(sourceNeeded: string, error?: string): VolumeTelemetry {
-    return { available: false, value: null, stale: false, sourceNeeded, error };
+    return { available: false, value: null, stale: false, partial: false, sourceNeeded, error };
   }
 }
