@@ -1,5 +1,6 @@
 import "../../utils/polyfills.js";
 import { Nord, NordUser, Side } from "@n1xyz/nord-ts";
+import type { TradeFromApi } from "@n1xyz/nord-ts";
 import { Connection } from "@solana/web3.js";
 import type {
   AccountVolume,
@@ -23,6 +24,7 @@ import {
   mapMarketPrice,
   mapOpenOrder,
   mapPosition,
+  n1SideToOrderSide,
   orderSideToN1Side,
   orderTypeToFillMode,
 } from "./mappers.js";
@@ -44,6 +46,15 @@ export interface N1AdapterConfig {
  * refreshAccountState(), so there is no cost to erring on the early side. */
 const SESSION_REFRESH_MARGIN_SEC = 3600n;
 const MAX_CLIENT_ORDER_ID = 2n ** 63n;
+const ACCOUNT_TRADES_PAGE_SIZE = 50;
+export const MAX_ACCOUNT_TRADE_PAGES_PER_STREAM = 1_000;
+
+interface AccountTradeCursor {
+  role: 0 | 1;
+  start?: number;
+  pages: number;
+  seenTradeIds: number[];
+}
 
 /** Walks an Error's `.cause` chain (bounded depth) and joins every message into one string, so a
  * doubly-wrapped SDK error (e.g. nord-ts's own `NordError("Failed to place order", { cause })`)
@@ -378,32 +389,83 @@ export class N1Adapter implements ExchangeAdapter {
     cursor?: string;
   }): Promise<{ trades: NormalizedFill[]; nextCursor?: string }> {
     this.assertConnected();
-    const state = params.cursor
-      ? JSON.parse(params.cursor) as { market: number; role: number; start?: number }
-      : { market: 0, role: 0, start: undefined };
-    const marketIds = this.config.markets.map(({ symbol }) => this.registry.marketIdFor(symbol));
+    const sinceMs = Date.parse(params.since);
+    const untilMs = Date.parse(params.until);
+    if (!Number.isFinite(sinceMs) || !Number.isFinite(untilMs) || sinceMs > untilMs) {
+      throw new ExchangeAdapterError("Invalid N1 account-trade time window");
+    }
+    let state: AccountTradeCursor = { role: 0, pages: 0, seenTradeIds: [] };
+    if (params.cursor) {
+      try { state = JSON.parse(params.cursor) as AccountTradeCursor; }
+      catch (error) { throw new ExchangeAdapterError(`Malformed N1 trade cursor: ${String(error)}`); }
+      if ((state.role !== 0 && state.role !== 1) || !Number.isSafeInteger(state.pages) || state.pages < 0
+        || !Array.isArray(state.seenTradeIds) || state.seenTradeIds.some((id) => !Number.isSafeInteger(id) || id < 0)
+        || (state.start !== undefined && (!Number.isSafeInteger(state.start) || state.start < 0))) {
+        throw new ExchangeAdapterError("Malformed N1 trade cursor state");
+      }
+    }
+    if (state.pages >= MAX_ACCOUNT_TRADE_PAGES_PER_STREAM) {
+      throw new ExchangeAdapterError(
+        `Incomplete N1 trade scan: exceeded ${MAX_ACCOUNT_TRADE_PAGES_PER_STREAM}-page safety cap`,
+      );
+    }
     const roles: Array<"takerId" | "makerId"> = ["takerId", "makerId"];
-    if (state.market >= marketIds.length) return { trades: [] };
     const response = await this.nord!.getTrades({
-      marketId: marketIds[state.market],
       [roles[state.role]!]: this.accountId!,
       since: params.since,
       until: params.until,
       startInclusive: state.start,
-      pageSize: 100,
+      pageSize: ACCOUNT_TRADES_PAGE_SIZE,
       paginationMode: "tradeId",
     });
-    let next: { market: number; role: number; start?: number } | undefined;
-    if (response.nextStartInclusive !== undefined && response.nextStartInclusive !== null) {
-      next = { ...state, start: response.nextStartInclusive };
-    } else if (state.role + 1 < roles.length) {
-      next = { market: state.market, role: state.role + 1 };
-    } else if (state.market + 1 < marketIds.length) {
-      next = { market: state.market + 1, role: 0 };
+    if (!response || !Array.isArray(response.items)) throw new ExchangeAdapterError("Malformed N1 trade page");
+    const seen = new Set(state.seenTradeIds);
+    const trades: NormalizedFill[] = [];
+    let previousTradeId: number | undefined;
+    let newTradeCount = 0;
+    for (const trade of response.items) {
+      if (!this.isValidAccountTrade(trade)) throw new ExchangeAdapterError("Malformed N1 account trade row");
+      if (previousTradeId !== undefined && trade.tradeId > previousTradeId) {
+        throw new ExchangeAdapterError("Wrong-direction N1 account trade page");
+      }
+      previousTradeId = trade.tradeId;
+      if (seen.has(trade.tradeId)) continue;
+      seen.add(trade.tradeId);
+      newTradeCount++;
+      const market = this.registry.symbolForVolume(trade.marketId);
+      if (market !== null) trades.push(mapFill(trade, this.registry, this.accountId!));
+      else {
+        const weWereTaker = trade.takerId === this.accountId;
+        const n1Side = weWereTaker ? trade.takerSide : trade.takerSide === "bid" ? "ask" : "bid";
+        trades.push({ exchangeOrderId: String(trade.orderId), tradeId: String(trade.tradeId), market: `N1:${trade.marketId}`, side: n1SideToOrderSide(n1Side), price: trade.price, size: trade.baseSize, timestamp: Date.parse(trade.time) });
+      }
     }
-    return {
-      trades: response.items.map((trade) => mapFill(trade, this.registry, this.accountId!)),
-      nextCursor: next ? JSON.stringify(next) : undefined,
-    };
+    const nextStart = response.nextStartInclusive ?? undefined;
+    if (nextStart !== undefined && (!Number.isSafeInteger(nextStart) || nextStart < 0
+      || (state.start !== undefined && nextStart >= state.start))) {
+      throw new ExchangeAdapterError(`Invalid or repeated N1 trade cursor ${String(nextStart)}`);
+    }
+    if (nextStart !== undefined && response.items.length === 0) {
+      throw new ExchangeAdapterError("Incomplete N1 trade scan: empty page has a continuation cursor");
+    }
+    if (state.start !== undefined && newTradeCount === 0) {
+      throw new ExchangeAdapterError("Incomplete N1 trade scan: continuation page added no new trades");
+    }
+    const next: AccountTradeCursor | undefined = nextStart !== undefined
+      ? { ...state, start: nextStart, pages: state.pages + 1, seenTradeIds: [...seen] }
+      : state.role === 0
+        ? { role: 1, pages: 0, seenTradeIds: [...seen] }
+        : undefined;
+    return { trades, nextCursor: next ? JSON.stringify(next) : undefined };
+  }
+
+  private isValidAccountTrade(trade: TradeFromApi): boolean {
+    return Number.isSafeInteger(trade.tradeId) && trade.tradeId >= 0
+      && Number.isSafeInteger(trade.marketId) && trade.marketId >= 0
+      && Number.isFinite(Date.parse(trade.time))
+      && Number.isFinite(trade.price) && trade.price >= 0
+      && Number.isFinite(trade.baseSize) && trade.baseSize >= 0
+      && Number.isSafeInteger(trade.makerId) && Number.isSafeInteger(trade.takerId)
+      && (trade.makerId === this.accountId || trade.takerId === this.accountId);
   }
 }

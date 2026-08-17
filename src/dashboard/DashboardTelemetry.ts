@@ -1,4 +1,4 @@
-import type { AccountVolume, ExchangeAdapter } from "../adapters/ExchangeAdapter.js";
+import type { AccountVolume, ExchangeAdapter, NormalizedFill } from "../adapters/ExchangeAdapter.js";
 import type { TradeLogEntry } from "../engine/TradeLog.js";
 import type { AlertDeliveryHealth } from "../alerting/TelegramAlertSink.js";
 import { fillIdentity, type DashboardHistoryStore, type HistoryPoint, type HistorySnapshot, type HistoryStoreStatus } from "./DashboardHistoryStore.js";
@@ -42,7 +42,7 @@ export class DashboardTelemetry {
   private nextAllTimeAt = 0;
   private nextAccountSampleAt = 0;
   private failureCount = 0;
-  private readonly tradeCache = new Map<string, TradeLogEntry & { tradeId?: string }>();
+  private readonly tradeCache = new Map<string, NormalizedFill>();
   private tradeCursor?: string;
   private tradeSince = new Date(0).toISOString();
 
@@ -134,7 +134,7 @@ export class DashboardTelemetry {
     }));
     let failed = false;
     for (const result of results) {
-      if ("value" in result) this.volumes.set(result.window, { available: true, value: result.value, updatedAt: now, stale: false });
+      if ("value" in result) this.volumes.set(result.window, { available: true, value: result.value ?? [], updatedAt: now, stale: false });
       else {
         failed = true;
         const previous = this.volumes.get(result.window)!;
@@ -171,7 +171,8 @@ export class DashboardTelemetry {
         this.volumes.set(window, { available: true, value: [...byMarket.values()], updatedAt: now, stale: false, partial: Boolean(this.tradeCursor) });
       }
       this.failureCount = 0;
-      this.nextRefreshAt = now + FIVE_MINUTES;
+      // Keep backfilling promptly; a completed scan returns to the normal five-minute cadence.
+      this.nextRefreshAt = this.tradeCursor ? now : now + FIVE_MINUTES;
       if (includeAllTime) this.nextAllTimeAt = now + ONE_HOUR;
     } catch (error) {
       const message = String(error);

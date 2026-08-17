@@ -48,7 +48,9 @@ describe("dashboard static safety", () => {
     expect(source).toMatch(/data-view-panel="alerts"[\s\S]*Telegram \/ operational health/);
     expect(source).toMatch(/data-view-panel="settings"[\s\S]*Settings are read-only placeholders/);
     expect(source).toContain('id="dex"');
-    expect(source).toContain('data-range="1d"');
+    expect(source).toMatch(/<section class="section"><div class="chart-controls"[\s\S]*data-range="24h"[\s\S]*data-range="7d"[\s\S]*data-range="30d"[\s\S]*data-range="allTime" disabled/);
+    expect(source).toContain("ALL TIME unavailable — durable chart history retains at most 90 days.");
+    expect(source).toContain("<th>SIZE (USD)</th>");
     expect(source).toContain('type="button" disabled>Editing locked</button>');
   });
 

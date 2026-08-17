@@ -41,6 +41,7 @@ interface FakeNordInstance {
   getOrderTrades: ReturnType<typeof vi.fn>;
   getMarketStats: ReturnType<typeof vi.fn>;
   getAccountVolume: ReturnType<typeof vi.fn>;
+  getTrades: ReturnType<typeof vi.fn>;
   getTimestamp: ReturnType<typeof vi.fn>;
 }
 
@@ -69,6 +70,7 @@ function makeFakeNord(overrides: Partial<FakeNordInstance> = {}): FakeNordInstan
     getOrderTrades: vi.fn(),
     getMarketStats: vi.fn(),
     getAccountVolume: vi.fn(),
+    getTrades: vi.fn(),
     getTimestamp: vi.fn().mockResolvedValue(FAKE_NOW_SEC),
     ...overrides,
   };
@@ -612,6 +614,35 @@ describe("N1Adapter", () => {
 
       const price = await adapter.getMarketPrice(MARKET);
       expect(price).toEqual({ market: MARKET, mark: 60050, index: 60000 });
+    });
+  });
+
+  describe("getAccountTradeHistoryPage", () => {
+    const trade = (overrides: Record<string, unknown> = {}) => ({
+      time: "2026-01-01T12:00:00.000Z", actionId: 1, tradeId: 4,
+      takerId: ACCOUNT_ID, takerSide: "bid", makerId: 8, marketId: MARKET_ID,
+      marketMode: "clob", orderId: 10, price: 100, baseSize: 2, ...overrides,
+    });
+
+    it("queries account-wide maker/taker streams, deduplicates inclusive boundaries, and advances roles", async () => {
+      fakeNord.getTrades
+        .mockResolvedValueOnce({ items: [trade({ tradeId: 4 }), trade({ tradeId: 3, marketId: 404 })], nextStartInclusive: 2 })
+        .mockResolvedValueOnce({ items: [trade({ tradeId: 3, marketId: 404 }), trade({ tradeId: 1 })] })
+        .mockResolvedValueOnce({ items: [trade({ tradeId: 4 })] });
+      const adapter = new N1Adapter(baseConfig());
+      await adapter.connect();
+
+      const first = await adapter.getAccountTradeHistoryPage({ since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z" });
+      const second = await adapter.getAccountTradeHistoryPage({ since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z", cursor: first.nextCursor });
+      const third = await adapter.getAccountTradeHistoryPage({ since: "2026-01-01T00:00:00Z", until: "2026-01-02T00:00:00Z", cursor: second.nextCursor });
+
+      expect(fakeNord.getTrades.mock.calls[0]?.[0]).toMatchObject({ takerId: ACCOUNT_ID, pageSize: 50, paginationMode: "tradeId" });
+      expect(fakeNord.getTrades.mock.calls[0]?.[0]).not.toHaveProperty("marketId");
+      expect(first.trades).toHaveLength(2);
+      expect(first.trades[1]?.market).toBe("N1:404");
+      expect(second.trades).toHaveLength(1);
+      expect(third.trades).toHaveLength(0);
+      expect(third.nextCursor).toBeUndefined();
     });
   });
 

@@ -68,7 +68,8 @@ describe("DashboardTelemetry", () => {
     const telemetry = new DashboardTelemetry(adapter, true);
     telemetry.refreshIfDue(2_000);
     await vi.waitFor(() => expect(telemetry.snapshot().volumes["24h"].partial).toBe(true));
-    telemetry.refreshIfDue(302_000);
+    telemetry.refreshIfDue(2_001);
+    await vi.waitFor(() => expect(((adapter as ExchangeAdapter).getAccountTradeHistoryPage as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2));
     await vi.waitFor(() => expect(telemetry.snapshot().volumes["24h"].partial).toBe(false));
   });
 
