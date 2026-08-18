@@ -1,4 +1,4 @@
-import type { AccountVolume, ExchangeAdapter } from "../adapters/ExchangeAdapter.js";
+import type { AccountVolume, ExchangeAdapter, NormalizedFill } from "../adapters/ExchangeAdapter.js";
 import type { TradeLogEntry } from "../engine/TradeLog.js";
 import type { AlertDeliveryHealth } from "../alerting/TelegramAlertSink.js";
 import { fillIdentity, type DashboardHistoryStore, type HistoryPoint, type HistorySnapshot, type HistoryStoreStatus } from "./DashboardHistoryStore.js";
@@ -39,8 +39,12 @@ export class DashboardTelemetry {
   private readonly volumes = new Map<VolumeWindow, VolumeTelemetry>();
   private refreshInFlight = false;
   private nextRefreshAt = 0;
+  private nextAllTimeAt = 0;
   private nextAccountSampleAt = 0;
   private failureCount = 0;
+  private readonly tradeCache = new Map<string, NormalizedFill>();
+  private tradeCursor?: string;
+  private tradeSince = new Date(0).toISOString();
 
   constructor(
     private readonly adapter: ExchangeAdapter,
@@ -113,8 +117,22 @@ export class DashboardTelemetry {
   }
 
   private async refresh(now: number): Promise<void> {
+    if (this.adapter.getAccountTradeHistoryPage) {
+      // Only the incremental N1 path throttles all-time scans to once per hour (nextAllTimeAt);
+      // the fan-out fallback below keeps requesting all-time unconditionally every cycle, exactly
+      // as before the port — it never rescans full history per call, so there's no cost to avoid.
+      const includeAllTime = this.supportsAllTime && now >= this.nextAllTimeAt;
+      await this.refreshFromTradeHistory(now, includeAllTime);
+      return;
+    }
+    // Capability-gated fallback for adapters without paginated history (Stub, RiseX): still an
+    // independent call per window, so the ordering-invariant check and the upfront `partial: true`
+    // priming below both remain load-bearing here — unlike the N1 path, these 4 calls are not
+    // derived from one shared, monotonically-nested cache, so a real divergence across concurrent
+    // fetches is still possible.
+    const includeAllTime = this.supportsAllTime;
     const until = new Date(now).toISOString();
-    const requested: VolumeWindow[] = [...WINDOWS, ...(this.supportsAllTime ? ["allTime" as const] : [])];
+    const requested: VolumeWindow[] = [...WINDOWS, ...(includeAllTime ? ["allTime" as const] : [])];
     for (const window of requested) {
       const previous = this.volumes.get(window)!;
       this.volumes.set(window, { ...previous, partial: true });
@@ -164,6 +182,62 @@ export class DashboardTelemetry {
       // could overlap a second refresh with calls that are still running.
       if (timedOut) await Promise.allSettled(reads);
     }
+  }
+
+  // Incremental, cursor-based path for adapters that expose getAccountTradeHistoryPage() (N1):
+  // fetches one bounded page per refresh cycle instead of rescanning full account history from
+  // scratch every cycle, and derives all 4 window totals locally from the accumulated cache. The
+  // ordering-invariant check and upfront `partial: true` priming from the fallback path above are
+  // deliberately not repeated here — all windows are summed from the same shared tradeCache over
+  // strictly nested time ranges, so 24H <= 7D <= 30D <= All Time is structurally guaranteed, not
+  // merely observed.
+  private async refreshFromTradeHistory(now: number, includeAllTime: boolean): Promise<void> {
+    const until = new Date(now).toISOString();
+    try {
+      const controller = new AbortController();
+      const page = await this.withDeadline(this.adapter.getAccountTradeHistoryPage!({ since: this.tradeSince, until, cursor: this.tradeCursor, signal: controller.signal }), controller);
+      for (const trade of page.trades) {
+        const key = trade.tradeId ?? `${trade.exchangeOrderId}:${trade.timestamp}:${trade.market}:${trade.size}:${trade.price}`;
+        this.tradeCache.set(key, trade);
+      }
+      this.tradeCursor = page.nextCursor;
+      if (!this.tradeCursor) {
+        const newest = Math.max(...[...this.tradeCache.values()].map((trade) => trade.timestamp), now);
+        this.tradeSince = new Date(Math.max(0, newest - 1)).toISOString();
+      }
+      const allWindows: VolumeWindow[] = [...WINDOWS, ...(includeAllTime ? ["allTime" as const] : [])];
+      for (const window of allWindows) {
+        const start = window === "allTime" ? 0 : now - WINDOW_MS[window];
+        const byMarket = new Map<string, AccountVolume>();
+        for (const trade of this.tradeCache.values()) if (trade.timestamp >= start && trade.timestamp < now) {
+          const row = byMarket.get(trade.market) ?? { market: trade.market, since: new Date(start).toISOString(), until, baseVolume: 0, quoteVolume: 0 };
+          row.baseVolume += trade.size; row.quoteVolume += trade.size * trade.price; byMarket.set(trade.market, row);
+        }
+        this.volumes.set(window, { available: true, value: [...byMarket.values()], updatedAt: now, stale: false, partial: Boolean(this.tradeCursor) });
+      }
+      this.failureCount = 0;
+      // Keep backfilling promptly; a completed scan returns to the normal five-minute cadence.
+      this.nextRefreshAt = this.tradeCursor ? now : now + FIVE_MINUTES;
+      if (includeAllTime) this.nextAllTimeAt = now + ONE_HOUR;
+    } catch (error) {
+      const message = String(error);
+      for (const window of [...WINDOWS, ...(includeAllTime ? ["allTime" as const] : [])]) {
+        const previous = this.volumes.get(window)!;
+        this.volumes.set(window, previous.available ? { ...previous, stale: true, error: message } : this.unavailable(`${window} volume unavailable: ${message}`, message));
+      }
+      this.failureCount++;
+      this.nextRefreshAt = now + Math.min(ONE_HOUR, FIVE_MINUTES * 2 ** Math.min(this.failureCount - 1, 4));
+      if (includeAllTime) this.nextAllTimeAt = now + ONE_HOUR;
+    }
+  }
+
+  private async withDeadline<T>(promise: Promise<T>, controller?: AbortController): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([promise, new Promise<T>((_, reject) => {
+        timer = setTimeout(() => { controller?.abort(); reject(new Error("volume refresh timed out after 5000ms")); }, TIMEOUT_MS);
+      })]);
+    } finally { if (timer) clearTimeout(timer); }
   }
 
   private unavailable(sourceNeeded: string, error?: string): VolumeTelemetry {
