@@ -687,6 +687,165 @@ describe("PaperRunner placement-failure alerting", () => {
   });
 });
 
+describe("PaperRunner reduce-only exit alerting", () => {
+  let btcAdapter: FakeExchangeAdapter;
+  let btcPnl: FakePnlSource;
+  let sink: FakeAlertSink;
+  let alertBus: AlertBus;
+
+  beforeEach(() => {
+    btcAdapter = new FakeExchangeAdapter();
+    btcAdapter.marketPrices.set("BTCUSD", { market: "BTCUSD", mark: 60000 });
+    // inventoryReductionThresholdBase is 0.003 (testConfig) — this puts BTCUSD in reduction mode
+    // from the very first cycle, matching the real incident (over-inventory, reduce-only exit
+    // rejected every attempt).
+    btcAdapter.positions = [
+      { market: "BTCUSD", baseSize: 0.004, markPrice: 60000, unrealizedPnl: 0, openOrderCount: 0 },
+    ];
+    btcPnl = new FakePnlSource();
+    sink = new FakeAlertSink();
+    alertBus = new AlertBus();
+    alertBus.subscribe(sink);
+  });
+
+  // Reduction mode attempts exactly one reduce-only placement per cycle (never the quote ladder —
+  // see MarketEngine's early return when exitRequired), so only one queued result is needed.
+  function queueRejectedExit(): void {
+    btcAdapter.placeOrderResults.push({
+      success: false,
+      reason: "REJECTED",
+      message:
+        "Failed to place order: caused by: Could not execute placeOrder, reason: RISK_UNHEALTHY_MF_AND_PON_AFTER_BETTER_OF_BEFORE",
+    });
+  }
+
+  it("alerts once after 3 consecutive reduce-only rejections, including the exchange reason and stuck duration (regression: 1,594 BTCUSD + 2,271 ETHUSD RISK_UNHEALTHY rejections over ~52h, zero alerts)", async () => {
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+      alertBus,
+    });
+    await runner.start();
+
+    queueRejectedExit();
+    await runner.runOnce();
+    expect(sink.events.filter((e) => e.type === "error")).toHaveLength(0);
+
+    queueRejectedExit();
+    await runner.runOnce();
+    expect(sink.events.filter((e) => e.type === "error")).toHaveLength(0);
+
+    queueRejectedExit();
+    await runner.runOnce();
+
+    const errorEvents = sink.events.filter((e) => e.type === "error");
+    expect(errorEvents).toHaveLength(1);
+    expect(errorEvents[0]).toMatchObject({
+      market: "BTCUSD",
+      message: expect.stringContaining("RISK_UNHEALTHY_MF_AND_PON_AFTER_BETTER_OF_BEFORE"),
+    });
+    expect(errorEvents[0]).toMatchObject({ message: expect.stringContaining("position 0.004") });
+  });
+
+  it("an unresolved (not-confirmed) placement neither breaks nor extends the reduce-only failure streak", async () => {
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+      alertBus,
+    });
+    await runner.start();
+
+    queueRejectedExit();
+    queueRejectedExit();
+    await runner.runOnce();
+    await runner.runOnce();
+
+    // SPEC.md Section 5b: a resolved-but-unconfirmed placement (exitState "unresolved") is neither
+    // a failure nor a success — must not reset an in-progress streak the way a genuine recovery
+    // would, and must not silently extend it either.
+    btcAdapter.placeOrderResults.push({
+      success: false,
+      reason: "UNRESOLVED_NOT_CONFIRMED",
+      message: "ambiguous — exchange resolved with neither an orderId nor fills",
+    });
+    await runner.runOnce();
+
+    // If the unresolved cycle had reset the streak, this single rejection would only bring it to
+    // 1 — three-consecutive-failures would still be one cycle away, and no alert would fire yet.
+    queueRejectedExit();
+    await runner.runOnce();
+
+    expect(sink.events.filter((e) => e.type === "error")).toHaveLength(1);
+  });
+
+  it("emits a recovery event once the reduce-only exit places successfully after an alerted streak", async () => {
+    const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+    const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+      intervalMs: 1000,
+      alertBus,
+    });
+    await runner.start();
+
+    queueRejectedExit();
+    queueRejectedExit();
+    queueRejectedExit();
+    await runner.runOnce();
+    await runner.runOnce();
+    await runner.runOnce();
+    expect(
+      sink.events.filter((e) => e.type === "error" && e.message.includes("rejected on every")),
+    ).toHaveLength(1);
+
+    // Queue is empty now — FakeExchangeAdapter synthesizes a success for the next placement.
+    await runner.runOnce();
+
+    const recoveryEvents = sink.events.filter(
+      (e) => e.type === "error" && e.message.includes("recovered"),
+    );
+    expect(recoveryEvents).toHaveLength(1);
+    expect(recoveryEvents[0]).toMatchObject({ market: "BTCUSD" });
+  });
+
+  it("re-alerts every ~30 minutes while still stuck, instead of going silent after the first alert (the real incident's 52-hour gap)", async () => {
+    vi.useFakeTimers();
+    try {
+      const engine = new MarketEngine(btcAdapter, testConfig("BTCUSD"), tempPaths("BTCUSD"));
+      const runner = new PaperRunner([{ market: "BTCUSD", engine, pnlSource: btcPnl }], {
+        intervalMs: 1000,
+        alertBus,
+      });
+      await runner.start();
+
+      queueRejectedExit();
+      queueRejectedExit();
+      queueRejectedExit();
+      await runner.runOnce();
+      await runner.runOnce();
+      await runner.runOnce();
+      expect(sink.events.filter((e) => e.type === "error")).toHaveLength(1);
+
+      // Still stuck, but well under the re-alert interval — no second alert yet.
+      vi.setSystemTime(Date.now() + 10 * 60 * 1000);
+      queueRejectedExit();
+      await runner.runOnce();
+      expect(sink.events.filter((e) => e.type === "error")).toHaveLength(1);
+
+      // Past the 30-minute re-alert interval, still stuck — fires again.
+      vi.setSystemTime(Date.now() + 25 * 60 * 1000);
+      queueRejectedExit();
+      await runner.runOnce();
+      const errorEvents = sink.events.filter((e) => e.type === "error");
+      expect(errorEvents).toHaveLength(2);
+      expect(errorEvents[1]).toMatchObject({
+        market: "BTCUSD",
+        message: expect.stringContaining("RISK_UNHEALTHY_MF_AND_PON_AFTER_BETTER_OF_BEFORE"),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("PaperRunner PnL-drain failure handling", () => {
   let btcAdapter: FakeExchangeAdapter;
   let btcPnl: FakePnlSource;

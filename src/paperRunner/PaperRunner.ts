@@ -61,6 +61,27 @@ export interface CycleLogEntry {
  * comment. Threshold, not first-cycle, to avoid alerting on a single transient rejection. */
 const PLACEMENT_FAILURE_ALERT_THRESHOLD = 3;
 
+/** Consecutive reduce-only exit placement failures (exitState === "placement_failed") before
+ * detectReduceOnlyFailures() alerts. Separate from PLACEMENT_FAILURE_ALERT_THRESHOLD because the
+ * two failure modes are mutually exclusive per cycle (reduction mode only attempts the reduce-only
+ * exit, not the quote ladder — see CycleSummary.quotesAttempted's doc precedent), not because the
+ * threshold itself needs to differ. */
+const REDUCE_ONLY_FAILURE_ALERT_THRESHOLD = 3;
+
+/** Once alerted, re-alert on this cadence while the reduce-only exit is still stuck, instead of
+ * one-shot-until-recovered. A real incident sat rejected for ~52 hours on the quote-ladder alert's
+ * one-shot pattern — reduce-only exits are the higher-stakes failure mode (unmanaged over-inventory
+ * exposure, not just a quiet order book), so this deliberately trades a bit of alert noise for not
+ * letting a multi-hour stuck exit go silent after the first notification. */
+const REDUCE_ONLY_REALERT_INTERVAL_MS = 30 * 60 * 1000;
+
+function formatDurationMs(ms: number): string {
+  const totalMinutes = Math.max(0, Math.round(ms / 60_000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h${minutes}m` : `${minutes}m`;
+}
+
 export interface SoakReport {
   startedAt: number;
   endedAt: number;
@@ -121,6 +142,13 @@ export class PaperRunner {
   // fired for the current streak — see detectPlacementFailures().
   private readonly placementFailureStreak = new Map<string, number>();
   private readonly placementFailureAlerted = new Map<string, boolean>();
+  // Consecutive reduce-only exit placement failures per market, when the streak's first alert
+  // fired (for reporting stuck duration) and when it was last (re-)alerted (for the periodic
+  // re-alert cooldown) — see detectReduceOnlyFailures().
+  private readonly reduceOnlyFailureStreak = new Map<string, number>();
+  private readonly reduceOnlyFailureAlerted = new Map<string, boolean>();
+  private readonly reduceOnlyFailureSince = new Map<string, number>();
+  private readonly reduceOnlyLastAlertAt = new Map<string, number>();
   private readonly accountRiskState: AccountRiskState;
   private readonly accountPnlOwnerMarket: string | undefined;
 
@@ -274,6 +302,7 @@ export class PaperRunner {
     if (this.config.alertBus) {
       this.detectTransitions(this.config.alertBus, market, summary);
       this.detectPlacementFailures(this.config.alertBus, market, summary);
+      this.detectReduceOnlyFailures(this.config.alertBus, market, summary);
     }
 
     await this.drainPnl(entry);
@@ -390,6 +419,67 @@ export class PaperRunner {
         message: `[${market}] Quote placement recovered after repeated failures`,
       });
       this.placementFailureAlerted.set(market, false);
+    }
+  }
+
+  /** Tracks consecutive reduce-only exit placement failures (exitState === "placement_failed")
+   * per market — this is the reduction-mode counterpart to detectPlacementFailures(), which never
+   * catches this case because quotesAttempted is 0 whenever a reduce-only exit is being attempted
+   * instead of the two-sided ladder. Unlike detectPlacementFailures(), this re-alerts on
+   * REDUCE_ONLY_REALERT_INTERVAL_MS while still stuck rather than firing once and going quiet —
+   * see that constant's doc comment for why. Purely observational: reads the CycleSummary
+   * MarketEngine already produced and only calls alertBus.emit(), never touches order placement.
+   *
+   * A cycle that attempted nothing new — an existing exit being held/repriced, blocked upstream
+   * (open-order capacity, unresolved ordinary-quote cancellation), or an unconfirmed
+   * ("unresolved") placement per SPEC.md Section 5b — neither extends nor resets the streak, same
+   * "don't touch it on a no-op cycle" rule detectPlacementFailures() follows. Only a fresh
+   * rejection extends it; only the position no longer needing reduction, or a fresh placement
+   * actually succeeding, counts as resolved. */
+  private detectReduceOnlyFailures(alertBus: AlertBus, market: string, summary: CycleSummary): void {
+    const failed = summary.exitState === "placement_failed";
+    const resolved = !summary.reductionMode || summary.exitState === "placed";
+
+    if (failed) {
+      this.reduceOnlyFailureStreak.set(market, (this.reduceOnlyFailureStreak.get(market) ?? 0) + 1);
+    } else if (resolved) {
+      this.reduceOnlyFailureStreak.set(market, 0);
+    }
+
+    const streak = this.reduceOnlyFailureStreak.get(market) ?? 0;
+    const alreadyAlerted = this.reduceOnlyFailureAlerted.get(market) === true;
+    const now = Date.now();
+
+    if (streak >= REDUCE_ONLY_FAILURE_ALERT_THRESHOLD) {
+      if (!alreadyAlerted) this.reduceOnlyFailureSince.set(market, now);
+      const lastAlertAt = this.reduceOnlyLastAlertAt.get(market);
+      const dueForRealert =
+        alreadyAlerted && lastAlertAt !== undefined && now - lastAlertAt >= REDUCE_ONLY_REALERT_INTERVAL_MS;
+
+      if (!alreadyAlerted || dueForRealert) {
+        const since = this.reduceOnlyFailureSince.get(market) ?? now;
+        const cause = summary.exitDetails?.cause ? `; reason: ${summary.exitDetails.cause}` : "";
+        const size = summary.exitDetails?.size ?? Math.abs(summary.positionBaseSize);
+        alertBus.emit({
+          type: "error",
+          market,
+          message:
+            `[${market}] Reduce-only exit has been rejected on every attempt for ` +
+            `${formatDurationMs(now - since)} (position ${summary.positionBaseSize}, exit size ` +
+            `${size})${cause}`,
+        });
+        this.reduceOnlyFailureAlerted.set(market, true);
+        this.reduceOnlyLastAlertAt.set(market, now);
+      }
+    } else if (resolved && alreadyAlerted) {
+      alertBus.emit({
+        type: "error",
+        market,
+        message: `[${market}] Reduce-only exit recovered after repeated rejections`,
+      });
+      this.reduceOnlyFailureAlerted.set(market, false);
+      this.reduceOnlyFailureSince.delete(market);
+      this.reduceOnlyLastAlertAt.delete(market);
     }
   }
 
