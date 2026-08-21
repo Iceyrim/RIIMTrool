@@ -12,8 +12,8 @@ describe("buildSyntheticDashboardStatus", () => {
       ["synthetic-risex-paper", "BTCUSD"], ["synthetic-risex-paper", "ETHUSD"],
     ]);
     expect(status.markets.some(({ market }) => market === "SYNTH-USD")).toBe(false);
-    expect(status.accountSessionLossCapUsd).toBe(6);
-    expect(status.accounts.every(({ sessionLossCapUsd }) => sessionLossCapUsd === 6)).toBe(true);
+    expect(status).not.toHaveProperty("accountSessionLossCapUsd");
+    expect(status.accounts.every((account) => !("sessionLossCapUsd" in account))).toBe(true);
   });
 
   it("covers preview telemetry and operational states", () => {

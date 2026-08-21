@@ -9,8 +9,9 @@
 #
 # Numbers are arbitrary but internally consistent (order notional roughly matches
 # riskLimits.maxOrderNotionalUsd at StubAdapter's starting synthetic price of 100).
-accountRisk:
-  sessionLossCapUsd: 6
+# No account-wide session loss cap exists in this codebase. daily/weekly caps are live-only
+# (WindowLossCapTracker) and don't apply to this paper-only validation config; left unset.
+accountRisk: {}
 
 markets:
   - symbol: STUBUSD

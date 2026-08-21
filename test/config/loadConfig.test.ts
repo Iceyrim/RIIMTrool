@@ -12,8 +12,7 @@ function writeTempConfig(contents: string): string {
 }
 
 const validYaml = `
-accountRisk:
-  sessionLossCapUsd: 6
+accountRisk: {}
 markets:
   - symbol: BTCUSD
     exchange: n1
@@ -63,7 +62,7 @@ describe("loadMarketsConfig", () => {
 
   it("throws with field-level detail on missing required fields", () => {
     const badYaml = `
-accountRisk: { sessionLossCapUsd: 6 }
+accountRisk: {}
 markets:
   - symbol: BTCUSD
     exchange: n1
@@ -88,9 +87,47 @@ markets:
     expect(() => loadMarketsConfig(writeTempConfig(corrupted))).toThrow();
   });
 
+  it("accepts optional accountRisk.dailyLossCapUsd/weeklyLossCapUsd", () => {
+    const withWindowCaps = validYaml.replace(
+      "accountRisk: {}\n",
+      "accountRisk:\n  dailyLossCapUsd: 5\n  weeklyLossCapUsd: 20\n",
+    );
+    const config = loadMarketsConfig(writeTempConfig(withWindowCaps));
+    expect(config.accountRisk.dailyLossCapUsd).toBe(5);
+    expect(config.accountRisk.weeklyLossCapUsd).toBe(20);
+  });
+
+  it("loads without dailyLossCapUsd/weeklyLossCapUsd configured (absence = no cap enforced)", () => {
+    const config = loadMarketsConfig(writeTempConfig(validYaml));
+    expect(config.accountRisk.dailyLossCapUsd).toBeUndefined();
+    expect(config.accountRisk.weeklyLossCapUsd).toBeUndefined();
+  });
+
+  it("rejects weeklyLossCapUsd smaller than dailyLossCapUsd", () => {
+    const inverted = validYaml.replace(
+      "accountRisk: {}\n",
+      "accountRisk:\n  dailyLossCapUsd: 20\n  weeklyLossCapUsd: 5\n",
+    );
+    expect(() => loadMarketsConfig(writeTempConfig(inverted))).toThrow(/weeklyLossCapUsd/);
+  });
+
+  it("rejects a stale top-level accountRisk.sessionLossCapUsd key instead of silently ignoring it", () => {
+    const stale = validYaml.replace("accountRisk: {}\n", "accountRisk:\n  sessionLossCapUsd: 6\n");
+    expect(() => loadMarketsConfig(writeTempConfig(stale))).toThrow(/sessionLossCapUsd/);
+    expect(() => loadMarketsConfig(writeTempConfig(stale))).toThrow(/removed/);
+  });
+
+  it("rejects a stale accountRisk.sessionLossCapUsd key even alongside valid dailyLossCapUsd/weeklyLossCapUsd (not silently merged/ignored)", () => {
+    const staleWithNewCaps = validYaml.replace(
+      "accountRisk: {}\n",
+      "accountRisk:\n  sessionLossCapUsd: 6\n  dailyLossCapUsd: 5\n  weeklyLossCapUsd: 20\n",
+    );
+    expect(() => loadMarketsConfig(writeTempConfig(staleWithNewCaps))).toThrow(/sessionLossCapUsd/);
+  });
+
   it("throws on duplicate market symbols", () => {
     const duplicated = `
-accountRisk: { sessionLossCapUsd: 6 }
+accountRisk: {}
 markets:
   - symbol: BTCUSD
     exchange: n1
@@ -118,11 +155,11 @@ markets:
     expect(() => loadMarketsConfig(writeTempConfig(duplicated))).toThrow(/duplicate/);
   });
 
-  it("rejects obsolete per-market loss caps instead of silently misreading them", () => {
+  it("rejects an unrecognized per-market key (e.g. a stray legacy loss-cap field) instead of silently misreading it", () => {
     const legacy = validYaml.replace(
       "    inventoryReductionThresholdBase: 0.003\n",
       "    inventoryReductionThresholdBase: 0.003\n    sessionLossCapUsd: 15\n",
     );
-    expect(() => loadMarketsConfig(writeTempConfig(legacy))).toThrow(/sessionLossCapUsd/);
+    expect(() => loadMarketsConfig(writeTempConfig(legacy))).toThrow(/Unknown market configuration key/);
   });
 });

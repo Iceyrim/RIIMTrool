@@ -27,7 +27,6 @@ function testConfig(): EngineMarketConfig {
       maxOrderNotionalUsd: 1_000_000,
       maxOpenOrders: 999,
     },
-    accountSessionLossCapUsd: 1_000_000,
     reduceOnlyExit: { minHoldMs: 45_000, maxHoldMs: 300_000 },
     quoteMinimumLifetimeMs: 2_000,
   };

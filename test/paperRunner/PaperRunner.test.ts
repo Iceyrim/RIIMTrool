@@ -53,7 +53,6 @@ function testConfig(
       maxOrderNotionalUsd: 160,
       maxOpenOrders: 12,
     },
-    accountSessionLossCapUsd: 15,
     reduceOnlyExit: { minHoldMs: 45_000, maxHoldMs: 300_000 },
     quoteMinimumLifetimeMs: 2_000,
     ...overrides,
@@ -127,10 +126,9 @@ describe("PaperRunner", () => {
     expect(telemetry.snapshot().history.points).toHaveLength(1);
   });
 
-  it("relays drained realized PnL into the engine's session PnL, feeding the loss-cap check", async () => {
-    // quoteMinimumLifetimeMs: 0 so every cycle treats existing quotes as stale and genuinely
-    // re-attempts placement (and re-hits the risk check) rather than skipping via the
-    // "already covered by a still-fresh order" shortcut in manageQuoteLadder.
+  it("relays drained realized PnL into the engine's session PnL (display/dashboard only — no cap is checked against it)", async () => {
+    // quoteMinimumLifetimeMs: 0 so a subsequent price move (below) is enough to trigger a
+    // genuine re-attempt on the next cycle, rather than being held by the minimum-lifetime gate.
     const engine = new MarketEngine(
       btcAdapter,
       testConfig("BTCUSD", { quoteMinimumLifetimeMs: 0 }),
@@ -141,17 +139,21 @@ describe("PaperRunner", () => {
     });
     await runner.start();
 
-    btcPnl.queued = -20; // exceeds the configured $15 session loss cap
+    btcPnl.queued = -20; // a large accumulated loss — there is no session loss cap to trip
     const entries = await runner.runOnce();
     runner.stop();
 
     expect(entries[0]?.accountSessionRealizedPnlUsd).toBe(-20);
-    // Next cycle's per-level risk check should now reject every placement attempt for this
-    // market — the cap is enforced per-order inside manageQuoteLadder, not as a whole-cycle
-    // blockedReason (that field is reserved for margin/reconciliation blocks).
+    // No account-wide session loss cap exists in this codebase (see SPEC.md) — an arbitrarily
+    // large negative sessionRealizedPnlUsd never blocks placement on its own. Only the
+    // account-wide daily/weekly WindowLossCapTracker caps (unwired here — this engine has no
+    // windowLossCapProvider) or reconciliation/margin/pnlAvailable gates can block a cycle. Move
+    // the mark price well past the reprice threshold so manageQuoteLadder genuinely re-attempts
+    // placement on the next cycle instead of holding a still-fresh ladder.
+    btcAdapter.marketPrices.set("BTCUSD", { market: "BTCUSD", mark: 60_600 });
     const nextEntries = await runner.runOnce();
-    expect(nextEntries[0]?.summary.quotesAttempted).toBe(0);
-    expect(nextEntries[0]?.summary.quotesPlaced).toBe(0);
+    expect(nextEntries[0]?.summary.quotesAttempted).toBeGreaterThan(0);
+    expect(nextEntries[0]?.summary.quotesPlaced).toBeGreaterThan(0);
   });
 
   it("isolates a market whose runCycle() throws — the other market's cycle still runs (SPEC 4.2)", async () => {

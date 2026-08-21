@@ -14,7 +14,7 @@ describe("toEngineMarketConfig", () => {
     expect(engineConfig.quoteRepriceThresholdBps).toBe(1);
     expect(engineConfig.quoteMaximumLifetimeMs).toBe(120_000);
     expect(engineConfig.symbol).toBe("BTCUSD");
-    expect(engineConfig.accountSessionLossCapUsd).toBe(6);
+    expect(engineConfig).not.toHaveProperty("accountSessionLossCapUsd");
   });
 
   it("drops adapter/orchestration-only fields (exchange, exchangeSymbol, enabled)", () => {

@@ -54,9 +54,11 @@ const MANUAL_ARCHIVE_COMMAND =
  * matches paper-mode semantics, where N1PaperAdapter/StubAdapter/RiseXPaperAdapter's simulated
  * `drainRealizedPnlDeltaUsd()` only ever accounts for trade-driven PnL (RiseXPaperAdapter's
  * funding cash-settlement is the one deliberate exception, and it has no N1 live equivalent
- * wired here). RiskManager's sessionLossCapUsd is therefore a trading-loss cap, not an
- * all-in-PnL cap, in both paper and live mode alike — funding drag/income never trips or masks
- * it. If that ever needs to change, it must change for paper and live together, not just here.
+ * wired here). Any realized-PnL-based risk control built on this delta (currently
+ * WindowLossCapTracker's live-only daily/weekly loss caps — see its class doc comment) is
+ * therefore a trading-loss cap, not an all-in-PnL cap — funding drag/income never trips or masks
+ * it. If that ever needs to change, it must change for paper and live PnL accounting together,
+ * not just here.
  *
  * initialize() must be called once (after the owning N1Adapter has connect()-ed) before any
  * drain. It establishes a persisted per-market "session anchor" cursor — the pre-session PnL

@@ -11,6 +11,18 @@ import { RiskManager } from "./RiskManager.js";
 import { TradeLog, type TradeLogEntry } from "./TradeLog.js";
 import type { AccountRiskState, EngineMarketConfig } from "./types.js";
 
+/** Minimal structural interface MarketEngine needs from a WindowLossCapTracker (see that class),
+ * deliberately not importing the concrete class — mirrors PaperRunner's RealizedPnlSource
+ * pattern, so this feature stays a pure additive dependency MarketEngine has no hard coupling to. */
+export interface WindowLossCapProvider {
+  getState(): {
+    dailyCapped: boolean;
+    weeklyCapped: boolean;
+    dailyLossCapReason?: string;
+    weeklyLossCapReason?: string;
+  };
+}
+
 export interface CycleSummary {
   market: string;
   reconciliation: ReconciliationResult;
@@ -92,6 +104,12 @@ export interface MarketEngineOptions {
   /** Shared by every engine belonging to one configured account. PaperRunner installs one
    * automatically; live construction may inject it before the runner exists. */
   accountRiskState?: AccountRiskState;
+  /** Optional account-wide daily/weekly loss-cap state (see WindowLossCapTracker). Deliberately
+   * NOT threaded through AccountRiskState like pnlAvailable — PaperRunner replaces
+   * accountRiskState wholesale with its own fresh object on construction (see its constructor),
+   * which would silently drop any custom fields added there. Kept as its own engine-owned
+   * reference instead so it survives that unaffected. */
+  windowLossCapProvider?: WindowLossCapProvider;
 }
 
 export interface ManagedOrderCleanupResult {
@@ -126,18 +144,16 @@ export class MarketEngine {
   private quiescing = false;
   private quoteLadderReferencePrice?: number;
   private lastCycleSummary?: CycleSummary;
+  private readonly windowLossCapProvider?: WindowLossCapProvider;
 
   constructor(
     private readonly adapter: ExchangeAdapter,
     private readonly config: EngineMarketConfig,
     options: MarketEngineOptions,
   ) {
+    this.windowLossCapProvider = options.windowLossCapProvider;
     this.accountRiskState = options.accountRiskState ?? {
       sessionRealizedPnlUsd: 0,
-      sessionLossCapUsd:
-        config.accountSessionLossCapUsd ??
-        // Compatibility for programmatic test fixtures during the configuration migration.
-        ((config as EngineMarketConfig & { sessionLossCapUsd?: number }).sessionLossCapUsd ?? 6),
       pnlAvailable: true,
     };
     this.registry = new OrderRegistry(config.symbol, options.stateFilePath);
@@ -303,12 +319,12 @@ export class MarketEngine {
   }
 
   /** Called by PaperRunner when a cycle's RealizedPnlSource.drainRealizedPnlDeltaUsd() throws.
-   * RiskManager's sessionLossCapUsd check only means anything if sessionRealizedPnlUsd is
-   * actually current — trading on with a PnL feed known to be broken would let real losses
-   * accrue past the cap in silence, exactly the gap that made run-live.ts's always-zero stub
-   * unacceptable. Takes effect starting the NEXT runCycle() (this cycle has already run by the
-   * time PaperRunner drains PnL) — the same one-cycle lag sessionRealizedPnlUsd itself already
-   * has via recordRealizedPnl(). */
+   * The daily/weekly loss caps (WindowLossCapTracker) and the dashboard's displayed session PnL
+   * only mean anything if sessionRealizedPnlUsd is actually current — trading on with a PnL feed
+   * known to be broken would let real losses accrue silently uncounted, exactly the gap that made
+   * run-live.ts's always-zero stub unacceptable. Takes effect starting the NEXT runCycle() (this
+   * cycle has already run by the time PaperRunner drains PnL) — the same one-cycle lag
+   * sessionRealizedPnlUsd itself already has via recordRealizedPnl(). */
   markSessionPnlUnavailable(reason: string): void {
     this.accountRiskState.pnlAvailable = false;
     this.accountRiskState.pnlUnavailableReason = reason;
@@ -370,26 +386,16 @@ export class MarketEngine {
       exitState: "no_position",
     };
 
-    // A stale/unknown realized-PnL total invalidates the session loss cap. Reconciliation above
-    // must still run first, but once the feed is known unavailable the safest state is no managed
-    // resting exposure at all. This deliberately precedes the other early-return gates: margin or
-    // reconciliation trouble must not leave our own confirmed-open orders resting.
+    // A stale/unknown realized-PnL total invalidates the daily/weekly loss caps' accounting and
+    // the dashboard's displayed session PnL. Reconciliation above must still run first, but once
+    // the feed is known unavailable the safest state is no managed resting exposure at all. This
+    // deliberately precedes the other early-return gates: margin or reconciliation trouble must
+    // not leave our own confirmed-open orders resting.
     if (!this.accountRiskState.pnlAvailable) {
       summary.pnlOutageCancellation = await this.cancelManagedOrdersForPnlOutage();
       summary.blockedReason =
         `Account realized-PnL unavailable ` +
         `(${this.accountRiskState.pnlUnavailableReason}); holding all new placements this cycle`;
-      return this.finishSummary(summary);
-    }
-
-    if (
-      this.accountRiskState.sessionRealizedPnlUsd <=
-      -this.accountRiskState.sessionLossCapUsd
-    ) {
-      summary.blockedReason =
-        `Account-wide session loss cap of $${this.accountRiskState.sessionLossCapUsd} reached ` +
-        `($${(-this.accountRiskState.sessionRealizedPnlUsd).toFixed(2)} realized loss); ` +
-        "holding all new placements across the account";
       return this.finishSummary(summary);
     }
 
@@ -761,6 +767,7 @@ export class MarketEngine {
     });
 
     const nearestLevelBps = this.config.levelSpacingBps[0] ?? 1;
+    const windowLossCapState = this.windowLossCapProvider?.getState();
 
     let placed = 0;
     let attempted = 0;
@@ -798,8 +805,10 @@ export class MarketEngine {
         progressiveOpenOrderCount: riskState.progressiveOpenOrderCount,
         openBuyQuantity: riskState.openBuyQuantity,
         openSellQuantity: riskState.openSellQuantity,
-        sessionRealizedPnlUsd: this.accountRiskState.sessionRealizedPnlUsd,
-        sessionLossCapUsd: this.accountRiskState.sessionLossCapUsd,
+        dailyLossCapped: windowLossCapState?.dailyCapped,
+        weeklyLossCapped: windowLossCapState?.weeklyCapped,
+        dailyLossCapReason: windowLossCapState?.dailyLossCapReason,
+        weeklyLossCapReason: windowLossCapState?.weeklyLossCapReason,
       });
       if (!riskCheck.allowed) {
         if (riskCheck.deniedBy === "openOrderCapacity") riskSkippedLevels.openOrderCapacity++;

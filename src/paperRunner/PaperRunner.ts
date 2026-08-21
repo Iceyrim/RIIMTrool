@@ -156,12 +156,7 @@ export class PaperRunner {
     private readonly markets: readonly PaperRunnerMarket[],
     private readonly config: PaperRunnerConfig,
   ) {
-    const cap = markets[0]?.engine.getAccountRiskState().sessionLossCapUsd ?? 6;
-    this.accountRiskState = {
-      sessionRealizedPnlUsd: 0,
-      sessionLossCapUsd: cap,
-      pnlAvailable: true,
-    };
+    this.accountRiskState = { sessionRealizedPnlUsd: 0, pnlAvailable: true };
     for (const { engine } of markets) engine.setAccountRiskState(this.accountRiskState);
     this.accountPnlOwnerMarket = markets.find(({ pnlSource }) => pnlSource.scope === "account")?.market;
   }

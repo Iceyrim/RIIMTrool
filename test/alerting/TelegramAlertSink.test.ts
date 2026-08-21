@@ -119,8 +119,8 @@ describe("TelegramAlertSink", () => {
       expectSubstrings: ["ETHUSD", "recovered"],
     },
     {
-      event: { type: "halted", market: "BTCUSD", reason: "session loss cap exceeded" },
-      expectSubstrings: ["BTCUSD", "HALTED", "session loss cap exceeded"],
+      event: { type: "halted", market: "BTCUSD", reason: "daily realized-PnL loss cap reached" },
+      expectSubstrings: ["BTCUSD", "HALTED", "daily realized-PnL loss cap reached"],
     },
     {
       event: { type: "resumed", market: "BTCUSD" },

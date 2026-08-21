@@ -30,8 +30,6 @@ function baseCtx(overrides: Partial<RiskCheckContext> = {}): RiskCheckContext {
     progressiveOpenOrderCount: 0,
     openBuyQuantity: 0,
     openSellQuantity: 0,
-    sessionRealizedPnlUsd: 0,
-    sessionLossCapUsd: 15,
     ...overrides,
   };
 }
@@ -152,11 +150,37 @@ describe("RiskManager.canPlaceOrder", () => {
     expect(rm.canPlaceOrder(baseCtx({ size: 0.001000001, openBuyQuantity: 0.004 })).deniedBy).toBe("aggregateLongExposure");
   });
 
-  it("blocks once the session loss cap is reached", () => {
+  it("blocks placement when dailyLossCapped is set, independent of session PnL", () => {
     const rm = new RiskManager(new FakeExchangeAdapter());
-    const result = rm.canPlaceOrder(baseCtx({ sessionRealizedPnlUsd: -15 }));
+    const result = rm.canPlaceOrder(baseCtx({ dailyLossCapped: true, dailyLossCapReason: "daily realized loss $5.00 reached cap $5" }));
     expect(result.allowed).toBe(false);
-    expect(result.reason).toMatch(/[Ss]ession loss cap/);
+    expect(result.deniedBy).toBe("dailyLoss");
+    expect(result.reason).toMatch(/[Dd]aily.*loss cap/);
+    expect(result.reason).toMatch(/daily realized loss \$5\.00/);
+  });
+
+  it("blocks placement when weeklyLossCapped is set, independent of session PnL", () => {
+    const rm = new RiskManager(new FakeExchangeAdapter());
+    const result = rm.canPlaceOrder(baseCtx({ weeklyLossCapped: true }));
+    expect(result.allowed).toBe(false);
+    expect(result.deniedBy).toBe("weeklyLoss");
+    expect(result.reason).toMatch(/[Ww]eekly.*loss cap/);
+  });
+
+  it("is unaffected by dailyLossCapped/weeklyLossCapped when both are absent (undefined)", () => {
+    const rm = new RiskManager(new FakeExchangeAdapter());
+    expect(rm.canPlaceOrder(baseCtx()).allowed).toBe(true);
+  });
+
+  it("no longer has any session-realized-PnL-based check: RiskCheckContext has no such field, and an unbounded loss never blocks on its own", () => {
+    // There is no account-wide session loss cap in this codebase (see SPEC.md's account-wide
+    // PnL policy section) — only dailyLossCapped/weeklyLossCapped (WindowLossCapTracker) can
+    // block placement on realized-PnL grounds now.
+    const rm = new RiskManager(new FakeExchangeAdapter());
+    const ctx = baseCtx();
+    expect(ctx).not.toHaveProperty("sessionRealizedPnlUsd");
+    expect(ctx).not.toHaveProperty("sessionLossCapUsd");
+    expect(rm.canPlaceOrder({ ...ctx, dailyLossCapped: false, weeklyLossCapped: false }).allowed).toBe(true);
   });
 });
 

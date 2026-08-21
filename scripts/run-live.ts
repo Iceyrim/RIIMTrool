@@ -12,12 +12,22 @@
  *
  * Session realized-PnL is wired to N1RealizedPnlSource (src/adapters/n1/N1RealizedPnlSource.ts),
  * which sums N1's own authoritative getAccountPnl() trading-PnL ledger — replacing the
- * always-zero stub this script used to carry (see CLAUDE.md's now-resolved follow-up item).
- * RiskManager's account-wide session-loss gate is therefore live and
- * functioning: MarketEngine.runCycle() blocks ALL new placement, including reduce-only exits,
- * whenever a PnL drain fails (MarketEngine.markSessionPnlUnavailable()) rather than silently
- * treating a broken feed as "$0 realized this cycle." Excludes settledFundingPnl, matching
- * paper-mode semantics — see N1RealizedPnlSource's class doc comment.
+ * always-zero stub this script used to carry (see CLAUDE.md's now-resolved follow-up item). The
+ * feed-health gate built on top of it is therefore live and functioning: MarketEngine.runCycle()
+ * blocks ALL new placement, including reduce-only exits, whenever a PnL drain fails
+ * (MarketEngine.markSessionPnlUnavailable()) rather than silently treating a broken feed as "$0
+ * realized this cycle." Excludes settledFundingPnl, matching paper-mode semantics — see
+ * N1RealizedPnlSource's class doc comment.
+ *
+ * There is no account-wide session loss cap in this codebase — it was deliberately removed (see
+ * SPEC.md's account-wide PnL policy section): restarting the bot no longer creates or resets any
+ * loss-control boundary. Optional account-wide daily/weekly realized-PnL loss caps
+ * (config.accountRisk.dailyLossCapUsd / weeklyLossCapUsd) are the sole placement-blocking risk
+ * control built on realized PnL. They ride the same drain via WindowTrackingRealizedPnlSource
+ * wrapping pnlSource — see WindowLossCapTracker's class doc comment for why these only ever block
+ * new ladder placement and never a reduce-only exit. Persisted separately at
+ * state/live/pnl-window-anchors.json. Live-only — paper runners have no durable realized-PnL
+ * source to drive this from.
  *
  * Usage (once .env has real values and you have deliberately decided to run live):
  *   date -u +%F > state/live/ARMED                         # same-day intent, single-use
@@ -72,7 +82,9 @@ import { DASHBOARD_SNAPSHOT_DIRECTORY, DashboardSnapshotPublisher } from "../src
 import { DashboardTelemetry } from "../src/dashboard/DashboardTelemetry.js";
 import { DashboardHistoryStore } from "../src/dashboard/DashboardHistoryStore.js";
 import { MarketEngine } from "../src/engine/MarketEngine.js";
+import { WindowLossCapTracker } from "../src/engine/WindowLossCapTracker.js";
 import { PaperRunner, type PaperRunnerMarket } from "../src/paperRunner/PaperRunner.js";
+import { WindowTrackingRealizedPnlSource } from "../src/paperRunner/WindowTrackingRealizedPnlSource.js";
 
 export function createLiveShutdownHandler(options: {
   runner: PaperRunner;
@@ -241,9 +253,9 @@ async function main(): Promise<void> {
   await adapter.connect();
 
   // STAGE 6 — real N1 realized-PnL source. Constructed and probed live now, before any
-  // confirmation is requested: RiskManager's sessionLossCapUsd gate is meaningless if session
-  // PnL isn't actually being tracked, so a broken/unreachable PnL feed must abort startup here,
-  // never degrade into a live run with a silently inert risk cap.
+  // confirmation is requested: the daily/weekly loss caps (and the dashboard's displayed session
+  // PnL) are meaningless if session PnL isn't actually being tracked, so a broken/unreachable PnL
+  // feed must abort startup here, never degrade into a live run with silently inert risk caps.
   const pnlAnchorFilePath = join(process.cwd(), "state", "live", "pnl-session-anchor.json");
   const pnlSource = new N1RealizedPnlSource({
     nord: adapter.getNordClient(),
@@ -262,8 +274,8 @@ async function main(): Promise<void> {
   console.log(`Margin: ${JSON.stringify(adapter.getMarginStatus())}`);
   console.log(
     `Account realized-PnL: live N1 account-wide source initialized OK (anchor: ${pnlAnchorFilePath}); ` +
-      `account session loss cap is $${config.accountRisk.sessionLossCapUsd} and will block all new placement, including reduce-only ` +
-      "exits, if a PnL drain ever fails mid-session.",
+      "a PnL drain failure mid-session will block all new placement, including reduce-only exits, " +
+      "until it recovers.",
   );
   for (const marketConfig of enabled) {
     const positions = adapter.getPositions(marketConfig.symbol);
@@ -289,6 +301,32 @@ async function main(): Promise<void> {
   const history = new DashboardHistoryStore(join(process.cwd(), "state", "dashboard"), "n1-live");
   const telemetry = new DashboardTelemetry(adapter, true, 100, history, () => alertBus?.getDeliveryHealth() ?? { enabled: false, attempted: 0, delivered: 0, failed: 0, pending: 0 });
 
+  // STAGE 9b — optional account-wide daily/weekly realized-PnL loss caps (WindowLossCapTracker),
+  // the sole realized-PnL-based placement-blocking risk control in this codebase, layered on via
+  // a decorator around pnlSource rather than any change to it. Entirely skipped (no anchor file,
+  // no wrapping) when neither cap is configured, so this feature has zero footprint for a config
+  // that doesn't opt in. See WindowLossCapTracker's class doc comment for why this only ever
+  // blocks new ladder placement, never reduce-only exits.
+  const windowCapsConfigured =
+    config.accountRisk.dailyLossCapUsd !== undefined || config.accountRisk.weeklyLossCapUsd !== undefined;
+  const windowLossCapTracker = windowCapsConfigured
+    ? new WindowLossCapTracker({
+        dailyLossCapUsd: config.accountRisk.dailyLossCapUsd,
+        weeklyLossCapUsd: config.accountRisk.weeklyLossCapUsd,
+        anchorFilePath: join(process.cwd(), "state", "live", "pnl-window-anchors.json"),
+        alertBus,
+      })
+    : undefined;
+  const runnerPnlSource = windowLossCapTracker
+    ? new WindowTrackingRealizedPnlSource(pnlSource, windowLossCapTracker)
+    : pnlSource;
+  if (windowLossCapTracker) {
+    console.log(
+      `[LIVE] Daily/weekly loss caps: daily=${config.accountRisk.dailyLossCapUsd ?? "unset"} ` +
+        `weekly=${config.accountRisk.weeklyLossCapUsd ?? "unset"} (anchor: state/live/pnl-window-anchors.json)`,
+    );
+  }
+
   // STAGE 10 — one shared N1Adapter across every configured market, matching N1's real single
   // cross-margined account (SPEC.md Section 4.3), same as run-paper.ts. pnlSource is likewise
   // one shared N1RealizedPnlSource instance, drained per-market (see its class doc comment).
@@ -313,8 +351,9 @@ async function main(): Promise<void> {
           isReduceOnly: entry.isReduceOnly,
         });
       },
+      windowLossCapProvider: windowLossCapTracker,
     }),
-    pnlSource,
+    pnlSource: runnerPnlSource,
   }));
 
   // STAGE 11

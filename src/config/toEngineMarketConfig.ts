@@ -16,7 +16,6 @@ export function toEngineMarketConfig(config: MarketsConfig["markets"][number]): 
     levelSpacingBps: config.levelSpacingBps,
     inventoryReductionThresholdBase: config.inventoryReductionThresholdBase,
     riskLimits: config.riskLimits,
-    accountSessionLossCapUsd: config.accountSessionLossCapUsd,
     reduceOnlyExit: config.reduceOnlyExit,
     quoteMinimumLifetimeMs: config.quoteMinimumLifetimeMs,
     quoteRepriceThresholdBps: config.quoteRepriceThresholdBps,

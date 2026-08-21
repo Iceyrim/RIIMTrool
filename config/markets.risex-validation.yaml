@@ -12,8 +12,9 @@
 # step grid, not a claim that these are RISEx-optimal.
 #
 # Never load this alongside a real live-mode run; keep it isolated from config/markets.yaml.
-accountRisk:
-  sessionLossCapUsd: 6
+# No account-wide session loss cap exists in this codebase. daily/weekly caps are live-only
+# (WindowLossCapTracker) and don't apply to this paper-only validation config; left unset.
+accountRisk: {}
 
 markets:
   - symbol: BTCUSD

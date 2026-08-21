@@ -81,7 +81,6 @@ export interface DashboardAccountStatus {
   healthDetails: string[];
   uptimeMs: DashboardMetric<number>;
   sessionRealizedPnlUsd: number;
-  sessionLossCapUsd: number;
   pnlAvailable: boolean;
   volumes: Record<"24h" | "7d" | "30d" | "allTime", DashboardMetric<VolumeTelemetry>>;
   history: DashboardMetric<{ sessions: SessionSummary[]; points: HistoryPoint[]; status: HistoryStoreStatus }>;
@@ -92,7 +91,6 @@ export interface DashboardStatus {
   generatedAt: number;
   totalExposureUsd: number;
   accountSessionRealizedPnlUsd: number;
-  accountSessionLossCapUsd: number;
   accountPnlAvailable: boolean;
   accounts: DashboardAccountStatus[];
   markets: MarketStatus[];
@@ -195,7 +193,6 @@ function buildAccountStatus(
       "The owning runner's monotonic startedAt timestamp supplied to DashboardService.",
     ),
     sessionRealizedPnlUsd: engine.getSessionRealizedPnlUsd(),
-    sessionLossCapUsd: risk.sessionLossCapUsd,
     pnlAvailable: risk.pnlAvailable,
     volumes: {
       "24h": volumeMetric("24h"),
@@ -248,7 +245,6 @@ export function buildDashboardStatus(markets: readonly DashboardMarket[]): Dashb
       0,
     ),
     accountSessionRealizedPnlUsd: first?.sessionRealizedPnlUsd ?? 0,
-    accountSessionLossCapUsd: first?.sessionLossCapUsd ?? 0,
     accountPnlAvailable: first?.pnlAvailable ?? false,
     accounts,
     markets: marketStatuses,

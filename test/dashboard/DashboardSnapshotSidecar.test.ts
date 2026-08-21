@@ -13,7 +13,7 @@ import {
 
 const status = (exchangeId: string): DashboardStatus => ({
   generatedAt: 1, totalExposureUsd: 0, accountSessionRealizedPnlUsd: 0,
-  accountSessionLossCapUsd: 6, accountPnlAvailable: true, accounts: [], markets: [],
+  accountPnlAvailable: true, accounts: [], markets: [],
   unavailableTelemetry: [exchangeId],
 });
 const snapshot = (sessionId: string, lifecycle: "running" | "stopped", startedAt: number, publishedAt = startedAt): DashboardSessionSnapshot => ({

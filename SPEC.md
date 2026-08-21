@@ -65,14 +65,46 @@ markets:
     riskLimits: { maxLongPosition: 0.15, maxShortPosition: 0.15, maxOrderSize: 0.075, maxOrderNotionalUsd: 160, maxOpenOrders: 12 }
 ```
 
-The N1 realized-PnL policy is account-wide. Configuration has one top-level source of truth:
-`accountRisk: { sessionLossCapUsd: 6 }`. It is enforced across every N1 market, and the N1 ledger
-uses one account-wide cursor so an event cannot be consumed once per market. Per-market loss-cap
-keys are invalid. Paper/stub/RISEx runners use the same account-risk abstraction against their own
-local/shared account source; they do not use N1 ledger semantics.
+The N1 realized-PnL policy is account-wide. The N1 ledger uses one account-wide cursor so an event
+cannot be consumed once per market. Per-market loss-cap keys are invalid — configuration has one
+top-level source of truth: `accountRisk`. Paper/stub/RISEx runners use the same account-risk
+abstraction against their own local/shared account source; they do not use N1 ledger semantics.
 
-**Current session loss cap:** one account-wide $6 cap. It is never displayed or enforced as
-independent BTC and ETH PnL.
+**There is no account-wide session loss cap.** An earlier design had exactly this — one
+account-wide, non-resetting cap (`accountRisk: { sessionLossCapUsd: 6 }`) that, once tripped,
+stayed tripped until a human deleted its persisted anchor file or restarted the process to zero
+the in-memory counter. It was removed entirely (RiskManager.ts, MarketEngine.ts,
+`accountRisk.sessionLossCapUsd` in schema.ts — the key is now rejected outright, not silently
+ignored, if present in config). **Restarting the bot no longer creates or resets any loss-control
+boundary. Risk control is based exclusively on UTC daily and weekly realized-PnL windows.**
+
+**Current risk control: `accountRisk.dailyLossCapUsd` / `weeklyLossCapUsd`** (both optional;
+absence means no cap enforced), implemented by `WindowLossCapTracker`
+(`src/engine/WindowLossCapTracker.ts`), persisted separately at
+`state/live/pnl-window-anchors.json` (distinct from `N1RealizedPnlSource`'s own
+`pnl-session-anchor.json`, which still exists — see that class — purely as the underlying N1 PnL
+feed/cursor, not a cap). A window resets automatically at its UTC calendar boundary (midnight for
+daily, Monday 00:00 for weekly) regardless of process uptime or restarts — this is the deliberate
+replacement for the old restart-dependent behavior. Once a window's realized loss crosses its cap
+it stays capped ("sticky") for the rest of that window even if a later win partially offsets the
+loss, to avoid the cap being trivially gameable right at the threshold; only the next calendar
+rollover clears it. A capped window blocks new quote-ladder placement only — reduce-only exits are
+never blocked by it, unlike the old session cap, which blocked everything including exits (see
+RiskManager.ts's canPlaceOrder doc comment). This is live-only: paper/stub/RISEx-paper runners have
+no durable realized-PnL source to drive it from, so it is not wired into any paper entrypoint.
+
+**Known accepted tradeoff:** because these are independent calendar windows rather than one
+continuously-tracked running total, a loss split across a UTC boundary (e.g. -$4.99 late one day,
+then another -$4.99 just after midnight) can leave both the daily cap ($5) and the weekly cap
+untripped even though $9.98 was lost in minutes. This is the accepted cost of removing the
+restart-dependent session cap in favor of purely calendar-based, self-resetting windows — not an
+oversight.
+
+The `pnlAvailable` feed-health gate (`MarketEngine.markSessionPnlUnavailable()` /
+`confirmSessionPnlHealthy()`) is unrelated to any of the above and was not touched by this change:
+if the realized-PnL feed itself fails to drain, MarketEngine still blocks ALL new placement,
+including reduce-only exits, until it recovers — this protects the accuracy of the daily/weekly
+windows' own accounting (and the dashboard's displayed session PnL), not a specific dollar cap.
 
 **Adding a new market** should be: add one entry to this config, no code changes required, restart. This was the whole point of unifying — verify this actually works before calling the unification complete.
 

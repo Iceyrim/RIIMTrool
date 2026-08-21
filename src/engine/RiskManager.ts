@@ -24,18 +24,22 @@ export interface RiskCheckContext {
    * successful placements earlier in this cycle. Opposing sides are deliberately not netted. */
   openBuyQuantity: number;
   openSellQuantity: number;
-  /** Caller-computed running total for this market's session (negative = net loss). This is
-   * intentionally simple for now — proper realized-PnL accounting arrives with trade logging
-   * (SPEC.md Section 7, a later build step); until then this is whatever the engine sums from
-   * applied fills. */
-  sessionRealizedPnlUsd: number;
-  sessionLossCapUsd: number;
+  /** Account-wide daily/weekly realized-PnL loss caps (WindowLossCapTracker) — the only
+   * realized-PnL-based placement gate in this codebase (the former account-wide session loss
+   * cap was removed; restarting the bot no longer creates or resets any loss-control boundary,
+   * see SPEC.md). Optional so every existing caller/fixture that never sets them just behaves as
+   * "not capped". Deliberately only reached from the quote-ladder path (manageQuoteLadder), never
+   * from manageReduceOnlyExit — see RiskManager.canPlaceOrder's doc comment. */
+  dailyLossCapped?: boolean;
+  weeklyLossCapped?: boolean;
+  dailyLossCapReason?: string;
+  weeklyLossCapReason?: string;
 }
 
 export interface RiskCheckResult {
   allowed: boolean;
   reason?: string;
-  deniedBy?: "openOrderCapacity" | "orderSize" | "orderNotional" | "aggregateLongExposure" | "aggregateShortExposure" | "sessionLoss" | "reconciliation";
+  deniedBy?: "openOrderCapacity" | "orderSize" | "orderNotional" | "aggregateLongExposure" | "aggregateShortExposure" | "reconciliation" | "dailyLoss" | "weeklyLoss";
 }
 
 /**
@@ -104,11 +108,21 @@ export class RiskManager {
       };
     }
 
-    if (ctx.sessionRealizedPnlUsd <= -ctx.sessionLossCapUsd) {
+    // Daily/weekly caps (WindowLossCapTracker) deliberately only reach this per-level ladder
+    // check — manageReduceOnlyExit() never calls canPlaceOrder(), so a capped day/week never
+    // blocks a reduce-only exit, only new ladder placement.
+    if (ctx.dailyLossCapped) {
       return {
         allowed: false,
-        reason: `Account-wide session loss cap of $${ctx.sessionLossCapUsd} reached ($${(-ctx.sessionRealizedPnlUsd).toFixed(2)} realized loss); placement blocked for ${ctx.market}`,
-        deniedBy: "sessionLoss",
+        reason: `Daily realized-PnL loss cap reached${ctx.dailyLossCapReason ? ` (${ctx.dailyLossCapReason})` : ""}; new ladder placement blocked for ${ctx.market} until UTC daily rollover`,
+        deniedBy: "dailyLoss",
+      };
+    }
+    if (ctx.weeklyLossCapped) {
+      return {
+        allowed: false,
+        reason: `Weekly realized-PnL loss cap reached${ctx.weeklyLossCapReason ? ` (${ctx.weeklyLossCapReason})` : ""}; new ladder placement blocked for ${ctx.market} until UTC weekly rollover`,
+        deniedBy: "weeklyLoss",
       };
     }
 

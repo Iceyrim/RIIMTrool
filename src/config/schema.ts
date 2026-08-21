@@ -62,7 +62,7 @@ export const marketConfigSchema = z
     quoteRepriceThresholdBps: z.number().positive().default(1),
     quoteMaximumLifetimeMs: z.number().int().nonnegative().default(120_000),
   })
-  .strict("Unknown market configuration key (sessionLossCapUsd is now accountRisk.sessionLossCapUsd)")
+  .strict("Unknown market configuration key (loss caps live under top-level accountRisk.dailyLossCapUsd/weeklyLossCapUsd, not per-market)")
   .refine((m) => m.levelSpacingBps.length === m.quoteLevels, {
     message: "levelSpacingBps length must match quoteLevels",
     path: ["levelSpacingBps"],
@@ -88,22 +88,39 @@ export const marketConfigSchema = z
     path: ["riskLimits", "maxOpenOrders"],
   });
 
-export const accountRiskSchema = z.object({
-  sessionLossCapUsd: z.number().positive(),
-});
-
-export const marketsConfigSchema = z
+/**
+ * Account-wide realized-PnL loss caps (WindowLossCapTracker). The former account-wide
+ * sessionLossCapUsd (a single non-resetting per-session cap, cleared only by deleting its
+ * anchor file / restarting) was removed entirely — see SPEC.md's account-wide PnL policy
+ * section: restarting the bot no longer creates or resets any loss-control boundary. Risk
+ * control is based exclusively on these UTC daily/weekly windows. Both optional: absence means
+ * no cap enforced. Unlike the old session cap, these only block new ladder placement, never
+ * reduce-only exits — see WindowLossCapTracker's class doc comment.
+ */
+export const accountRiskSchema = z
   .object({
-    accountRisk: accountRiskSchema,
-    markets: z.array(marketConfigSchema).min(1),
+    dailyLossCapUsd: z.number().positive().optional(),
+    weeklyLossCapUsd: z.number().positive().optional(),
   })
-  .transform(({ accountRisk, markets }) => ({
-    accountRisk,
-    markets: markets.map((market) => ({
-      ...market,
-      accountSessionLossCapUsd: accountRisk.sessionLossCapUsd,
-    })),
-  }));
+  .strict(
+    "Unknown accountRisk key (sessionLossCapUsd was removed — the account-wide session loss cap " +
+      "no longer exists; use dailyLossCapUsd/weeklyLossCapUsd instead)",
+  )
+  .refine(
+    (r) =>
+      r.dailyLossCapUsd === undefined ||
+      r.weeklyLossCapUsd === undefined ||
+      r.weeklyLossCapUsd >= r.dailyLossCapUsd,
+    {
+      message: "weeklyLossCapUsd must be >= dailyLossCapUsd when both are set",
+      path: ["weeklyLossCapUsd"],
+    },
+  );
+
+export const marketsConfigSchema = z.object({
+  accountRisk: accountRiskSchema,
+  markets: z.array(marketConfigSchema).min(1),
+});
 
 export type RiskLimits = z.infer<typeof riskLimitsSchema>;
 export type MarketConfig = z.infer<typeof marketConfigSchema>;

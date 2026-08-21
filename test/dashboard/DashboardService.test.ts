@@ -28,7 +28,6 @@ function testConfig(symbol: string): EngineMarketConfig {
       maxOrderNotionalUsd: 160,
       maxOpenOrders: 12,
     },
-    accountSessionLossCapUsd: 15,
     reduceOnlyExit: { minHoldMs: 45_000, maxHoldMs: 300_000 },
     quoteMinimumLifetimeMs: 2_000,
   };
@@ -67,7 +66,7 @@ describe("buildDashboardStatus", () => {
     expect(status.markets[0]?.position).toBeNull();
     expect(status.totalExposureUsd).toBe(0);
     expect(status.accountSessionRealizedPnlUsd).toBe(0);
-    expect(status.accountSessionLossCapUsd).toBe(15);
+    expect(status).not.toHaveProperty("accountSessionLossCapUsd");
     expect(status.accounts).toHaveLength(1);
     expect(status.accounts[0]?.balances).toEqual({ available: true, value: [] });
     expect(status.accounts[0]?.margin).toEqual({ available: true, value: adapter.marginStatus });

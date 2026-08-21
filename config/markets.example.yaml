@@ -5,8 +5,12 @@
 # exchangeSymbol is a TODO: confirm the real live N1 market symbols before connecting anything
 # (see .env.example — no live/testnet connection has been made yet, this is unverified).
 
+# No account-wide session loss cap exists in this codebase — restarting the bot no longer
+# creates or resets any loss-control boundary. Risk control is based exclusively on these UTC
+# daily/weekly realized-PnL windows (both optional; absence means no cap enforced).
 accountRisk:
-  sessionLossCapUsd: 6
+  dailyLossCapUsd: 5
+  weeklyLossCapUsd: 20
 
 markets:
   - symbol: BTCUSD

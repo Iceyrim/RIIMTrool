@@ -57,8 +57,6 @@ export interface EngineMarketConfig {
   levelSpacingBps: number[];
   inventoryReductionThresholdBase: number;
   riskLimits: RiskLimitsConfig;
-  /** Derived from the runner configuration's single accountRisk source of truth. */
-  accountSessionLossCapUsd?: number;
   /** Not part of SPEC.md Section 2's config shape (which only states the proven values 45s/5min
    * once, in prose) — surfaced as config here so it's not a hidden literal, matching Section 6's
    * "no hardcoded literal alongside a configurable system" lesson. */
@@ -72,8 +70,10 @@ export interface EngineMarketConfig {
 }
 
 export interface AccountRiskState {
+  /** Running account-wide realized PnL total, sourced from RealizedPnlSource drains. Display-only
+   * (dashboard) plus the feed for WindowLossCapTracker's daily/weekly windows — no cap is checked
+   * against this running total itself; see SPEC.md's account-wide PnL policy section. */
   sessionRealizedPnlUsd: number;
-  sessionLossCapUsd: number;
   pnlAvailable: boolean;
   pnlUnavailableReason?: string;
 }

@@ -71,7 +71,6 @@ export function buildSyntheticDashboardStatus(): DashboardStatus {
     healthDetails: accountIndex === 0 ? ["Synthetic preview telemetry is healthy"] : ["Synthetic preview warning state"],
     uptimeMs: { available: true, value: 6 * HOUR },
     sessionRealizedPnlUsd: accountIndex === 0 ? scale * 2 : -scale * 2,
-    sessionLossCapUsd: 6,
     pnlAvailable: true,
     volumes: accountIndex === 0 ? volumes(exchangeId, scale) : {
       ...volumes(exchangeId, scale),
@@ -93,7 +92,6 @@ export function buildSyntheticDashboardStatus(): DashboardStatus {
     generatedAt: SYNTHETIC_NOW,
     totalExposureUsd: 1_260,
     accountSessionRealizedPnlUsd: 3.2,
-    accountSessionLossCapUsd: 6,
     accountPnlAvailable: true,
     accounts,
     markets: marketSpecs.map(({ exchangeId, market, offset, exitState, refresh, anomaly }) => ({
