@@ -7,7 +7,7 @@ import type {
 } from "../adapters/ExchangeAdapter.js";
 import type { OrderRegistry } from "./OrderRegistry.js";
 import type { TradeLog } from "./TradeLog.js";
-import type { LocalOrder, ReduceOnlyExitConfig } from "./types.js";
+import { CANCEL_CONFIRM_GRACE_MS, type LocalOrder, type ReduceOnlyExitConfig } from "./types.js";
 
 export interface PlaceQuoteResult {
   success: boolean;
@@ -16,7 +16,7 @@ export interface PlaceQuoteResult {
 }
 
 export interface CancelResult {
-  finalState: "CANCELLED" | "FILLED";
+  finalState: "CANCELLED" | "FILLED" | "CANCEL_PENDING_CONFIRM";
   fillsApplied: NormalizedFill[];
   /** True only when the adapter explicitly confirmed cancellation. Capacity accounting must not
    * assume a failed-open local CANCELLED transition removed the exchange order. */
@@ -200,8 +200,24 @@ export class OrderLifecycle {
    * Cancels a resting order, implementing SPEC.md Section 5a's race-condition fix: before the
    * local state is finalized as CANCELLED, replay the order's trade history from the exchange to
    * check whether it actually filled in the gap between the cancel request landing and this
-   * check running. If the replay itself errors, fail open — proceed with CANCELLED rather than
-   * getting stuck, since a fix for a race condition must never introduce a new stuck-order mode.
+   * check running.
+   *
+   * This snapshot only catches a fill that landed *before* it runs. It cannot catch one that
+   * lands *after* — in the gap between this snapshot and the exchange actually finishing the
+   * cancel — because N1's cancelOrder() response carries no stronger confirmation than "the call
+   * didn't throw" (the same shallow-confirmation shape placeOrder() had before the 5b fix, minus
+   * any equivalent to getOrderFills() to double-check it). That residual gap is what produced a
+   * real, observed drift: trades-ETHUSD.jsonl's net signed volume drifted to -0.887 base while the
+   * live-logged real position stayed bounded within its ±0.15 risk limit the whole time — orphaned
+   * covering buys on large, long-resting reduce-only exits, never BTC's tiny orders which rarely
+   * hit the race window.
+   *
+   * So this snapshot alone can no longer safely finalize CANCELLED when it doesn't show a full
+   * fill — that's left CANCEL_PENDING_CONFIRM for Reconciliation's grace-period recheck
+   * (checkAgainstExchange()) to resolve over subsequent cycles. Only a fill-lookup that itself
+   * errors fails open immediately here (SPEC.md Section 5a: this check must never become a new
+   * stuck-order mode) — the Reconciliation-side recheck has bounded retries where this one call
+   * does not.
    *
    * Returns null if there's nothing to cancel (unknown clientOrderId, or the order was never
    * confirmed on the exchange in the first place — e.g. still UNKNOWN).
@@ -251,14 +267,24 @@ export class OrderLifecycle {
           fills.reduce((sum, f) => sum + f.size, 0),
         );
 
-    const finalState: "CANCELLED" | "FILLED" = totalFilled >= local.size ? "FILLED" : "CANCELLED";
+    const now = Date.now();
+    const finalState: "CANCELLED" | "FILLED" | "CANCEL_PENDING_CONFIRM" =
+      totalFilled >= local.size
+        ? "FILLED"
+        : failedOpen
+          ? "CANCELLED" // fail open per SPEC.md Section 5a — lookup itself errored, nothing more
+          : "CANCEL_PENDING_CONFIRM"; // not fully filled by this snapshot, but not yet safely
+    // terminal either — Reconciliation's grace-period recheck resolves it from here.
 
     local.filledSize = totalFilled;
     local.state = finalState;
-    local.updatedAt = Date.now();
+    local.updatedAt = now;
+    local.cancelGraceUntil = finalState === "CANCEL_PENDING_CONFIRM" ? now + CANCEL_CONFIRM_GRACE_MS : undefined;
     local.note = failedOpen
       ? "getOrderFills lookup failed during cancel race-check; failed open per SPEC.md Section 5a"
-      : undefined;
+      : finalState === "CANCEL_PENDING_CONFIRM"
+        ? "Cancel requested but not yet fill-confirmed gone from the exchange; awaiting Reconciliation's grace-period recheck"
+        : undefined;
     this.registry.upsert(local);
 
     return { finalState, fillsApplied: fills, cancellationConfirmed, failedOpen };

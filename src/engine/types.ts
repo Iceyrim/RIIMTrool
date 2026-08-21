@@ -9,7 +9,29 @@ import type { OrderSide, OrderType } from "../adapters/ExchangeAdapter.js";
  * this state is neither trusted to be resting nor safely assumed gone; only reconciliation
  * (against exchange truth) can resolve it into RESTING or removed.
  */
-export type LocalOrderState = "RESTING" | "PENDING_CANCEL" | "CANCELLED" | "FILLED" | "UNKNOWN";
+/**
+ * CANCEL_PENDING_CONFIRM sits between PENDING_CANCEL and the terminal states: the cancel call has
+ * resolved and an initial fill-replay snapshot has been taken (SPEC.md Section 5a), but that
+ * snapshot didn't show a full fill, so the order isn't safely terminal yet — the exchange may
+ * still be processing the cancel and a fill may land in that gap. Deliberately excluded from every
+ * "is this order still live for placement-gating purposes" check (duplicate reduce-only guard,
+ * existing-order lookup) so replacement placement isn't delayed by it — only Reconciliation's
+ * grace-period recheck (and shutdown/PnL-outage cleanup sweeps) treat it as still-open.
+ */
+export type LocalOrderState =
+  | "RESTING"
+  | "PENDING_CANCEL"
+  | "CANCEL_PENDING_CONFIRM"
+  | "CANCELLED"
+  | "FILLED"
+  | "UNKNOWN";
+
+/** How long an order may sit in CANCEL_PENDING_CONFIRM before Reconciliation fails it open to
+ * CANCELLED (raising a CANCEL_CONFIRM_TIMEOUT anomaly rather than resolving silently). Sized well
+ * under the reduce-only exit's 300s max-hold ceiling (SPEC.md Section 5c) and comfortably above
+ * the ~5-20s per-market reconciliation cadence observed in live logs, so it absorbs the race
+ * without stalling the exit-repricing cadence. */
+export const CANCEL_CONFIRM_GRACE_MS = 60_000;
 
 export interface LocalOrder {
   /** Our own generated id. Always present, regardless of whether the exchange ever confirmed
@@ -33,6 +55,9 @@ export interface LocalOrder {
   /** Free-text diagnostic, e.g. the UNRESOLVED_NOT_CONFIRMED message, or why a cancel/reconcile
    * decision was made. Not authoritative, purely for operator debugging. */
   note?: string;
+  /** Unix ms deadline for CANCEL_PENDING_CONFIRM; unset for every other state. Reconciliation
+   * fails the order open to CANCELLED once now() passes this, per CANCEL_CONFIRM_GRACE_MS. */
+  cancelGraceUntil?: number;
 }
 
 export interface RiskLimitsConfig {

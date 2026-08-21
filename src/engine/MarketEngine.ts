@@ -225,6 +225,7 @@ export class MarketEngine {
             order.exchangeOrderId !== null &&
             (order.state === "RESTING" ||
               order.state === "PENDING_CANCEL" ||
+              order.state === "CANCEL_PENDING_CONFIRM" ||
               order.state === "UNKNOWN"),
         )
         .map((order) => [order.exchangeOrderId as string, order]),
@@ -526,6 +527,7 @@ export class MarketEngine {
         order.exchangeOrderId !== null &&
         (order.state === "RESTING" ||
           order.state === "PENDING_CANCEL" ||
+          order.state === "CANCEL_PENDING_CONFIRM" ||
           order.state === "UNKNOWN"),
     );
     const managedOpen = managedActive.filter((order) =>

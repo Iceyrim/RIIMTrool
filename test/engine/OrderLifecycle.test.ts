@@ -226,15 +226,24 @@ describe("OrderLifecycle", () => {
       expect(registry.get(placeResult.order!.clientOrderId)?.filledSize).toBe(0.01);
     });
 
-    it("resolves to CANCELLED when no fill is found", async () => {
+    it("resolves to CANCEL_PENDING_CONFIRM, not CANCELLED, when no fill is found on this single snapshot", async () => {
+      // This snapshot only catches a fill that landed BEFORE it runs — it cannot prove nothing
+      // fills in the gap between here and the exchange actually finishing the cancel. Finalizing
+      // CANCELLED on this snapshot alone is exactly the residual SPEC 5a gap that let ETHUSD
+      // covering fills go missing from trades-ETHUSD.jsonl; Reconciliation's grace-period recheck
+      // is what may finalize this into CANCELLED (or FILLED) instead.
       const placeResult = await lifecycle.placeQuote({
         side: "buy",
         type: "postOnly",
         size: 0.01,
         price: 60000,
       });
+      const before = Date.now();
       const result = await lifecycle.cancelOrder(placeResult.order!.clientOrderId);
-      expect(result?.finalState).toBe("CANCELLED");
+      expect(result?.finalState).toBe("CANCEL_PENDING_CONFIRM");
+      const local = registry.get(placeResult.order!.clientOrderId);
+      expect(local?.state).toBe("CANCEL_PENDING_CONFIRM");
+      expect(local?.cancelGraceUntil).toBeGreaterThan(before);
     });
 
     it("fails OPEN when the getOrderFills race-check lookup itself errors — resolves to CANCELLED rather than getting stuck", async () => {
