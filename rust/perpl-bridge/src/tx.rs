@@ -336,12 +336,19 @@ pub fn extract_order_id(
             _ => {}
         }
     }
-    let requested = requested.ok_or("missing order request log")?;
+    requested.ok_or("missing order request log")?;
     let placed = placed.ok_or("missing order placed log")?;
-    if requested != placed.orderId {
-        return Err("order request/placed identity mismatch".into());
+    // Correlation is already proven by the orderDescId/perpId match above (plus
+    // the ambiguity checks on both slots); `OrderPlaced` carries no request-side
+    // fields to re-verify against. The request log's own `orderId` is always 0
+    // at request time (unassigned; see the pinned SDK's `request_order_id`,
+    // which maps 0 to "no id yet"), so comparing it to `placed.orderId` here
+    // would reject every real order.
+    if placed.orderId == U256::ZERO {
+        return Err("order placed with zero order id".into());
     }
-    requested
+    placed
+        .orderId
         .try_into()
         .map_err(|_| "order id exceeds supported range".to_string())
 }
