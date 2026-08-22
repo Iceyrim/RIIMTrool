@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 
 [dependencies]
-alloy = { version = "2.0.4", default-features = false, features = ["contract", "provider-http", "reqwest", "reqwest-rustls-tls", "rpc", "rpc-client", "rpc-types"] }
+alloy = { version = "2.0.4", default-features = false, features = ["contract", "provider-http", "reqwest", "reqwest-rustls-tls", "rpc", "rpc-client", "rpc-types", "signer-local", "transport-throttle"] }
 alloy-sol-types = { version = "1.5.7", default-features = false, features = ["more-tuple-impls"] }
 fastnum = "0.7.4"
 futures = "0.3.32"

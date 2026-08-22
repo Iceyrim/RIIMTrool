@@ -12,7 +12,7 @@ These rules apply to every task and override any conflicting request unless the 
    - Do not use exchange credentials, API keys, signed requests, authenticated endpoints, exchange SDKs, or trading CLIs.
    - Do not submit, cancel, amend, query, or manage live orders, balances, positions, accounts, transfers, or withdrawals.
    - Do not start, stop, restart, inspect, attach to, or otherwise interact with live trading processes or production services.
-   - Do not run commands or tests that could make network calls to an exchange or use production credentials.
+   - Do not run commands or tests that could make network calls to an exchange or use production credentials, except for an explicitly approved public unauthenticated testnet RPC/read-only observation with an exact endpoint, command, duration, and read-only scope; this exception never permits wallets, signers, credentials, authenticated endpoints, transaction simulation, signing, submission, mainnet, N1, or live-process actions.
    - Offline code inspection and tests using clearly local mock data are allowed only when they cannot access secrets or the network.
 
 3. Do not run any Git command.
