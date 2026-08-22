@@ -3,6 +3,7 @@ import { ExchangeAdapterError } from "../../AdapterError.js";
 export const PERPL_BRIDGE_PROTOCOL_VERSION = 1 as const;
 export const PERPL_TESTNET_CHAIN_ID = 10_143 as const;
 export const PERPL_TESTNET_EXCHANGE = "0x1964c32f0be608e7d29302aff5e61268e72080cc" as const;
+export const PERPL_TESTNET_RPC = "https://testnet-rpc.monad.xyz" as const;
 
 export interface BridgeMarketConfig {
   symbol: string;
@@ -65,7 +66,15 @@ export interface BridgeSnapshot {
   receivedAt: number;
   positions: BridgePosition[];
   orders: BridgeOrder[];
+  markets: BridgeMarketState[];
+  books: BridgeBook[];
+  eventCount: number;
+  quiet: boolean;
 }
+
+export interface BridgeMarketState { symbol: string; perpetualId: number; markPrice: string; oraclePrice: string; lastPrice: string; paused: boolean; openInterest: string }
+export interface BridgeBookLevel { price: string; size: string }
+export interface BridgeBook { symbol: string; perpetualId: number; bestBid?: BridgeBookLevel; bestAsk?: BridgeBookLevel; totalOrders: number }
 
 export type BridgeResponse =
   | { version: 1; id: string; event: "ready"; chainId: 10143; exchange: string; snapshot: BridgeSnapshot }

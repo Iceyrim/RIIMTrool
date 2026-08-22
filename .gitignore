@@ -7,3 +7,5 @@ coverage/
 state/
 config/markets.yaml
 /rust/**/target/
+canary-wallet.key
+*.key

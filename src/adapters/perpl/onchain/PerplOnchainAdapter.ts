@@ -2,7 +2,7 @@ import { ExchangeAdapterError } from "../../AdapterError.js";
 import type { AccountVolume, CancelOrderResult, ExchangeAdapter, MarketPrice, NormalizedBalance, NormalizedFill, NormalizedMarginStatus, NormalizedOrder, NormalizedPosition, PlaceOrderParams, PlaceOrderResult } from "../../ExchangeAdapter.js";
 import { mapBridgeOrder, mapBridgePosition, validateSnapshot } from "./mappers.js";
 import type { PerplBridgeTransport } from "./PerplRustClient.js";
-import { PERPL_BRIDGE_PROTOCOL_VERSION, type BridgeSnapshot } from "./protocol.js";
+import { PERPL_BRIDGE_PROTOCOL_VERSION, PERPL_TESTNET_RPC, type BridgeSnapshot } from "./protocol.js";
 
 export interface PerplOnchainAdapterConfig {
   rpcUrl: string;
@@ -20,8 +20,8 @@ export class PerplOnchainAdapter implements ExchangeAdapter {
   private nextId = 1;
 
   constructor(private readonly bridge: PerplBridgeTransport, private readonly config: PerplOnchainAdapterConfig, private readonly now = Date.now) {
-    if (!config.rpcUrl.startsWith("https://") && !config.rpcUrl.startsWith("http://127.0.0.1")) throw new ExchangeAdapterError("Perpl testnet RPC URL must use HTTPS");
-    if (!config.markets.length || config.markets.some((market) => ![16, 32, 48, 64, 256].includes(market.perpetualId))) throw new ExchangeAdapterError("Perpl adapter accepts listed testnet perpetual IDs only");
+    if (config.rpcUrl !== PERPL_TESTNET_RPC && !config.rpcUrl.startsWith("http://127.0.0.1/")) throw new ExchangeAdapterError("Perpl adapter accepts only the approved testnet RPC");
+    if (!config.markets.length || config.markets.some((market) => !((market.symbol === "BTCUSD" && market.perpetualId === 16) || (market.symbol === "ETHUSD" && market.perpetualId === 32)))) throw new ExchangeAdapterError("Perpl adapter requires proven BTC/ETH mappings");
     if (config.accountIds?.length) throw new ExchangeAdapterError("Phase-1 Perpl bridge does not accept account identifiers");
     bridge.onEvent?.((message) => { if (message.event === "state") this.acceptSnapshot(message.snapshot); });
   }

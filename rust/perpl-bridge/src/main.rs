@@ -1,7 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
 use alloy::{
-    providers::ProviderBuilder, rpc::client::RpcClient, transports::layers::RetryBackoffLayer,
+    providers::{Provider, ProviderBuilder},
+    rpc::client::RpcClient,
+    transports::layers::{RetryBackoffLayer, ThrottleLayer},
 };
 use futures::StreamExt;
 use perpl_sdk::{Chain, state::SnapshotBuilder, stream, types::StateInstant};
@@ -12,6 +14,8 @@ use tokio::{
 };
 
 use protocol::{Request, Response, TESTNET_CHAIN_ID, TESTNET_EXCHANGE, VERSION};
+
+const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn emit(output: &Arc<Mutex<tokio::io::Stdout>>, response: &Response) -> Result<(), String> {
     let mut line = serde_json::to_vec(response).map_err(|error| error.to_string())?;
@@ -79,6 +83,7 @@ async fn main() {
         return;
     }
     let client = match RpcClient::builder()
+        .layer(ThrottleLayer::new(12))
         .layer(RetryBackoffLayer::new(5, 100, 200))
         .connect(&rpc_url)
         .await
@@ -114,13 +119,43 @@ async fn main() {
         .await;
         return;
     }
-    let exchange = match SnapshotBuilder::new(&chain, provider.clone())
-        .with_perpetuals(markets.iter().map(|market| market.perpetual_id).collect())
-        .build()
-        .await
+    let actual_chain_id = match tokio::time::timeout(RPC_TIMEOUT, provider.get_chain_id()).await {
+        Ok(Ok(value)) => value,
+        _ => {
+            let _ = emit(
+                &output,
+                &Response::Fatal {
+                    version: VERSION,
+                    id,
+                    error: "RPC chain-id check failed or timed out".into(),
+                },
+            )
+            .await;
+            return;
+        }
+    };
+    if actual_chain_id != TESTNET_CHAIN_ID {
+        let _ = emit(
+            &output,
+            &Response::Fatal {
+                version: VERSION,
+                id,
+                error: format!("RPC chain id {actual_chain_id} is not testnet"),
+            },
+        )
+        .await;
+        return;
+    }
+    let exchange = match tokio::time::timeout(
+        RPC_TIMEOUT,
+        SnapshotBuilder::new(&chain, provider.clone())
+            .with_perpetuals(markets.iter().map(|market| market.perpetual_id).collect())
+            .build(),
+    )
+    .await
     {
-        Ok(value) => value,
-        Err(error) => {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => {
             let _ = emit(
                 &output,
                 &Response::Fatal {
@@ -132,8 +167,20 @@ async fn main() {
             .await;
             return;
         }
+        Err(_) => {
+            let _ = emit(
+                &output,
+                &Response::Fatal {
+                    version: VERSION,
+                    id,
+                    error: "snapshot timed out".into(),
+                },
+            )
+            .await;
+            return;
+        }
     };
-    let initial = match perpl::snapshot(&exchange, &markets) {
+    let initial = match perpl::snapshot(&exchange, &markets, 0) {
         Ok(value) => value,
         Err(error) => {
             let _ = emit(
@@ -206,7 +253,8 @@ async fn main() {
                     .await;
                     return;
                 }
-                perpl::snapshot(&exchange, &stream_markets)
+                let event_count = result.events().len().try_into().unwrap_or(u32::MAX);
+                perpl::snapshot(&exchange, &stream_markets, event_count)
             };
             match snapshot {
                 Ok(snapshot) => {

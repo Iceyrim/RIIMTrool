@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 pub const VERSION: u8 = 1;
 pub const TESTNET_CHAIN_ID: u64 = 10_143;
 pub const TESTNET_EXCHANGE: &str = "0x1964c32f0be608e7d29302aff5e61268e72080cc";
+pub const MAINNET_CHAIN_ID: u64 = 143;
+pub const MAINNET_EXCHANGE: &str = "0x34b6552d57a35a1d042ccae1951bd1c370112a6f";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, tag = "command", rename_all = "snake_case")]
@@ -83,6 +85,39 @@ pub struct Snapshot {
     pub received_at: u64,
     pub positions: Vec<Position>,
     pub orders: Vec<serde_json::Value>,
+    pub markets: Vec<MarketState>,
+    pub books: Vec<Book>,
+    pub event_count: u32,
+    pub quiet: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketState {
+    pub symbol: String,
+    pub perpetual_id: u32,
+    pub mark_price: String,
+    pub oracle_price: String,
+    pub last_price: String,
+    pub paused: bool,
+    pub open_interest: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Book {
+    pub symbol: String,
+    pub perpetual_id: u32,
+    pub best_bid: Option<BookLevel>,
+    pub best_ask: Option<BookLevel>,
+    pub total_orders: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookLevel {
+    pub price: String,
+    pub size: String,
 }
 
 #[derive(Debug, Serialize)]

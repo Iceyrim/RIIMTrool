@@ -6,7 +6,7 @@ import { PERPL_TESTNET_EXCHANGE } from "../../../../src/adapters/perpl/onchain/p
 
 class FakeBridge implements PerplBridgeTransport {
   async request(message: BridgeRequest): Promise<BridgeResponse> {
-    if (message.command === "hello") return { version: 1, id: message.id, event: "ready", chainId: 10143, exchange: PERPL_TESTNET_EXCHANGE, snapshot: { blockNumber: "12", blockTimestamp: 1, receivedAt: 1000, positions: [{ symbol: "BTCUSD", baseSize: "0", markPrice: "65000", unrealizedPnl: "0", openOrderCount: 0 }], orders: [] } };
+    if (message.command === "hello") return { version: 1, id: message.id, event: "ready", chainId: 10143, exchange: PERPL_TESTNET_EXCHANGE, snapshot: { blockNumber: "12", blockTimestamp: 1, receivedAt: 1000, positions: [{ symbol: "BTCUSD", baseSize: "0", markPrice: "65000", unrealizedPnl: "0", openOrderCount: 0 }], orders: [], markets: [{ symbol: "BTCUSD", perpetualId: 16, markPrice: "65000", oraclePrice: "65000", lastPrice: "65000", paused: false, openInterest: "0" }], books: [{ symbol: "BTCUSD", perpetualId: 16, totalOrders: 0 }], eventCount: 0, quiet: true } };
     return { version: 1, id: message.id, event: "prepared", chainId: 10143, exchange: PERPL_TESTNET_EXCHANGE, blockNumber: "12", calldata: "0x1234", calldataHash: `0x${"00".repeat(32)}` };
   }
   async close(): Promise<void> {}
@@ -23,8 +23,8 @@ describe("PerplOnchainAdapter", () => {
   });
 
   it("rejects custom/mainnet and account configuration", () => {
-    expect(() => new PerplOnchainAdapter(new FakeBridge(), { rpcUrl: "http://remote.invalid", markets: [{ symbol: "BTCUSD", perpetualId: 16 }] })).toThrow(/HTTPS/);
-    expect(() => new PerplOnchainAdapter(new FakeBridge(), { rpcUrl: "https://rpc.monad.xyz", markets: [{ symbol: "BTCUSD", perpetualId: 1 }] })).toThrow(/testnet/);
+    expect(() => new PerplOnchainAdapter(new FakeBridge(), { rpcUrl: "http://remote.invalid", markets: [{ symbol: "BTCUSD", perpetualId: 16 }] })).toThrow(/approved testnet RPC/);
+    expect(() => new PerplOnchainAdapter(new FakeBridge(), { rpcUrl: "https://rpc.monad.xyz", markets: [{ symbol: "BTCUSD", perpetualId: 1 }] })).toThrow(/approved testnet RPC/);
     expect(() => new PerplOnchainAdapter(new FakeBridge(), { rpcUrl: "https://testnet-rpc.monad.xyz", markets: [{ symbol: "BTCUSD", perpetualId: 16 }], accountIds: [1] })).toThrow(/account/);
   });
 });

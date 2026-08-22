@@ -12,7 +12,9 @@ use perpl_sdk::{
 };
 use tokio::sync::RwLock;
 
-use crate::protocol::{Market, Position, PrepareOrder, Snapshot};
+use crate::protocol::{Book, BookLevel, Market, MarketState, Position, PrepareOrder, Snapshot};
+
+pub const TESTNET_RPC_URL: &str = "https://testnet-rpc.monad.xyz";
 
 pub type SharedExchange = Arc<RwLock<state::Exchange>>;
 
@@ -25,23 +27,30 @@ pub fn validate_hello(
     if network != "testnet" {
         return Err("only testnet is permitted".into());
     }
-    if !(rpc_url.starts_with("https://") || rpc_url.starts_with("http://127.0.0.1")) {
-        return Err("RPC URL must be HTTPS (or loopback for offline tests)".into());
+    if rpc_url != TESTNET_RPC_URL && !rpc_url.starts_with("http://127.0.0.1/") {
+        return Err("only the approved Monad testnet RPC (or loopback tests) is permitted".into());
     }
     if !account_ids.is_empty() {
         return Err("phase 1 does not accept account identifiers".into());
     }
     if markets.is_empty()
-        || markets
-            .iter()
-            .any(|market| ![16, 32, 48, 64, 256].contains(&market.perpetual_id))
+        || markets.iter().any(|market| {
+            !matches!(
+                (market.symbol.as_str(), market.perpetual_id),
+                ("BTCUSD", 16) | ("ETHUSD", 32)
+            )
+        })
     {
         return Err("unlisted testnet perpetual".into());
     }
     Ok(())
 }
 
-pub fn snapshot(exchange: &state::Exchange, markets: &[Market]) -> Result<Snapshot, String> {
+pub fn snapshot(
+    exchange: &state::Exchange,
+    markets: &[Market],
+    event_count: u32,
+) -> Result<Snapshot, String> {
     let instant = exchange.instant();
     let positions = markets
         .iter()
@@ -65,12 +74,50 @@ pub fn snapshot(exchange: &state::Exchange, markets: &[Market]) -> Result<Snapsh
         .as_millis()
         .try_into()
         .map_err(|_| "system time overflow")?;
+    let mut market_states = Vec::with_capacity(markets.len());
+    let mut books = Vec::with_capacity(markets.len());
+    for market in markets {
+        let perp = exchange
+            .perpetuals()
+            .get(&market.perpetual_id)
+            .ok_or_else(|| format!("perpetual {} is absent", market.perpetual_id))?;
+        let book = perp.l3_book();
+        let level = |value: Option<(fastnum::UD64, fastnum::UD64)>| {
+            value.map(|(price, size)| BookLevel {
+                price: price.to_string(),
+                size: size.to_string(),
+            })
+        };
+        market_states.push(MarketState {
+            symbol: market.symbol.clone(),
+            perpetual_id: market.perpetual_id,
+            mark_price: perp.mark_price().to_string(),
+            oracle_price: perp.oracle_price().to_string(),
+            last_price: perp.last_price().to_string(),
+            paused: perp.is_paused(),
+            open_interest: perp.open_interest().to_string(),
+        });
+        books.push(Book {
+            symbol: market.symbol.clone(),
+            perpetual_id: market.perpetual_id,
+            best_bid: level(book.best_bid()),
+            best_ask: level(book.best_ask()),
+            total_orders: book
+                .total_orders()
+                .try_into()
+                .map_err(|_| "book order count overflow")?,
+        });
+    }
     Ok(Snapshot {
         block_number: instant.block_number().to_string(),
         block_timestamp: instant.block_timestamp(),
         received_at,
         positions,
         orders: vec![],
+        markets: market_states,
+        books,
+        event_count,
+        quiet: event_count == 0,
     })
 }
 
