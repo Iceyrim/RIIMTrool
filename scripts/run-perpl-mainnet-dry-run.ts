@@ -34,7 +34,7 @@ const markets = loadMarketsConfig(configPath).markets.filter(
   (market) => market.enabled && market.exchange === "perpl",
 );
 if (!markets.length) throw new Error("Dry-run config has no enabled Perpl markets");
-const marketIds: Record<string, number> = { BTCUSD: 1, ETHUSD: 2 };
+const marketIds: Record<string, number> = { BTCUSD: 1, ETHUSD: 20 };
 if (markets.some((market) => marketIds[market.symbol] === undefined))
   throw new Error("Dry-run config contains an unlisted mainnet market");
 

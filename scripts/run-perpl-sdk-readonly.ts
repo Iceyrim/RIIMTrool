@@ -31,7 +31,7 @@ const adapter = new PerplOnchainAdapter(bridge, {
   rpcUrl,
   markets: [
     { symbol: "BTCUSD", perpetualId: 1 },
-    { symbol: "ETHUSD", perpetualId: 2 },
+    { symbol: "ETHUSD", perpetualId: 20 },
   ],
   accountIds: [5071],
 });

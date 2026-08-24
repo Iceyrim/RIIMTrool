@@ -40,7 +40,7 @@ pub fn validate_hello(
         || markets.iter().any(|market| {
             !matches!(
                 (market.symbol.as_str(), market.perpetual_id),
-                ("BTCUSD", 1) | ("ETHUSD", 2)
+                ("BTCUSD", 1) | ("ETHUSD", 20)
             )
         })
     {

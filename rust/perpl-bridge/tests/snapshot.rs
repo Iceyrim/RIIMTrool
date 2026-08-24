@@ -10,7 +10,7 @@ fn snapshot_scope_pins_mainnet_account_and_markets() {
     assert!(validate_hello("mainnet", "https://rpc.monad.xyz", &btc, &[5071]).is_ok());
     let eth = [Market {
         symbol: "ETHUSD".into(),
-        perpetual_id: 2,
+        perpetual_id: 20,
     }];
     assert!(validate_hello("mainnet", "https://rpc.monad.xyz", &eth, &[5071]).is_ok());
     assert!(validate_hello("testnet", "https://testnet-rpc.monad.xyz", &btc, &[5071]).is_err());
