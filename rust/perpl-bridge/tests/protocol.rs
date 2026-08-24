@@ -1,6 +1,6 @@
 use riim_perpl_bridge::{
     perpl::validate_hello,
-    protocol::{AccountEvidence, Fill, Request, decode},
+    protocol::{AccountEvidence, Fill, Position, Request, decode},
 };
 
 #[test]
@@ -29,6 +29,19 @@ fn serializes_account_and_session_fill_evidence() {
     })
     .unwrap();
     assert_eq!(account["availableBalance"], "18.34");
+    let position = serde_json::to_value(Position {
+        symbol: "BTCUSD".into(),
+        base_size: "0.01".into(),
+        mark_price: "65000".into(),
+        unrealized_pnl: "2".into(),
+        deposit: "100".into(),
+        maintenance_requirement: "50".into(),
+        liquidation_price: "60000".into(),
+        bankruptcy_price: "55000".into(),
+        open_order_count: 0,
+    })
+    .unwrap();
+    assert_eq!(position["liquidationPrice"], "60000");
     let fill = serde_json::to_value(Fill {
         exchange_order_id: "78".into(),
         trade_id: "0xabc:1".into(),

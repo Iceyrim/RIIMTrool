@@ -43,6 +43,28 @@ function seedMarket(adapter: FakeExchangeAdapter, baseSize = 0): void {
   adapter.marketPrices.set("BTCUSD", { market: "BTCUSD", mark: 77_000 });
 }
 
+function seedSafety(
+  adapter: FakeExchangeAdapter,
+  values: { frozen?: boolean; baseSize?: number; markPrice?: number; liquidationPrice?: number },
+): void {
+  const evidence = adapter as FakeExchangeAdapter & {
+    getAccountEvidence: () => Record<string, string | boolean>;
+    getPositionSafetyEvidence: () => Array<{
+      baseSize: number;
+      markPrice: number;
+      liquidationPrice: number;
+    }>;
+  };
+  evidence.getAccountEvidence = () => ({ frozen: values.frozen ?? false });
+  evidence.getPositionSafetyEvidence = () => [
+    {
+      baseSize: values.baseSize ?? 0,
+      markPrice: values.markPrice ?? 77_000,
+      liquidationPrice: values.liquidationPrice ?? 0,
+    },
+  ];
+}
+
 describe("MarketMakingDryRun", () => {
   it("generates a risk-checked two-sided canary ladder without mutations", async () => {
     const adapter = new FakeExchangeAdapter();
@@ -55,9 +77,48 @@ describe("MarketMakingDryRun", () => {
     expect(plan.executionReady).toBe(false);
     expect(plan.balances).toEqual([]);
     expect(plan.proposedCancellations).toEqual([]);
-    expect(plan.readinessBlockers).toContain("authoritative mainnet margin status is unavailable");
+    expect(plan.readinessBlockers).toContain(
+      "authoritative account-wide mainnet margin status is unavailable; position liquidation boundaries are enforced",
+    );
     expect(adapter.placeOrderCalls).toHaveLength(0);
     expect(adapter.cancelOrderCalls).toHaveLength(0);
+  });
+
+  it("blocks every proposal when the account is frozen", async () => {
+    const adapter = new FakeExchangeAdapter();
+    seedMarket(adapter);
+    seedSafety(adapter, { frozen: true });
+    const dryRun = planner(adapter);
+    await dryRun.start();
+    const plan = await dryRun.planCycle();
+    expect(plan.proposals).toEqual([]);
+    expect(plan.readinessBlockers).toContain("Perpl account is frozen");
+  });
+
+  it.each([
+    ["long", 0.001, 60_000, 60_000],
+    ["short", -0.001, 60_000, 60_000],
+  ])("blocks a %s position at its liquidation boundary", async (_side, baseSize, markPrice, liquidationPrice) => {
+    const adapter = new FakeExchangeAdapter();
+    seedMarket(adapter, baseSize);
+    seedSafety(adapter, { baseSize, markPrice, liquidationPrice });
+    const dryRun = planner(adapter);
+    await dryRun.start();
+    const plan = await dryRun.planCycle();
+    expect(plan.proposals).toEqual([]);
+    expect(plan.readinessBlockers).toContain(
+      "Perpl BTCUSD position is at or beyond its liquidation boundary",
+    );
+  });
+
+  it("does not apply a liquidation boundary to a flat position", async () => {
+    const adapter = new FakeExchangeAdapter();
+    seedMarket(adapter);
+    seedSafety(adapter, { baseSize: 0, markPrice: 60_000, liquidationPrice: 70_000 });
+    const dryRun = planner(adapter);
+    await dryRun.start();
+    const plan = await dryRun.planCycle();
+    expect(plan.proposals).toHaveLength(10);
   });
 
   it("plans one reduce-only inventory action without submitting it", async () => {

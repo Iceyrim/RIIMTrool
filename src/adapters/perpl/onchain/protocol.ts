@@ -59,6 +59,10 @@ export interface BridgePosition {
   baseSize: string;
   markPrice: string;
   unrealizedPnl: string;
+  deposit: string;
+  maintenanceRequirement: string;
+  liquidationPrice: string;
+  bankruptcyPrice: string;
   openOrderCount: number;
 }
 

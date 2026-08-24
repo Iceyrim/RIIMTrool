@@ -29,6 +29,16 @@ export interface PerplOnchainAdapterConfig {
   staleAfterMs?: number;
 }
 
+export interface PerplPositionSafetyEvidence {
+  market: string;
+  baseSize: number;
+  markPrice: number;
+  deposit: number;
+  maintenanceRequirement: number;
+  liquidationPrice: number;
+  bankruptcyPrice: number;
+}
+
 /** Public mainnet account state only; signing and mutations are impossible. */
 export class PerplOnchainAdapter implements ExchangeAdapter {
   readonly exchangeId = "perpl-onchain-mainnet-readonly";
@@ -97,13 +107,26 @@ export class PerplOnchainAdapter implements ExchangeAdapter {
       .filter((item) => !market || item.market === market);
   }
   getBalances(): NormalizedBalance[] {
-    return [{ token: "USDC", amount: Number(this.requireSnapshot().account.balance) }];
+    return [{ token: "AUSD", amount: Number(this.requireSnapshot().account.balance) }];
   }
   getAccountEvidence(): BridgeAccountEvidence {
     return this.requireSnapshot().account;
   }
   getFillCoverageStartBlock(): string {
     return this.requireSnapshot().fillCoverageStartBlock;
+  }
+  getPositionSafetyEvidence(market?: string): PerplPositionSafetyEvidence[] {
+    return this.requireSnapshot().positions
+      .filter((position) => !market || position.symbol === market)
+      .map((position) => ({
+        market: position.symbol,
+        baseSize: Number(position.baseSize),
+        markPrice: Number(position.markPrice),
+        deposit: Number(position.deposit),
+        maintenanceRequirement: Number(position.maintenanceRequirement),
+        liquidationPrice: Number(position.liquidationPrice),
+        bankruptcyPrice: Number(position.bankruptcyPrice),
+      }));
   }
   getMarginStatus(): NormalizedMarginStatus {
     throw new ExchangeAdapterError(

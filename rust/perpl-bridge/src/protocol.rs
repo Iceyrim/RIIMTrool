@@ -67,6 +67,10 @@ pub struct Position {
     pub base_size: String,
     pub mark_price: String,
     pub unrealized_pnl: String,
+    pub deposit: String,
+    pub maintenance_requirement: String,
+    pub liquidation_price: String,
+    pub bankruptcy_price: String,
     pub open_order_count: u32,
 }
 

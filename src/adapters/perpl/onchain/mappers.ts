@@ -33,9 +33,18 @@ export function mapBridgeOrder(order: BridgeOrder): NormalizedOrder {
 export function mapBridgePosition(position: BridgePosition): NormalizedPosition {
   if (!Number.isSafeInteger(position.openOrderCount) || position.openOrderCount < 0)
     throw new ExchangeAdapterError("Perpl bridge open-order count is invalid");
+  const baseSize = decimal(position.baseSize, "position size");
+  const nonnegative = [
+    position.deposit,
+    position.maintenanceRequirement,
+    position.liquidationPrice,
+    position.bankruptcyPrice,
+  ];
+  if (nonnegative.some((value) => decimal(value, "position safety evidence") < 0))
+    throw new ExchangeAdapterError("Perpl bridge position safety evidence is invalid");
   return {
     market: position.symbol,
-    baseSize: decimal(position.baseSize, "position size"),
+    baseSize,
     markPrice: decimal(position.markPrice, "mark price"),
     unrealizedPnl: decimal(position.unrealizedPnl, "unrealized PnL"),
     openOrderCount: position.openOrderCount,

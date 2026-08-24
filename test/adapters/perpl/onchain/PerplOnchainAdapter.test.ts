@@ -36,6 +36,10 @@ class FakeBridge implements PerplBridgeTransport {
             baseSize: "0.01",
             markPrice: "65000",
             unrealizedPnl: "2",
+            deposit: "100",
+            maintenanceRequirement: "50",
+            liquidationPrice: "60000",
+            bankruptcyPrice: "55000",
             openOrderCount: 1,
           },
         ],
@@ -106,7 +110,18 @@ describe("PerplOnchainAdapter", () => {
     await adapter.connect();
     expect(adapter.getPositions()).toMatchObject([{ baseSize: 0.01, openOrderCount: 1 }]);
     expect(adapter.getOpenOrders()).toMatchObject([{ exchangeOrderId: "9", isReduceOnly: true }]);
-    expect(adapter.getBalances()).toEqual([{ token: "USDC", amount: 18.341694 }]);
+    expect(adapter.getBalances()).toEqual([{ token: "AUSD", amount: 18.341694 }]);
+    expect(adapter.getPositionSafetyEvidence("BTCUSD")).toEqual([
+      {
+        market: "BTCUSD",
+        baseSize: 0.01,
+        markPrice: 65000,
+        deposit: 100,
+        maintenanceRequirement: 50,
+        liquidationPrice: 60000,
+        bankruptcyPrice: 55000,
+      },
+    ]);
     expect(adapter.getAccountEvidence()).toMatchObject({
       maintenanceRequirement: "0.5",
       frozen: false,

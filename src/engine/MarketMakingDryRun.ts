@@ -81,7 +81,28 @@ export class MarketMakingDryRun {
     const evidenceAdapter = this.adapter as ExchangeAdapter & {
       getAccountEvidence?: () => Record<string, string | boolean>;
       getFillCoverageStartBlock?: () => string;
+      getPositionSafetyEvidence?: (market?: string) => Array<{
+        baseSize: number;
+        markPrice: number;
+        liquidationPrice: number;
+      }>;
     };
+    const accountEvidence = evidenceAdapter.getAccountEvidence?.();
+    const positionSafety = evidenceAdapter.getPositionSafetyEvidence?.(this.config.symbol)[0];
+    const frozen = accountEvidence?.frozen === true;
+    const atLiquidationBoundary = Boolean(
+      positionSafety &&
+        positionSafety.baseSize !== 0 &&
+        positionSafety.liquidationPrice > 0 &&
+        (positionSafety.baseSize > 0
+          ? positionSafety.markPrice <= positionSafety.liquidationPrice
+          : positionSafety.markPrice >= positionSafety.liquidationPrice),
+    );
+    const safetyBlocker = frozen
+      ? "Perpl account is frozen"
+      : atLiquidationBoundary
+        ? `Perpl ${this.config.symbol} position is at or beyond its liquidation boundary`
+        : undefined;
     const fillCoverageStartBlock = evidenceAdapter.getFillCoverageStartBlock?.();
     const proposedCancellations =
       Math.abs(position?.baseSize ?? 0) > this.config.inventoryReductionThresholdBase
@@ -95,7 +116,7 @@ export class MarketMakingDryRun {
             )
             .map((order) => order.exchangeOrderId as string)
         : [];
-    const proposals = reconciliation.healthy
+    const proposals = reconciliation.healthy && !safetyBlocker
       ? this.buildProposals(position?.baseSize ?? 0, markPrice, observedOpenOrders, reconciliation)
       : [];
     return {
@@ -106,13 +127,14 @@ export class MarketMakingDryRun {
       markPrice,
       observedOpenOrders,
       balances: this.adapter.getBalances(),
-      accountEvidence: evidenceAdapter.getAccountEvidence?.(),
+      accountEvidence,
       fillCoverageStartBlock,
       proposedCancellations,
       proposals,
       executionReady: false,
       readinessBlockers: [
-        "authoritative mainnet margin status is unavailable",
+        ...(safetyBlocker ? [safetyBlocker] : []),
+        "authoritative account-wide mainnet margin status is unavailable; position liquidation boundaries are enforced",
         "authoritative session realized PnL is unavailable",
         `fill evidence is limited to maker fills observed since bridge startup${fillCoverageStartBlock ? ` at block ${fillCoverageStartBlock}` : ""}`,
         "execution remains disabled pending a separately approved canary-gated integration",

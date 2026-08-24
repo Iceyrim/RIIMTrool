@@ -98,6 +98,18 @@ pub fn snapshot(
             let unrealized_pnl = position
                 .map(|value| value.pnl().to_string())
                 .unwrap_or_else(|| "0".into());
+            let deposit = position
+                .map(|value| value.deposit().to_string())
+                .unwrap_or_else(|| "0".into());
+            let position_maintenance_requirement = position
+                .map(|value| value.maintenance_margin_requirement().to_string())
+                .unwrap_or_else(|| "0".into());
+            let liquidation_price = position
+                .map(|value| value.liquidation_price().to_string())
+                .unwrap_or_else(|| "0".into());
+            let bankruptcy_price = position
+                .map(|value| value.bankruptcy_price().to_string())
+                .unwrap_or_else(|| "0".into());
             let open_order_count = perp
                 .l3_book()
                 .all_orders()
@@ -111,6 +123,10 @@ pub fn snapshot(
                 base_size,
                 mark_price: perp.mark_price().to_string(),
                 unrealized_pnl,
+                deposit,
+                maintenance_requirement: position_maintenance_requirement,
+                liquidation_price,
+                bankruptcy_price,
                 open_order_count,
             })
         })
