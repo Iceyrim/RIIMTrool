@@ -251,7 +251,7 @@ fn build_order(args: &CanaryArgs) -> OrderRequest {
         args.price,
         args.size,
         None,
-        false,
+        post_only_for_gate(args.gate),
         false,
         false,
         None,
@@ -260,6 +260,45 @@ fn build_order(args: &CanaryArgs) -> OrderRequest {
         None,
         0,
     )
+}
+
+fn post_only_for_gate(gate: Gate) -> bool {
+    gate == Gate::Mainnet
+}
+
+fn price_is_deliberately_passive(
+    side: Side,
+    price: UD64,
+    best_bid: Option<UD64>,
+    best_ask: Option<UD64>,
+) -> bool {
+    match side {
+        Side::Buy => best_bid.is_some_and(|bid| price < bid),
+        Side::Sell => best_ask.is_some_and(|ask| price > ask),
+    }
+}
+
+fn validate_mainnet_non_crossing(
+    args: &CanaryArgs,
+    snapshot: &perpl_sdk::state::Exchange,
+) -> Result<(), String> {
+    let perp = snapshot
+        .perpetuals()
+        .get(&args.perpetual_id)
+        .ok_or("mainnet canary perpetual missing from snapshot")?;
+    let passive = price_is_deliberately_passive(
+        args.side,
+        args.price,
+        perp.l3_book().best_bid().map(|(price, _)| price),
+        perp.l3_book().best_ask().map(|(price, _)| price),
+    );
+    if !passive {
+        return Err(
+            "mainnet canary price is not deliberately passive against the refreshed order book; buys must be below best bid and sells above best ask"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 async fn run_testnet(args: CanaryArgs) -> Result<(), String> {
@@ -301,7 +340,6 @@ async fn run_testnet(args: CanaryArgs) -> Result<(), String> {
         .build()
         .await
         .map_err(|error| format!("snapshot failed: {error}"))?;
-
     let result = tx::run_testnet_canary(
         &worker,
         provider,
@@ -369,6 +407,7 @@ async fn run_mainnet(args: CanaryArgs) -> Result<(), String> {
         .build()
         .await
         .map_err(|error| format!("snapshot failed: {error}"))?;
+    validate_mainnet_non_crossing(&args, &snapshot_exchange)?;
 
     let result = tx::run_mainnet_canary(
         &worker,
@@ -575,6 +614,56 @@ mod tests {
         let parsed = parse_args(&valid_mainnet_args()).unwrap();
         assert_eq!(parsed.gate, Gate::Mainnet);
         assert_eq!(parsed.perpetual_id, 1);
+    }
+
+    #[test]
+    fn only_mainnet_orders_are_forced_post_only() {
+        assert!(post_only_for_gate(Gate::Mainnet));
+        assert!(!post_only_for_gate(Gate::Testnet));
+    }
+
+    #[test]
+    fn passive_price_check_fails_closed_for_both_sides() {
+        let bid: UD64 = "99".parse().unwrap();
+        let ask: UD64 = "101".parse().unwrap();
+        let passive_buy: UD64 = "98".parse().unwrap();
+        let passive_sell: UD64 = "102".parse().unwrap();
+        assert!(price_is_deliberately_passive(
+            Side::Buy,
+            passive_buy,
+            Some(bid),
+            Some(ask)
+        ));
+        assert!(price_is_deliberately_passive(
+            Side::Sell,
+            passive_sell,
+            Some(bid),
+            Some(ask)
+        ));
+        assert!(!price_is_deliberately_passive(
+            Side::Buy,
+            bid,
+            Some(bid),
+            Some(ask)
+        ));
+        assert!(!price_is_deliberately_passive(
+            Side::Sell,
+            ask,
+            Some(bid),
+            Some(ask)
+        ));
+        assert!(!price_is_deliberately_passive(
+            Side::Buy,
+            passive_buy,
+            None,
+            Some(ask)
+        ));
+        assert!(!price_is_deliberately_passive(
+            Side::Sell,
+            passive_sell,
+            Some(bid),
+            None
+        ));
     }
 
     #[test]

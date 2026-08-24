@@ -2,6 +2,7 @@ use std::{num::NonZeroU16, time::Duration};
 
 use Exchange::ExchangeEvents;
 use alloy::{
+    eips::BlockId,
     primitives::{Address, TxHash, U256},
     providers::Provider,
     rpc::types::{Log, TransactionReceipt},
@@ -278,6 +279,31 @@ pub fn reserve_nonce(chain_nonce: u64, local_nonce: Option<u64>) -> Result<u64, 
     Ok(next)
 }
 
+fn mainnet_submission_nonces(
+    chain_nonce: u64,
+    action: AccountSetupAction,
+) -> Result<(u64, u64), &'static str> {
+    let setup_txs = match action {
+        AccountSetupAction::Existing { .. } => 0,
+        AccountSetupAction::Create { .. } => 1,
+        AccountSetupAction::ApproveAndCreate { .. } => 2,
+    };
+    let order = chain_nonce
+        .checked_add(setup_txs)
+        .ok_or("nonce exhausted")?;
+    let cancel = order.checked_add(1).ok_or("nonce exhausted")?;
+    Ok((order, cancel))
+}
+
+fn validate_pending_nonce(operator_nonce: u64, pending_nonce: u64) -> Result<u64, String> {
+    if operator_nonce != pending_nonce {
+        return Err(format!(
+            "--chain-nonce ({operator_nonce}) does not match pending account nonce ({pending_nonce})"
+        ));
+    }
+    Ok(pending_nonce)
+}
+
 pub fn validate_gas(gas_limit: u64, max_gas_limit: u64) -> Result<(), &'static str> {
     if gas_limit == 0 || gas_limit > max_gas_limit {
         return Err("gas limit outside policy");
@@ -299,14 +325,15 @@ pub fn extract_order_id(
     expected_request_id: u64,
     expected_perpetual_id: u32,
 ) -> Result<u16, String> {
-    let mut requested: Option<U256> = None;
-    let mut placed = None;
+    let mut awaiting_outcome = false;
+    let mut placed = Vec::new();
     for log in logs {
         if log.inner.address != exchange_address {
-            return Err("receipt log came from an unexpected contract".into());
+            continue;
         }
-        let event = ExchangeEvents::decode_log(&log.inner)
-            .map_err(|error| format!("malformed exchange receipt log: {error}"))?;
+        let Ok(event) = ExchangeEvents::decode_log(&log.inner) else {
+            continue;
+        };
         match event.data {
             // Legacy pre-v1.1.7.4 event. Superseded on-chain by
             // `OrderRequestV2` below, but a testnet (or older) deployment may
@@ -316,39 +343,48 @@ pub fn extract_order_id(
                 if event.orderDescId == U256::from(expected_request_id)
                     && event.perpId == U256::from(expected_perpetual_id) =>
             {
-                if requested.replace(event.orderId).is_some() {
-                    return Err("ambiguous order request logs".into());
+                if awaiting_outcome {
+                    return Err("ambiguous correlated order request sequence".into());
                 }
+                awaiting_outcome = true;
             }
             ExchangeEvents::OrderRequestV2(event)
                 if event.orderDescId == U256::from(expected_request_id)
                     && event.perpId == U256::from(expected_perpetual_id) =>
             {
-                if requested.replace(event.orderId).is_some() {
-                    return Err("ambiguous order request logs".into());
+                if awaiting_outcome {
+                    return Err("ambiguous correlated order request sequence".into());
+                }
+                awaiting_outcome = true;
+            }
+            ExchangeEvents::OrderPlaced(event) if awaiting_outcome => {
+                placed.push(event.orderId);
+                awaiting_outcome = false;
+            }
+            ExchangeEvents::OrderBatchCompleted(_) if awaiting_outcome => {
+                return Err("correlated order request produced no OrderPlaced".into());
+            }
+            ExchangeEvents::OrderRequest(_) | ExchangeEvents::OrderRequestV2(_) => {
+                // A different batch position starts a different event context.
+                awaiting_outcome = false;
+            }
+            ExchangeEvents::OrderPlaced(_) => {
+                // Outcome for a different request position.
+            }
+            _ => {
+                if awaiting_outcome && matches!(event.data, ExchangeEvents::OrderPostFailed(_)) {
+                    return Err("correlated order request failed to post".into());
                 }
             }
-            ExchangeEvents::OrderPlaced(event) => {
-                if placed.replace(event).is_some() {
-                    return Err("ambiguous order placed logs".into());
-                }
-            }
-            _ => {}
         }
     }
-    requested.ok_or("missing order request log")?;
-    let placed = placed.ok_or("missing order placed log")?;
-    // Correlation is already proven by the orderDescId/perpId match above (plus
-    // the ambiguity checks on both slots); `OrderPlaced` carries no request-side
-    // fields to re-verify against. The request log's own `orderId` is always 0
-    // at request time (unassigned; see the pinned SDK's `request_order_id`,
-    // which maps 0 to "no id yet"), so comparing it to `placed.orderId` here
-    // would reject every real order.
-    if placed.orderId == U256::ZERO {
+    if placed.len() != 1 {
+        return Err("receipt did not contain exactly one correlated OrderPlaced".into());
+    }
+    if placed[0] == U256::ZERO {
         return Err("order placed with zero order id".into());
     }
-    placed
-        .orderId
+    placed[0]
         .try_into()
         .map_err(|_| "order id exceeds supported range".to_string())
 }
@@ -389,26 +425,218 @@ pub struct CanaryResult {
 fn validate_cancel_receipt(
     receipt: &TransactionReceipt,
     exchange_address: Address,
+    expected_account_id: U256,
+    expected_request_id: u64,
+    expected_perpetual_id: u32,
+    expected_order_id: u16,
 ) -> Result<(), String> {
     if !receipt.status() {
         return Err("cancel transaction was rejected".into());
     }
+    validate_cancel_logs(
+        receipt.inner.logs(),
+        exchange_address,
+        expected_account_id,
+        expected_request_id,
+        expected_perpetual_id,
+        expected_order_id,
+    )
+}
+
+fn validate_cancel_logs(
+    logs: &[Log],
+    exchange_address: Address,
+    expected_account_id: U256,
+    expected_request_id: u64,
+    expected_perpetual_id: u32,
+    expected_order_id: u16,
+) -> Result<(), String> {
+    let mut correlated = false;
     let mut cancelled = 0usize;
-    for log in receipt.inner.logs() {
+    for log in logs {
         if log.inner.address != exchange_address {
-            return Err("cancel receipt log came from an unexpected contract".into());
+            continue;
         }
-        if matches!(
-            ExchangeEvents::decode_log(&log.inner).map(|decoded| decoded.data),
-            Ok(ExchangeEvents::OrderCancelled(_))
-        ) {
-            cancelled += 1;
+        let Ok(event) = ExchangeEvents::decode_log(&log.inner).map(|decoded| decoded.data) else {
+            continue;
+        };
+        match event {
+            ExchangeEvents::OrderRequest(e)
+                if e.accountId == expected_account_id
+                    && e.orderDescId == U256::from(expected_request_id)
+                    && e.perpId == U256::from(expected_perpetual_id)
+                    && e.orderId == U256::from(expected_order_id) =>
+            {
+                correlated = true
+            }
+            ExchangeEvents::OrderRequestV2(e)
+                if e.accountId == expected_account_id
+                    && e.orderDescId == U256::from(expected_request_id)
+                    && e.perpId == U256::from(expected_perpetual_id)
+                    && e.orderId == U256::from(expected_order_id) =>
+            {
+                correlated = true
+            }
+            ExchangeEvents::OrderCancelled(_) if correlated => {
+                cancelled += 1;
+                correlated = false;
+            }
+            ExchangeEvents::OrderRequest(_) | ExchangeEvents::OrderRequestV2(_) => {
+                correlated = false;
+            }
+            _ => {}
         }
     }
     if cancelled != 1 {
         return Err("cancel receipt missing or ambiguously contains OrderCancelled".into());
     }
     Ok(())
+}
+
+async fn verify_mainnet_order_cleanup<P: Provider + Clone>(
+    provider: P,
+    exchange_address: Address,
+    account_id: U256,
+    perpetual_id: u32,
+    order_id: u16,
+) -> Result<(), String> {
+    let block_id = BlockId::number(
+        provider
+            .get_block_number()
+            .await
+            .map_err(|error| format!("post-cancel block refresh failed: {error}"))?,
+    );
+    let exchange = Exchange::new(exchange_address, provider);
+    // The pinned ABI documents getOrderIdIndex as the authoritative set of
+    // currently used IDs. The pinned SDK likewise calls getOrder only for IDs
+    // present in this bitmap; it does not define a missing-order zero sentinel.
+    // Query getOrder after cancellation as an additional refresh, but do not
+    // infer absence from undocumented zero-field behaviour.
+    let post_cancel_order = exchange
+        .getOrder(U256::from(perpetual_id), U256::from(order_id))
+        .block(block_id)
+        .call()
+        .await
+        .map_err(|error| format!("post-cancel exact-order refresh failed: {error}"))?;
+    let exact_index = exchange
+        .getOrderIdIndex(U256::from(perpetual_id))
+        .block(block_id)
+        .call()
+        .await
+        .map_err(|error| format!("post-cancel order-index refresh failed: {error}"))?;
+    let still_open = order_index_contains(&exact_index.leaves, order_id);
+    if still_open {
+        if indexed_order_belongs_to_account(&post_cancel_order, account_id, order_id)? {
+            return Err(format!("cancelled order {order_id} is still open"));
+        }
+        // The 16-bit order id has already been reused by another account. The
+        // target identity is absent, but the replacement remains part of the
+        // allowlist-wide unexpected-order scan below.
+    }
+
+    for perp_id in [1u32, 20u32] {
+        let index = exchange
+            .getOrderIdIndex(U256::from(perp_id))
+            .block(block_id)
+            .call()
+            .await
+            .map_err(|error| {
+                format!("post-cancel open-order refresh failed for perp {perp_id}: {error}")
+            })?;
+        for (leaf_index, leaf) in index.leaves.iter().enumerate() {
+            for offset in 0..256usize {
+                let candidate = leaf_index * 256 + offset;
+                if candidate == 0 || candidate > u16::MAX as usize || !leaf.bit(offset) {
+                    continue;
+                }
+                let order = exchange
+                    .getOrder(U256::from(perp_id), U256::from(candidate))
+                    .block(block_id)
+                    .call()
+                    .await
+                    .map_err(|error| format!("post-cancel order refresh failed: {error}"))?;
+                if order.orderId != candidate as u16 {
+                    return Err(format!(
+                        "open-order identity mismatch: perp={perp_id} index_id={candidate} returned_id={}",
+                        order.orderId
+                    ));
+                }
+                if U256::from(order.accountId) == account_id {
+                    return Err(format!(
+                        "unexpected open order for canary account: perp={perp_id} order={candidate}"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn indexed_order_belongs_to_account(
+    order: &Exchange::Order,
+    account_id: U256,
+    order_id: u16,
+) -> Result<bool, String> {
+    if order.orderId != order_id {
+        return Err(format!(
+            "indexed order id mismatch: expected {order_id}, got {}",
+            order.orderId
+        ));
+    }
+    Ok(U256::from(order.accountId) == account_id)
+}
+
+async fn verify_mainnet_order_placement<P: Provider + Clone>(
+    provider: P,
+    exchange_address: Address,
+    account_id: U256,
+    perpetual_id: u32,
+    order_id: u16,
+) -> Result<(), String> {
+    let exchange = Exchange::new(exchange_address, provider);
+    let index = exchange
+        .getOrderIdIndex(U256::from(perpetual_id))
+        .call()
+        .await
+        .map_err(|error| format!("pre-cancel order-index refresh failed: {error}"))?;
+    if !order_index_contains(&index.leaves, order_id) {
+        return Err(format!(
+            "placed order {order_id} is not present in the refreshed order index"
+        ));
+    }
+    let order = exchange
+        .getOrder(U256::from(perpetual_id), U256::from(order_id))
+        .call()
+        .await
+        .map_err(|error| format!("pre-cancel exact-order refresh failed: {error}"))?;
+    validate_exact_order_identity(&order, account_id, order_id)
+}
+
+fn validate_exact_order_identity(
+    order: &Exchange::Order,
+    account_id: U256,
+    order_id: u16,
+) -> Result<(), String> {
+    if order.orderId != order_id {
+        return Err(format!(
+            "exact-order id mismatch: expected {order_id}, got {}",
+            order.orderId
+        ));
+    }
+    if U256::from(order.accountId) != account_id {
+        return Err(format!(
+            "exact-order account mismatch for order {order_id}: expected {account_id}, got {}",
+            order.accountId
+        ));
+    }
+    Ok(())
+}
+
+fn order_index_contains(leaves: &[U256], order_id: u16) -> bool {
+    let bit = usize::from(order_id);
+    leaves
+        .get(bit / 256)
+        .is_some_and(|leaf| leaf.bit(bit % 256))
 }
 
 /// One-shot, testnet-only canary. The provider must already be configured with
@@ -470,7 +698,14 @@ pub async fn run_testnet_canary<P: Provider + Clone, S>(
         gas_limit,
     )
     .await?;
-    validate_cancel_receipt(&cancel_receipt, exchange_address)?;
+    validate_cancel_receipt(
+        &cancel_receipt,
+        exchange_address,
+        account_id,
+        cancel_request_id,
+        perpetual_id,
+        order_id,
+    )?;
     let final_context =
         read_account_setup_context(provider, exchange_address, signer_address).await?;
     if final_context.account_id != account_id {
@@ -707,6 +942,7 @@ pub async fn submit_exec_orders_receipt_mainnet<P: Provider + Clone>(
     exchange_address: Address,
     signer_address: Address,
     requests: &[OrderRequest],
+    nonce: u64,
     gas_limit: u64,
 ) -> Result<TransactionReceipt, String> {
     if attestation
@@ -726,6 +962,7 @@ pub async fn submit_exec_orders_receipt_mainnet<P: Provider + Clone>(
     let pending = Exchange::new(exchange_address, provider)
         .execOrders(descs, true)
         .from(signer_address)
+        .nonce(nonce)
         .gas(gas_limit)
         .send()
         .await
@@ -755,6 +992,12 @@ pub async fn run_mainnet_canary<P: Provider + Clone, S>(
     chain_nonce: u64,
     gas_limit: u64,
 ) -> Result<CanaryResult, String> {
+    let pending_nonce = provider
+        .get_transaction_count(signer_address)
+        .pending()
+        .await
+        .map_err(|error| format!("pending nonce refresh failed: {error}"))?;
+    let chain_nonce = validate_pending_nonce(chain_nonce, pending_nonce)?;
     let context =
         read_account_setup_context(provider.clone(), exchange_address, signer_address).await?;
     let account_id = execute_account_setup_mainnet(
@@ -768,6 +1011,8 @@ pub async fn run_mainnet_canary<P: Provider + Clone, S>(
         gas_limit,
     )
     .await?;
+    let (order_nonce, cancel_nonce) =
+        mainnet_submission_nonces(chain_nonce, plan_account_setup(context)?)?;
     let order_receipt = submit_exec_orders_receipt_mainnet(
         provider.clone(),
         worker.attestation,
@@ -776,6 +1021,7 @@ pub async fn run_mainnet_canary<P: Provider + Clone, S>(
         exchange_address,
         signer_address,
         &[order],
+        order_nonce,
         gas_limit,
     )
     .await?;
@@ -785,22 +1031,78 @@ pub async fn run_mainnet_canary<P: Provider + Clone, S>(
         order_request_id,
         perpetual_id,
     )?;
-    let cancel = cancel_request(cancel_request_id, perpetual_id, order_id)?;
-    let cancel_receipt = submit_exec_orders_receipt_mainnet(
-        provider.clone(),
-        worker.attestation,
-        gate,
-        snapshot,
-        exchange_address,
-        signer_address,
-        &[cancel],
-        gas_limit,
-    )
-    .await?;
-    validate_cancel_receipt(&cancel_receipt, exchange_address)?;
-    let final_context =
-        read_account_setup_context(provider, exchange_address, signer_address).await?;
+    println!(
+        "PLACEMENT RECORDED: order_tx={:#x}",
+        order_receipt.transaction_hash
+    );
+    println!("PLACEMENT RECORDED: order_id={order_id}");
+    use std::io::Write as _;
+    std::io::stdout().flush().map_err(|error| {
+        eprintln!(
+            "*** MANUAL CLEANUP REQUIRED: order_tx={:#x} order_id={} perp_id={} ***",
+            order_receipt.transaction_hash, order_id, perpetual_id
+        );
+        format!("failed to persist placement identifiers to stdout: {error}")
+    })?;
+    let cleanup = async {
+        verify_mainnet_order_placement(
+            provider.clone(),
+            exchange_address,
+            account_id,
+            perpetual_id,
+            order_id,
+        )
+        .await?;
+        let cancel = cancel_request(cancel_request_id, perpetual_id, order_id)?;
+        let cancel_receipt = submit_exec_orders_receipt_mainnet(
+            provider.clone(),
+            worker.attestation,
+            gate,
+            snapshot,
+            exchange_address,
+            signer_address,
+            &[cancel],
+            cancel_nonce,
+            gas_limit,
+        )
+        .await?;
+        validate_cancel_receipt(
+            &cancel_receipt,
+            exchange_address,
+            account_id,
+            cancel_request_id,
+            perpetual_id,
+            order_id,
+        )?;
+        verify_mainnet_order_cleanup(
+            provider.clone(),
+            exchange_address,
+            account_id,
+            perpetual_id,
+            order_id,
+        )
+        .await?;
+        Ok::<TransactionReceipt, String>(cancel_receipt)
+    }
+    .await;
+    let cancel_receipt = cleanup.map_err(|error| {
+        eprintln!(
+            "*** MANUAL CLEANUP REQUIRED: order_tx={:#x} order_id={} perp_id={} ***",
+            order_receipt.transaction_hash, order_id, perpetual_id
+        );
+        format!("{error}; MANUAL CLEANUP REQUIRED for order {order_id}")
+    })?;
+    let final_context = read_account_setup_context(provider, exchange_address, signer_address)
+        .await
+        .map_err(|error| {
+            eprintln!("*** MANUAL CLEANUP REQUIRED: verify account/order state manually for order_id={} perp_id={} ***", order_id, perpetual_id);
+            error
+        })?;
     if final_context.account_id != account_id {
+        eprintln!(
+            "*** MANUAL CLEANUP REQUIRED: verify account/order state manually for order_id={} perp_id={} ***",
+            order_id, perpetual_id
+        );
         return Err("post-canary account identity mismatch".into());
     }
     Ok(CanaryResult {
@@ -814,6 +1116,49 @@ pub async fn run_mainnet_canary<P: Provider + Clone, S>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::{primitives::Log as PrimitiveLog, sol_types::SolEvent};
+
+    fn rpc_log<E: SolEvent>(address: Address, event: E) -> Log {
+        Log {
+            inner: PrimitiveLog {
+                address,
+                data: event.encode_log_data(),
+            },
+            ..Default::default()
+        }
+    }
+
+    fn request_event(request_id: u64, perp_id: u32) -> Exchange::OrderRequest {
+        Exchange::OrderRequest {
+            perpId: U256::from(perp_id),
+            accountId: U256::from(1),
+            orderDescId: U256::from(request_id),
+            orderId: U256::ZERO,
+            orderType: 0,
+            pricePNS: U256::from(100),
+            lotLNS: U256::from(1),
+            expiryBlock: U256::ZERO,
+            postOnly: true,
+            fillOrKill: false,
+            immediateOrCancel: false,
+            maxMatches: U256::ZERO,
+            leverageHdths: U256::from(1),
+            lastExecutionBlock: U256::ZERO,
+            amountCNS: U256::ZERO,
+            maxNegPnlCollatBPS: U256::ZERO,
+            gasLeft: U256::from(1),
+        }
+    }
+
+    fn placed_event(order_id: u64) -> Exchange::OrderPlaced {
+        Exchange::OrderPlaced {
+            orderId: U256::from(order_id),
+            lotLNS: U256::from(1),
+            lockedBalanceCNS: U256::ZERO,
+            amountCNS: alloy::primitives::I256::ZERO,
+            balanceCNS: U256::ZERO,
+        }
+    }
 
     struct Factory;
     impl SignerFactory for Factory {
@@ -884,6 +1229,137 @@ mod tests {
         assert!(extract_order_id(&[], Address::ZERO, 2, 16).is_err());
         assert!(cancel_request(2, 16, 0).is_err());
         assert!(cancel_request(2, 16, 9).is_ok());
+    }
+
+    #[test]
+    fn placement_correlation_ignores_unrelated_contract_logs() {
+        let exchange = Address::from([7u8; 20]);
+        let unrelated = rpc_log(Address::from([8u8; 20]), placed_event(99));
+        let request = rpc_log(exchange, request_event(42, 1));
+        let placed = rpc_log(exchange, placed_event(9));
+        assert_eq!(
+            extract_order_id(&[unrelated, request, placed], exchange, 42, 1).unwrap(),
+            9
+        );
+    }
+
+    #[test]
+    fn placement_correlation_rejects_zero_and_wrong_positions() {
+        let exchange = Address::from([7u8; 20]);
+        let request = || rpc_log(exchange, request_event(42, 1));
+        let zero = rpc_log(exchange, placed_event(0));
+        assert!(extract_order_id(&[request(), zero], exchange, 42, 1).is_err());
+        let other_request = rpc_log(exchange, request_event(43, 20));
+        let placed = rpc_log(exchange, placed_event(9));
+        assert!(extract_order_id(&[request(), other_request, placed], exchange, 42, 1).is_err());
+    }
+
+    #[test]
+    fn cancellation_is_positionally_correlated_and_ignores_unrelated_logs() {
+        let exchange = Address::from([7u8; 20]);
+        let unrelated = rpc_log(
+            Address::from([8u8; 20]),
+            Exchange::OrderCancelled {
+                lockedBalanceCNS: U256::ZERO,
+                amountCNS: alloy::primitives::I256::ZERO,
+                balanceCNS: U256::ZERO,
+            },
+        );
+        let mut request = request_event(43, 1);
+        request.orderId = U256::from(9);
+        request.orderType = 4;
+        let request = rpc_log(exchange, request);
+        let cancelled = || {
+            rpc_log(
+                exchange,
+                Exchange::OrderCancelled {
+                    lockedBalanceCNS: U256::ZERO,
+                    amountCNS: alloy::primitives::I256::ZERO,
+                    balanceCNS: U256::ZERO,
+                },
+            )
+        };
+        assert!(
+            validate_cancel_logs(
+                &[unrelated, request, cancelled()],
+                exchange,
+                U256::from(1),
+                43,
+                1,
+                9
+            )
+            .is_ok()
+        );
+        assert!(validate_cancel_logs(&[], exchange, U256::from(1), 43, 1, 9).is_err());
+
+        let mut wrong_account = request_event(43, 1);
+        wrong_account.accountId = U256::from(2);
+        wrong_account.orderId = U256::from(9);
+        wrong_account.orderType = 4;
+        assert!(
+            validate_cancel_logs(
+                &[rpc_log(exchange, wrong_account), cancelled()],
+                exchange,
+                U256::from(1),
+                43,
+                1,
+                9
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn post_cancel_identity_distinguishes_target_from_reused_id() {
+        let order = |account_id, order_id| Exchange::Order {
+            accountId: account_id,
+            orderType: 0,
+            priceONS: alloy::primitives::Uint::<24, 1>::ZERO,
+            lotLNS: alloy::primitives::Uint::<40, 1>::ZERO,
+            recycleFeeRaw: 0,
+            expiryBlock: 0,
+            leverageHdths: 0,
+            orderId: order_id,
+            prevOrderId: 0,
+            nextOrderId: 0,
+            maxNegPnlCollatBPS: 0,
+        };
+        let target = order(5071, 47);
+        assert!(indexed_order_belongs_to_account(&target, U256::from(5071), 47).unwrap());
+
+        let reused = order(25, 47);
+        assert!(!indexed_order_belongs_to_account(&reused, U256::from(5071), 47).unwrap());
+
+        let inconsistent = order(25, 48);
+        assert!(indexed_order_belongs_to_account(&inconsistent, U256::from(5071), 47).is_err());
+    }
+
+    #[test]
+    fn documented_order_index_bits_drive_exact_removal_check() {
+        let mut leaves = vec![U256::ZERO];
+        leaves[0].set_bit(9, true);
+        assert!(order_index_contains(&leaves, 9));
+        leaves[0].set_bit(9, false);
+        assert!(!order_index_contains(&leaves, 9));
+    }
+
+    #[test]
+    fn mainnet_place_and_cancel_nonces_follow_setup_transactions() {
+        let existing = AccountSetupAction::Existing {
+            account_id: U256::from(1),
+        };
+        let create = AccountSetupAction::Create {
+            amount_cns: U256::from(1),
+        };
+        let approve = AccountSetupAction::ApproveAndCreate {
+            amount_cns: U256::from(1),
+        };
+        assert_eq!(mainnet_submission_nonces(10, existing).unwrap(), (10, 11));
+        assert_eq!(mainnet_submission_nonces(10, create).unwrap(), (11, 12));
+        assert_eq!(mainnet_submission_nonces(10, approve).unwrap(), (12, 13));
+        assert!(mainnet_submission_nonces(u64::MAX, existing).is_err());
+        assert_eq!(validate_pending_nonce(10, 10).unwrap(), 10);
+        assert!(validate_pending_nonce(10, 11).is_err());
     }
 
     #[test]
