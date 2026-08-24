@@ -1,6 +1,6 @@
 use riim_perpl_bridge::{
     perpl::validate_hello,
-    protocol::{AccountEvidence, Fill, Position, Request, decode},
+    protocol::{AccountEvidence, Fill, Position, Request, decode, decode_execution_intent},
 };
 
 #[test]
@@ -60,4 +60,30 @@ fn rejects_testnet_custom_signer_and_prepare_fields() {
     assert!(decode(r#"{"version":1,"id":"one","command":"hello","network":"testnet","rpcUrl":"https://testnet-rpc.monad.xyz","markets":[{"symbol":"BTCUSD","perpetualId":16}],"accountIds":[7]}"#).and_then(|request| match request { Request::Hello { ref network, ref rpc_url, ref markets, ref account_ids, .. } => validate_hello(network, rpc_url, markets, account_ids).map(|_| request) }).is_err());
     assert!(decode(r#"{"version":1,"id":"one","command":"hello","network":"testnet","rpcUrl":"https://testnet-rpc.monad.xyz","markets":[{"symbol":"BTCUSD","perpetualId":16}],"accountIds":[],"privateKey":"forbidden"}"#).is_err());
     assert!(decode(r#"{"version":1,"id":"one","command":"prepare_exec_orders","revertOnFail":true,"orders":[]}"#).is_err());
+}
+
+#[test]
+fn validates_unwired_mainnet_execution_intents_without_adding_them_to_bridge_requests() {
+    let place = r#"{"version":1,"id":"x","action":"place","chainId":143,"exchange":"0x34b6552d57a35a1d042ccae1951bd1c370112a6f","accountId":5071,"market":"BTCUSD","perpetualId":1,"actionId":"place-1","side":"buy","orderType":"postOnly","price":"77000","size":"0.00018","reduceOnly":false,"leverage":"1"}"#;
+    decode_execution_intent(place).unwrap();
+    assert!(decode(place).is_err());
+    let cancel = r#"{"version":1,"id":"y","action":"cancel","chainId":143,"exchange":"0x34b6552d57a35a1d042ccae1951bd1c370112a6f","accountId":5071,"market":"ETHUSD","perpetualId":20,"actionId":"cancel-1","exchangeOrderId":"47","placementActionId":"place-1"}"#;
+    decode_execution_intent(cancel).unwrap();
+}
+
+#[test]
+fn rejects_unsafe_or_unpinned_execution_intents() {
+    let unsafe_cases = [
+        r#"{"version":1,"id":"x","action":"place","chainId":143,"exchange":"0x34b6552d57a35a1d042ccae1951bd1c370112a6f","accountId":5071,"market":"BTCUSD","perpetualId":1,"actionId":"place-1","side":"buy","orderType":"limit","price":"77000","size":"0.00018","reduceOnly":false,"leverage":"1"}"#,
+        r#"{"version":1,"id":"x","action":"place","chainId":143,"exchange":"0x34b6552d57a35a1d042ccae1951bd1c370112a6f","accountId":5071,"market":"BTCUSD","perpetualId":1,"actionId":"place-1","side":"buy","orderType":"postOnly","price":"77000","size":"1","reduceOnly":false,"leverage":"1"}"#,
+        r#"{"version":1,"id":"x","action":"place","chainId":143,"exchange":"0x34b6552d57a35a1d042ccae1951bd1c370112a6f","accountId":5071,"market":"BTCUSD","perpetualId":20,"actionId":"place-1","side":"buy","orderType":"postOnly","price":"77000","size":"0.00018","reduceOnly":false,"leverage":"1"}"#,
+        r#"{"version":1,"id":"x","action":"place","chainId":143,"exchange":"0x34b6552d57a35a1d042ccae1951bd1c370112a6f","accountId":5071,"market":"BTCUSD","perpetualId":1,"actionId":"place-1","side":"buy","orderType":"postOnly","price":"77000","size":"0.00018","reduceOnly":false,"leverage":"1","signerKey":"forbidden"}"#,
+        r#"{"version":1,"id":"y","action":"cancel","chainId":143,"exchange":"0x34b6552d57a35a1d042ccae1951bd1c370112a6f","accountId":5071,"market":"BTCUSD","perpetualId":1,"actionId":"same","exchangeOrderId":"47","placementActionId":"same"}"#,
+    ];
+    for value in unsafe_cases {
+        assert!(
+            decode_execution_intent(value).is_err(),
+            "accepted unsafe intent: {value}"
+        );
+    }
 }
