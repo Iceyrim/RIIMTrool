@@ -18,6 +18,15 @@ export interface DryRunProposal extends QuoteLevel {
   blockedReason?: string;
 }
 
+export interface DryRunPositionSafetyEvidence {
+  baseSize: number;
+  markPrice: number;
+  deposit: number;
+  maintenanceRequirement: number;
+  liquidationPrice: number;
+  bankruptcyPrice: number;
+}
+
 export interface DryRunPlan {
   market: string;
   generatedAt: number;
@@ -27,6 +36,7 @@ export interface DryRunPlan {
   observedOpenOrders: NormalizedOrder[];
   balances: NormalizedBalance[];
   accountEvidence?: Record<string, string | boolean>;
+  positionSafetyEvidence?: DryRunPositionSafetyEvidence;
   fillCoverageStartBlock?: string;
   proposedCancellations: string[];
   proposals: DryRunProposal[];
@@ -84,7 +94,10 @@ export class MarketMakingDryRun {
       getPositionSafetyEvidence?: (market?: string) => Array<{
         baseSize: number;
         markPrice: number;
+        deposit: number;
+        maintenanceRequirement: number;
         liquidationPrice: number;
+        bankruptcyPrice: number;
       }>;
     };
     const accountEvidence = evidenceAdapter.getAccountEvidence?.();
@@ -128,6 +141,7 @@ export class MarketMakingDryRun {
       observedOpenOrders,
       balances: this.adapter.getBalances(),
       accountEvidence,
+      positionSafetyEvidence: positionSafety,
       fillCoverageStartBlock,
       proposedCancellations,
       proposals,

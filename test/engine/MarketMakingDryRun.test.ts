@@ -52,7 +52,10 @@ function seedSafety(
     getPositionSafetyEvidence: () => Array<{
       baseSize: number;
       markPrice: number;
+      deposit: number;
+      maintenanceRequirement: number;
       liquidationPrice: number;
+      bankruptcyPrice: number;
     }>;
   };
   evidence.getAccountEvidence = () => ({ frozen: values.frozen ?? false });
@@ -60,7 +63,10 @@ function seedSafety(
     {
       baseSize: values.baseSize ?? 0,
       markPrice: values.markPrice ?? 77_000,
+      deposit: 0,
+      maintenanceRequirement: 0,
       liquidationPrice: values.liquidationPrice ?? 0,
+      bankruptcyPrice: 0,
     },
   ];
 }
@@ -119,6 +125,14 @@ describe("MarketMakingDryRun", () => {
     await dryRun.start();
     const plan = await dryRun.planCycle();
     expect(plan.proposals).toHaveLength(10);
+    expect(plan.positionSafetyEvidence).toEqual({
+      baseSize: 0,
+      markPrice: 60_000,
+      deposit: 0,
+      maintenanceRequirement: 0,
+      liquidationPrice: 70_000,
+      bankruptcyPrice: 0,
+    });
   });
 
   it("plans one reduce-only inventory action without submitting it", async () => {
