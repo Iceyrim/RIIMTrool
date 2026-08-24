@@ -53,6 +53,7 @@ describe("MarketMakingDryRun", () => {
     expect(plan.proposals).toHaveLength(10);
     expect(plan.proposals.every((proposal) => proposal.allowed && !proposal.reduceOnly)).toBe(true);
     expect(plan.executionReady).toBe(false);
+    expect(plan.balances).toEqual([]);
     expect(plan.proposedCancellations).toEqual([]);
     expect(plan.readinessBlockers).toContain("authoritative mainnet margin status is unavailable");
     expect(adapter.placeOrderCalls).toHaveLength(0);

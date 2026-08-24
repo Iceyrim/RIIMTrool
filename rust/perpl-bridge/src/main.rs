@@ -175,7 +175,15 @@ async fn main() {
             return;
         }
     };
-    let initial = match perpl::snapshot(&exchange, &markets, account_id, 0) {
+    let fill_coverage_start_block = exchange.instant().block_number();
+    let initial = match perpl::snapshot(
+        &exchange,
+        &markets,
+        account_id,
+        fill_coverage_start_block,
+        &[],
+        0,
+    ) {
         Ok(value) => value,
         Err(error) => {
             let _ = emit(
@@ -212,6 +220,7 @@ async fn main() {
     let stream_markets = markets.clone();
     let stream_chain = chain.clone();
     tokio::spawn(async move {
+        let mut observed_fills = Vec::new();
         let mut events = Box::pin(stream::raw(
             &stream_chain,
             provider,
@@ -236,20 +245,40 @@ async fn main() {
             };
             let snapshot = {
                 let mut exchange = stream_exchange.write().await;
-                if let Err(error) = exchange.apply_events(&result) {
-                    let _ = emit(
-                        &stream_output,
-                        &Response::Fatal {
-                            version: VERSION,
-                            id: "stream".into(),
-                            error: format!("event application failed: {error}"),
-                        },
-                    )
-                    .await;
-                    return;
+                let state_events = match exchange.apply_events(&result) {
+                    Ok(events) => events,
+                    Err(error) => {
+                        let _ = emit(
+                            &stream_output,
+                            &Response::Fatal {
+                                version: VERSION,
+                                id: "stream".into(),
+                                error: format!("event application failed: {error}"),
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                if let Some(state_events) = state_events {
+                    observed_fills.extend(perpl::observed_maker_fills(
+                        &state_events,
+                        &stream_markets,
+                        account_id,
+                    ));
+                }
+                if observed_fills.len() > 1_000 {
+                    observed_fills.drain(..observed_fills.len() - 1_000);
                 }
                 let event_count = result.events().len().try_into().unwrap_or(u32::MAX);
-                perpl::snapshot(&exchange, &stream_markets, account_id, event_count)
+                perpl::snapshot(
+                    &exchange,
+                    &stream_markets,
+                    account_id,
+                    fill_coverage_start_block,
+                    &observed_fills,
+                    event_count,
+                )
             };
             match snapshot {
                 Ok(snapshot) => {

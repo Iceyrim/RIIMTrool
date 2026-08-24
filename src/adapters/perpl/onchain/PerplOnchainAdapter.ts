@@ -12,13 +12,14 @@ import type {
   PlaceOrderParams,
   PlaceOrderResult,
 } from "../../ExchangeAdapter.js";
-import { mapBridgeOrder, mapBridgePosition, validateSnapshot } from "./mappers.js";
+import { mapBridgeFill, mapBridgeOrder, mapBridgePosition, validateSnapshot } from "./mappers.js";
 import type { PerplBridgeTransport } from "./PerplRustClient.js";
 import {
   PERPL_BRIDGE_PROTOCOL_VERSION,
   PERPL_MAINNET_ACCOUNT_ID,
   PERPL_MAINNET_RPC,
   type BridgeSnapshot,
+  type BridgeAccountEvidence,
 } from "./protocol.js";
 
 export interface PerplOnchainAdapterConfig {
@@ -96,7 +97,13 @@ export class PerplOnchainAdapter implements ExchangeAdapter {
       .filter((item) => !market || item.market === market);
   }
   getBalances(): NormalizedBalance[] {
-    throw new ExchangeAdapterError("Phase-1 Perpl bridge does not expose authoritative balances");
+    return [{ token: "USDC", amount: Number(this.requireSnapshot().account.balance) }];
+  }
+  getAccountEvidence(): BridgeAccountEvidence {
+    return this.requireSnapshot().account;
+  }
+  getFillCoverageStartBlock(): string {
+    return this.requireSnapshot().fillCoverageStartBlock;
   }
   getMarginStatus(): NormalizedMarginStatus {
     throw new ExchangeAdapterError(
@@ -114,10 +121,15 @@ export class PerplOnchainAdapter implements ExchangeAdapter {
   async cancelOrder(exchangeOrderId: string, _market: string): Promise<CancelOrderResult> {
     return { success: false, exchangeOrderId };
   }
-  async getOrderFills(_exchangeOrderId: string, _market: string): Promise<NormalizedFill[]> {
-    throw new ExchangeAdapterError(
-      "Phase-1 Perpl bridge does not expose authoritative fill history",
-    );
+  async getOrderFills(exchangeOrderId: string, market: string): Promise<NormalizedFill[]> {
+    const fills = this.requireSnapshot()
+      .fills.map(mapBridgeFill)
+      .filter((fill) => fill.exchangeOrderId === exchangeOrderId && fill.market === market);
+    if (!fills.length)
+      throw new ExchangeAdapterError(
+        "No maker fill was observed for this order since bridge startup; historical absence is not authoritative",
+      );
+    return fills;
   }
   async getMarketPrice(market: string): Promise<MarketPrice> {
     const position = this.getPositions(market)[0];

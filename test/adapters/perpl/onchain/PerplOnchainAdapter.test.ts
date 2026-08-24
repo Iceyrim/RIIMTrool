@@ -17,6 +17,16 @@ class FakeBridge implements PerplBridgeTransport {
       exchange: PERPL_MAINNET_EXCHANGE,
       snapshot: {
         accountId: 5071,
+        account: {
+          balance: "18.341694",
+          lockedBalance: "0",
+          availableBalance: "18.341694",
+          unrealizedPnl: "2",
+          positionDeposit: "1",
+          maintenanceRequirement: "0.5",
+          frozen: false,
+        },
+        fillCoverageStartBlock: "10",
         blockNumber: "12",
         blockTimestamp: 1,
         receivedAt: 1000,
@@ -38,6 +48,17 @@ class FakeBridge implements PerplBridgeTransport {
             size: "0.01",
             filledSize: "0",
             reduceOnly: true,
+          },
+        ],
+        fills: [
+          {
+            exchangeOrderId: "9",
+            tradeId: "0xabc:1",
+            symbol: "BTCUSD",
+            side: "sell",
+            price: "65100",
+            size: "0.002",
+            timestamp: 1000,
           },
         ],
         markets: [
@@ -85,6 +106,16 @@ describe("PerplOnchainAdapter", () => {
     await adapter.connect();
     expect(adapter.getPositions()).toMatchObject([{ baseSize: 0.01, openOrderCount: 1 }]);
     expect(adapter.getOpenOrders()).toMatchObject([{ exchangeOrderId: "9", isReduceOnly: true }]);
+    expect(adapter.getBalances()).toEqual([{ token: "USDC", amount: 18.341694 }]);
+    expect(adapter.getAccountEvidence()).toMatchObject({
+      maintenanceRequirement: "0.5",
+      frozen: false,
+    });
+    expect(adapter.getFillCoverageStartBlock()).toBe("10");
+    await expect(adapter.getOrderFills("9", "BTCUSD")).resolves.toMatchObject([
+      { tradeId: "0xabc:1", size: 0.002 },
+    ]);
+    await expect(adapter.getOrderFills("missing", "BTCUSD")).rejects.toThrow(/historical absence/);
     await expect(
       adapter.placeOrder({
         market: "BTCUSD",

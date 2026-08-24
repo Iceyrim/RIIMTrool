@@ -62,26 +62,80 @@ export interface BridgePosition {
   openOrderCount: number;
 }
 
+export interface BridgeAccountEvidence {
+  balance: string;
+  lockedBalance: string;
+  availableBalance: string;
+  unrealizedPnl: string;
+  positionDeposit: string;
+  maintenanceRequirement: string;
+  frozen: boolean;
+}
+
+export interface BridgeFill {
+  exchangeOrderId: string;
+  tradeId: string;
+  symbol: string;
+  side: "buy" | "sell";
+  price: string;
+  size: string;
+  timestamp: number;
+}
+
 export interface BridgeSnapshot {
   accountId: number;
+  account: BridgeAccountEvidence;
+  fillCoverageStartBlock: string;
   blockNumber: string;
   blockTimestamp: number;
   receivedAt: number;
   positions: BridgePosition[];
   orders: BridgeOrder[];
+  fills: BridgeFill[];
   markets: BridgeMarketState[];
   books: BridgeBook[];
   eventCount: number;
   quiet: boolean;
 }
 
-export interface BridgeMarketState { symbol: string; perpetualId: number; markPrice: string; oraclePrice: string; lastPrice: string; paused: boolean; openInterest: string }
-export interface BridgeBookLevel { price: string; size: string }
-export interface BridgeBook { symbol: string; perpetualId: number; bestBid?: BridgeBookLevel; bestAsk?: BridgeBookLevel; totalOrders: number }
+export interface BridgeMarketState {
+  symbol: string;
+  perpetualId: number;
+  markPrice: string;
+  oraclePrice: string;
+  lastPrice: string;
+  paused: boolean;
+  openInterest: string;
+}
+export interface BridgeBookLevel {
+  price: string;
+  size: string;
+}
+export interface BridgeBook {
+  symbol: string;
+  perpetualId: number;
+  bestBid?: BridgeBookLevel;
+  bestAsk?: BridgeBookLevel;
+  totalOrders: number;
+}
 
 export type BridgeResponse =
-  | { version: 1; id: string; event: "ready"; chainId: 143; exchange: string; snapshot: BridgeSnapshot }
-  | { version: 1; id: string; event: "state"; chainId: 143; exchange: string; snapshot: BridgeSnapshot }
+  | {
+      version: 1;
+      id: string;
+      event: "ready";
+      chainId: 143;
+      exchange: string;
+      snapshot: BridgeSnapshot;
+    }
+  | {
+      version: 1;
+      id: string;
+      event: "state";
+      chainId: 143;
+      exchange: string;
+      snapshot: BridgeSnapshot;
+    }
   | { version: 1; id: string; event: "fatal"; error: string };
 
 const signerKey = /(private.?key|secret|seed|mnemonic|wallet|signer|keystore)/i;
@@ -93,7 +147,8 @@ export function assertNoSignerInput(value: unknown, path = "request"): void {
   }
   if (!value || typeof value !== "object") return;
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-    if (signerKey.test(key)) throw new ExchangeAdapterError(`Signer-related input is forbidden at ${path}.${key}`);
+    if (signerKey.test(key))
+      throw new ExchangeAdapterError(`Signer-related input is forbidden at ${path}.${key}`);
     assertNoSignerInput(item, `${path}.${key}`);
   }
 }
@@ -106,15 +161,25 @@ function object(value: unknown, label: string): Record<string, unknown> {
 }
 
 export function parseBridgeResponse(line: string): BridgeResponse {
-  if (Buffer.byteLength(line) > 1_000_000) throw new ExchangeAdapterError("Perpl bridge message exceeds 1 MB");
+  if (Buffer.byteLength(line) > 1_000_000)
+    throw new ExchangeAdapterError("Perpl bridge message exceeds 1 MB");
   let value: unknown;
-  try { value = JSON.parse(line); } catch (error) { throw new ExchangeAdapterError("Perpl bridge returned invalid JSON", error); }
+  try {
+    value = JSON.parse(line);
+  } catch (error) {
+    throw new ExchangeAdapterError("Perpl bridge returned invalid JSON", error);
+  }
   assertNoSignerInput(value, "response");
   const row = object(value, "response");
-  if (row.version !== PERPL_BRIDGE_PROTOCOL_VERSION || typeof row.id !== "string") throw new ExchangeAdapterError("Perpl bridge protocol mismatch");
-  if (!["ready", "state", "fatal"].includes(String(row.event))) throw new ExchangeAdapterError("Perpl bridge event is unsupported");
+  if (row.version !== PERPL_BRIDGE_PROTOCOL_VERSION || typeof row.id !== "string")
+    throw new ExchangeAdapterError("Perpl bridge protocol mismatch");
+  if (!["ready", "state", "fatal"].includes(String(row.event)))
+    throw new ExchangeAdapterError("Perpl bridge event is unsupported");
   if (row.event !== "fatal") {
-    if (row.chainId !== PERPL_MAINNET_CHAIN_ID || String(row.exchange).toLowerCase() !== PERPL_MAINNET_EXCHANGE) {
+    if (
+      row.chainId !== PERPL_MAINNET_CHAIN_ID ||
+      String(row.exchange).toLowerCase() !== PERPL_MAINNET_EXCHANGE
+    ) {
       throw new ExchangeAdapterError("Perpl bridge refused non-mainnet deployment");
     }
   }

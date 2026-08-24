@@ -86,13 +86,40 @@ pub struct Order {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AccountEvidence {
+    pub balance: String,
+    pub locked_balance: String,
+    pub available_balance: String,
+    pub unrealized_pnl: String,
+    pub position_deposit: String,
+    pub maintenance_requirement: String,
+    pub frozen: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Fill {
+    pub exchange_order_id: String,
+    pub trade_id: String,
+    pub symbol: String,
+    pub side: String,
+    pub price: String,
+    pub size: String,
+    pub timestamp: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     pub account_id: u32,
+    pub account: AccountEvidence,
+    pub fill_coverage_start_block: String,
     pub block_number: String,
     pub block_timestamp: u64,
     pub received_at: u64,
     pub positions: Vec<Position>,
     pub orders: Vec<Order>,
+    pub fills: Vec<Fill>,
     pub markets: Vec<MarketState>,
     pub books: Vec<Book>,
     pub event_count: u32,

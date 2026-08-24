@@ -1,6 +1,6 @@
 use riim_perpl_bridge::{
     perpl::validate_hello,
-    protocol::{Request, decode},
+    protocol::{AccountEvidence, Fill, Request, decode},
 };
 
 #[test]
@@ -14,6 +14,32 @@ fn accepts_only_the_versioned_mainnet_read_only_hello() {
         ..
     } = request;
     validate_hello(&network, &rpc_url, &markets, &account_ids).unwrap();
+}
+
+#[test]
+fn serializes_account_and_session_fill_evidence() {
+    let account = serde_json::to_value(AccountEvidence {
+        balance: "18.34".into(),
+        locked_balance: "0".into(),
+        available_balance: "18.34".into(),
+        unrealized_pnl: "0".into(),
+        position_deposit: "0".into(),
+        maintenance_requirement: "0".into(),
+        frozen: false,
+    })
+    .unwrap();
+    assert_eq!(account["availableBalance"], "18.34");
+    let fill = serde_json::to_value(Fill {
+        exchange_order_id: "78".into(),
+        trade_id: "0xabc:1".into(),
+        symbol: "BTCUSD".into(),
+        side: "buy".into(),
+        price: "77000".into(),
+        size: "0.00018".into(),
+        timestamp: 1_000,
+    })
+    .unwrap();
+    assert_eq!(fill["exchangeOrderId"], "78");
 }
 
 #[test]

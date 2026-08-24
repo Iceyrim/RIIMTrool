@@ -4,7 +4,7 @@ use std::{
 };
 
 use alloy::{primitives::keccak256, sol_types::SolCall};
-use fastnum::UD64;
+use fastnum::{UD64, UD128};
 use perpl_sdk::{
     abi::dex::Exchange,
     state,
@@ -13,7 +13,8 @@ use perpl_sdk::{
 use tokio::sync::RwLock;
 
 use crate::protocol::{
-    Book, BookLevel, Market, MarketState, Order, Position, PrepareOrder, Snapshot,
+    AccountEvidence, Book, BookLevel, Fill, Market, MarketState, Order, Position, PrepareOrder,
+    Snapshot,
 };
 
 pub const MAINNET_RPC_URL: &str = "https://rpc.monad.xyz";
@@ -53,6 +54,8 @@ pub fn snapshot(
     exchange: &state::Exchange,
     markets: &[Market],
     account_id: u32,
+    fill_coverage_start_block: u64,
+    fills: &[Fill],
     event_count: u32,
 ) -> Result<Snapshot, String> {
     let instant = exchange.instant();
@@ -60,6 +63,25 @@ pub fn snapshot(
         .accounts()
         .get(&account_id)
         .ok_or_else(|| format!("account {account_id} is absent"))?;
+    let position_deposit: UD128 = account
+        .positions()
+        .values()
+        .map(|position| position.deposit())
+        .sum();
+    let maintenance_requirement: UD128 = account
+        .positions()
+        .values()
+        .map(|position| position.maintenance_margin_requirement())
+        .sum();
+    let account_evidence = AccountEvidence {
+        balance: account.balance().to_string(),
+        locked_balance: account.locked_balance().to_string(),
+        available_balance: account.available_balance().to_string(),
+        unrealized_pnl: account.unrealized_pnl().to_string(),
+        position_deposit: position_deposit.to_string(),
+        maintenance_requirement: maintenance_requirement.to_string(),
+        frozen: account.frozen(),
+    };
     let positions = markets
         .iter()
         .map(|market| {
@@ -174,16 +196,61 @@ pub fn snapshot(
     });
     Ok(Snapshot {
         account_id,
+        account: account_evidence,
+        fill_coverage_start_block: fill_coverage_start_block.to_string(),
         block_number: instant.block_number().to_string(),
         block_timestamp: instant.block_timestamp(),
         received_at,
         positions,
         orders,
+        fills: fills.to_vec(),
         markets: market_states,
         books,
         event_count,
         quiet: event_count == 0,
     })
+}
+
+pub fn observed_maker_fills(
+    events: &state::StateBlockEvents,
+    markets: &[Market],
+    account_id: u32,
+) -> Vec<Fill> {
+    let timestamp = events.instant().block_timestamp().saturating_mul(1_000);
+    let mut fills = Vec::new();
+    for context in events.events() {
+        for event in context.event() {
+            let Some(trade) = event.as_trade() else {
+                continue;
+            };
+            let Some(market) = markets
+                .iter()
+                .find(|market| market.perpetual_id == trade.perpetual_id)
+            else {
+                continue;
+            };
+            let side = match trade.taker_side.opposite() {
+                OrderSide::Bid => "buy",
+                OrderSide::Ask => "sell",
+            };
+            for fill in trade
+                .maker_fills
+                .iter()
+                .filter(|fill| fill.maker_account_id == account_id)
+            {
+                fills.push(Fill {
+                    exchange_order_id: fill.maker_order_id.to_string(),
+                    trade_id: format!("{:#x}:{}", context.tx_hash(), fill.log_index),
+                    symbol: market.symbol.clone(),
+                    side: side.into(),
+                    price: fill.price.to_string(),
+                    size: fill.size.to_string(),
+                    timestamp,
+                });
+            }
+        }
+    }
+    fills
 }
 
 pub fn prepare(

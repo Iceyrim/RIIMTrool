@@ -1,4 +1,9 @@
-import type { ExchangeAdapter, NormalizedOrder, OrderSide } from "../adapters/ExchangeAdapter.js";
+import type {
+  ExchangeAdapter,
+  NormalizedBalance,
+  NormalizedOrder,
+  OrderSide,
+} from "../adapters/ExchangeAdapter.js";
 import { OrderRegistry } from "./OrderRegistry.js";
 import { generateQuoteLadder, pickOrderSize, type QuoteLevel } from "./QuoteLadder.js";
 import { Reconciliation, type ReconciliationResult } from "./Reconciliation.js";
@@ -20,6 +25,9 @@ export interface DryRunPlan {
   positionBaseSize: number;
   markPrice: number;
   observedOpenOrders: NormalizedOrder[];
+  balances: NormalizedBalance[];
+  accountEvidence?: Record<string, string | boolean>;
+  fillCoverageStartBlock?: string;
   proposedCancellations: string[];
   proposals: DryRunProposal[];
   executionReady: false;
@@ -70,6 +78,11 @@ export class MarketMakingDryRun {
     const position = this.adapter.getPositions(this.config.symbol)[0];
     const markPrice = (await this.adapter.getMarketPrice(this.config.symbol)).mark;
     const observedOpenOrders = this.adapter.getOpenOrders(this.config.symbol);
+    const evidenceAdapter = this.adapter as ExchangeAdapter & {
+      getAccountEvidence?: () => Record<string, string | boolean>;
+      getFillCoverageStartBlock?: () => string;
+    };
+    const fillCoverageStartBlock = evidenceAdapter.getFillCoverageStartBlock?.();
     const proposedCancellations =
       Math.abs(position?.baseSize ?? 0) > this.config.inventoryReductionThresholdBase
         ? this.registry
@@ -92,13 +105,16 @@ export class MarketMakingDryRun {
       positionBaseSize: position?.baseSize ?? 0,
       markPrice,
       observedOpenOrders,
+      balances: this.adapter.getBalances(),
+      accountEvidence: evidenceAdapter.getAccountEvidence?.(),
+      fillCoverageStartBlock,
       proposedCancellations,
       proposals,
       executionReady: false,
       readinessBlockers: [
         "authoritative mainnet margin status is unavailable",
         "authoritative session realized PnL is unavailable",
-        "authoritative fill history is unavailable",
+        `fill evidence is limited to maker fills observed since bridge startup${fillCoverageStartBlock ? ` at block ${fillCoverageStartBlock}` : ""}`,
         "execution remains disabled pending a separately approved canary-gated integration",
       ],
     };

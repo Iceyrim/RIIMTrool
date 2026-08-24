@@ -19,11 +19,22 @@ describe("Perpl on-chain mappers", () => {
     ).toMatchObject({ remainingSize: 0.008, isReduceOnly: true, state: "partiallyFilled" });
     const snapshot = {
       accountId: 5071,
+      account: {
+        balance: "1",
+        lockedBalance: "0",
+        availableBalance: "1",
+        unrealizedPnl: "0",
+        positionDeposit: "0",
+        maintenanceRequirement: "0",
+        frozen: false,
+      },
+      fillCoverageStartBlock: "10",
       blockNumber: "12",
       blockTimestamp: 1,
       receivedAt: 1,
       positions: [],
       orders: [],
+      fills: [],
       markets: [],
       books: [],
       eventCount: 0,
@@ -36,6 +47,16 @@ describe("Perpl on-chain mappers", () => {
   it("accepts the proven mainnet ETH perpetual id", () => {
     const snapshot = {
       accountId: 5071,
+      account: {
+        balance: "1",
+        lockedBalance: "0",
+        availableBalance: "1",
+        unrealizedPnl: "0",
+        positionDeposit: "0",
+        maintenanceRequirement: "0",
+        frozen: false,
+      },
+      fillCoverageStartBlock: "10",
       blockNumber: "12",
       blockTimestamp: 1,
       receivedAt: 1,
@@ -49,6 +70,7 @@ describe("Perpl on-chain mappers", () => {
         },
       ],
       orders: [],
+      fills: [],
       markets: [
         {
           symbol: "ETHUSD",
