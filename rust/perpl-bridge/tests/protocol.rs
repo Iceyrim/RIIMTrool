@@ -5,7 +5,7 @@ use riim_perpl_bridge::{
 
 #[test]
 fn accepts_only_the_versioned_testnet_hello() {
-    let request = decode(r#"{"version":1,"id":"one","command":"hello","network":"testnet","rpcUrl":"https://testnet-rpc.monad.xyz","markets":[{"symbol":"BTCUSD","perpetualId":16}],"accountIds":[]}"#).unwrap();
+    let request = decode(r#"{"version":1,"id":"one","command":"hello","network":"testnet","rpcUrl":"https://testnet-rpc.monad.xyz","markets":[{"symbol":"BTCUSD","perpetualId":16}],"accountIds":[7]}"#).unwrap();
     let Request::Hello {
         network,
         rpc_url,

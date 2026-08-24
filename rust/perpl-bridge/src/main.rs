@@ -6,7 +6,12 @@ use alloy::{
     transports::layers::{RetryBackoffLayer, ThrottleLayer},
 };
 use futures::StreamExt;
-use perpl_sdk::{Chain, state::SnapshotBuilder, stream, types::StateInstant};
+use perpl_sdk::{
+    Chain,
+    state::SnapshotBuilder,
+    stream,
+    types::{AccountAddressOrID, StateInstant},
+};
 use riim_perpl_bridge::{perpl, protocol};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -82,6 +87,7 @@ async fn main() {
         .await;
         return;
     }
+    let account_id = account_ids[0];
     let client = match RpcClient::builder()
         .layer(ThrottleLayer::new(12))
         .layer(RetryBackoffLayer::new(5, 100, 200))
@@ -150,6 +156,7 @@ async fn main() {
         RPC_TIMEOUT,
         SnapshotBuilder::new(&chain, provider.clone())
             .with_perpetuals(markets.iter().map(|market| market.perpetual_id).collect())
+            .with_accounts(vec![AccountAddressOrID::ID(account_id)])
             .build(),
     )
     .await
@@ -180,7 +187,7 @@ async fn main() {
             return;
         }
     };
-    let initial = match perpl::snapshot(&exchange, &markets, 0) {
+    let initial = match perpl::snapshot(&exchange, &markets, account_id, 0) {
         Ok(value) => value,
         Err(error) => {
             let _ = emit(
@@ -254,7 +261,7 @@ async fn main() {
                     return;
                 }
                 let event_count = result.events().len().try_into().unwrap_or(u32::MAX);
-                perpl::snapshot(&exchange, &stream_markets, event_count)
+                perpl::snapshot(&exchange, &stream_markets, account_id, event_count)
             };
             match snapshot {
                 Ok(snapshot) => {

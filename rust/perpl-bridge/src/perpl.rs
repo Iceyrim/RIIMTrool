@@ -8,11 +8,13 @@ use fastnum::UD64;
 use perpl_sdk::{
     abi::dex::Exchange,
     state,
-    types::{OrderRequest, RequestType},
+    types::{OrderRequest, OrderSide, OrderType, RequestType},
 };
 use tokio::sync::RwLock;
 
-use crate::protocol::{Book, BookLevel, Market, MarketState, Position, PrepareOrder, Snapshot};
+use crate::protocol::{
+    Book, BookLevel, Market, MarketState, Order, Position, PrepareOrder, Snapshot,
+};
 
 pub const TESTNET_RPC_URL: &str = "https://testnet-rpc.monad.xyz";
 
@@ -30,8 +32,8 @@ pub fn validate_hello(
     if rpc_url != TESTNET_RPC_URL && !rpc_url.starts_with("http://127.0.0.1/") {
         return Err("only the approved Monad testnet RPC (or loopback tests) is permitted".into());
     }
-    if !account_ids.is_empty() {
-        return Err("phase 1 does not accept account identifiers".into());
+    if account_ids.len() != 1 || account_ids[0] == 0 {
+        return Err("exactly one nonzero testnet account id is required".into());
     }
     if markets.is_empty()
         || markets.iter().any(|market| {
@@ -49,9 +51,14 @@ pub fn validate_hello(
 pub fn snapshot(
     exchange: &state::Exchange,
     markets: &[Market],
+    account_id: u32,
     event_count: u32,
 ) -> Result<Snapshot, String> {
     let instant = exchange.instant();
+    let account = exchange
+        .accounts()
+        .get(&account_id)
+        .ok_or_else(|| format!("account {account_id} is absent"))?;
     let positions = markets
         .iter()
         .map(|market| {
@@ -59,12 +66,29 @@ pub fn snapshot(
                 .perpetuals()
                 .get(&market.perpetual_id)
                 .ok_or_else(|| format!("perpetual {} is absent", market.perpetual_id))?;
+            let position = account.positions().get(&market.perpetual_id);
+            let base_size = match position {
+                Some(position) if position.r#type().is_short() => format!("-{}", position.size()),
+                Some(position) => position.size().to_string(),
+                None => "0".into(),
+            };
+            let unrealized_pnl = position
+                .map(|value| value.pnl().to_string())
+                .unwrap_or_else(|| "0".into());
+            let open_order_count = perp
+                .l3_book()
+                .all_orders()
+                .values()
+                .filter(|order| order.account_id() == account_id && !order.is_expired())
+                .count()
+                .try_into()
+                .map_err(|_| "account order count overflow")?;
             Ok(Position {
                 symbol: market.symbol.clone(),
-                base_size: "0".into(),
+                base_size,
                 mark_price: perp.mark_price().to_string(),
-                unrealized_pnl: "0".into(),
-                open_order_count: 0,
+                unrealized_pnl,
+                open_order_count,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -108,12 +132,52 @@ pub fn snapshot(
                 .map_err(|_| "book order count overflow")?,
         });
     }
+    let mut orders = Vec::new();
+    for market in markets {
+        let perp = exchange
+            .perpetuals()
+            .get(&market.perpetual_id)
+            .ok_or_else(|| format!("perpetual {} is absent", market.perpetual_id))?;
+        for order in perp
+            .l3_book()
+            .all_orders()
+            .values()
+            .filter(|order| order.account_id() == account_id && !order.is_expired())
+        {
+            orders.push(Order {
+                exchange_order_id: order.order_id().to_string(),
+                client_order_id: order.client_order_id().map(|value| value.to_string()),
+                symbol: market.symbol.clone(),
+                side: match order.r#type().side() {
+                    OrderSide::Bid => "buy",
+                    OrderSide::Ask => "sell",
+                }
+                .into(),
+                price: order.price().to_string(),
+                size: order
+                    .placed_size()
+                    .unwrap_or_else(|| order.size())
+                    .to_string(),
+                filled_size: order
+                    .filled_size()
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "0".into()),
+                reduce_only: matches!(order.r#type(), OrderType::CloseLong | OrderType::CloseShort),
+            });
+        }
+    }
+    orders.sort_by(|left, right| {
+        left.symbol
+            .cmp(&right.symbol)
+            .then_with(|| left.exchange_order_id.cmp(&right.exchange_order_id))
+    });
     Ok(Snapshot {
+        account_id,
         block_number: instant.block_number().to_string(),
         block_timestamp: instant.block_timestamp(),
         received_at,
         positions,
-        orders: vec![],
+        orders,
         markets: market_states,
         books,
         event_count,

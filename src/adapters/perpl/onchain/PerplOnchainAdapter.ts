@@ -20,9 +20,10 @@ export class PerplOnchainAdapter implements ExchangeAdapter {
   private nextId = 1;
 
   constructor(private readonly bridge: PerplBridgeTransport, private readonly config: PerplOnchainAdapterConfig, private readonly now = Date.now) {
+    const [accountId] = config.accountIds ?? [];
     if (config.rpcUrl !== PERPL_TESTNET_RPC && !config.rpcUrl.startsWith("http://127.0.0.1/")) throw new ExchangeAdapterError("Perpl adapter accepts only the approved testnet RPC");
     if (!config.markets.length || config.markets.some((market) => !((market.symbol === "BTCUSD" && market.perpetualId === 16) || (market.symbol === "ETHUSD" && market.perpetualId === 32)))) throw new ExchangeAdapterError("Perpl adapter requires proven BTC/ETH mappings");
-    if (config.accountIds?.length) throw new ExchangeAdapterError("Phase-1 Perpl bridge does not accept account identifiers");
+    if (config.accountIds?.length !== 1 || accountId === undefined || !Number.isSafeInteger(accountId) || accountId <= 0) throw new ExchangeAdapterError("Perpl adapter requires exactly one positive account id");
     bridge.onEvent?.((message) => { if (message.event === "state") this.acceptSnapshot(message.snapshot); });
   }
 
@@ -52,7 +53,7 @@ export class PerplOnchainAdapter implements ExchangeAdapter {
     return response;
   }
 
-  private acceptSnapshot(snapshot: BridgeSnapshot): void { this.block = validateSnapshot(snapshot, this.block); this.snapshot = snapshot; }
+  private acceptSnapshot(snapshot: BridgeSnapshot): void { if (snapshot.accountId !== this.config.accountIds![0]) throw new ExchangeAdapterError("Perpl bridge snapshot account does not match configuration"); this.block = validateSnapshot(snapshot, this.block); this.snapshot = snapshot; }
   private requireSnapshot(): BridgeSnapshot { if (!this.connected && !this.snapshot) throw new ExchangeAdapterError("Perpl on-chain adapter is disconnected"); const snapshot = this.snapshot!; validateSnapshot(snapshot, this.block); if (this.now() - snapshot.receivedAt > (this.config.staleAfterMs ?? 10_000)) throw new ExchangeAdapterError("Perpl on-chain snapshot is stale"); return snapshot; }
   private id(): string { return `riim-${this.nextId++}`; }
 }

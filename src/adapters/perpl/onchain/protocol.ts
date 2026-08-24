@@ -50,6 +50,7 @@ export interface BridgeOrder {
   price: string;
   size: string;
   filledSize: string;
+  reduceOnly: boolean;
 }
 
 export interface BridgePosition {
@@ -61,6 +62,7 @@ export interface BridgePosition {
 }
 
 export interface BridgeSnapshot {
+  accountId: number;
   blockNumber: string;
   blockTimestamp: number;
   receivedAt: number;

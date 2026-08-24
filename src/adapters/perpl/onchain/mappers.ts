@@ -13,7 +13,7 @@ export function mapBridgeOrder(order: BridgeOrder): NormalizedOrder {
   const size = decimal(order.size, "order size");
   const filledSize = decimal(order.filledSize, "filled size");
   if (size <= 0 || filledSize < 0 || filledSize > size) throw new ExchangeAdapterError("Perpl bridge order sizes are inconsistent");
-  return { exchangeOrderId: order.exchangeOrderId, clientOrderId: order.clientOrderId, market: order.symbol, side: order.side, price: decimal(order.price, "order price"), size, filledSize, remainingSize: size - filledSize, isReduceOnly: false, state: filledSize > 0 ? "partiallyFilled" : "open" };
+  return { exchangeOrderId: order.exchangeOrderId, clientOrderId: order.clientOrderId, market: order.symbol, side: order.side, price: decimal(order.price, "order price"), size, filledSize, remainingSize: size - filledSize, isReduceOnly: order.reduceOnly, state: filledSize > 0 ? "partiallyFilled" : "open" };
 }
 
 export function mapBridgePosition(position: BridgePosition): NormalizedPosition {
@@ -22,6 +22,7 @@ export function mapBridgePosition(position: BridgePosition): NormalizedPosition 
 }
 
 export function validateSnapshot(snapshot: BridgeSnapshot, previousBlock?: bigint): bigint {
+  if (!Number.isSafeInteger(snapshot.accountId) || snapshot.accountId <= 0) throw new ExchangeAdapterError("Perpl bridge account identity is invalid");
   if (!/^\d+$/.test(snapshot.blockNumber)) throw new ExchangeAdapterError("Perpl bridge block number is invalid");
   const block = BigInt(snapshot.blockNumber);
   if (block <= 0n || previousBlock !== undefined && block < previousBlock) throw new ExchangeAdapterError("Perpl bridge block regressed");

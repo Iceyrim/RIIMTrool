@@ -79,12 +79,27 @@ pub struct Position {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Order {
+    pub exchange_order_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_order_id: Option<String>,
+    pub symbol: String,
+    pub side: String,
+    pub price: String,
+    pub size: String,
+    pub filled_size: String,
+    pub reduce_only: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Snapshot {
+    pub account_id: u32,
     pub block_number: String,
     pub block_timestamp: u64,
     pub received_at: u64,
     pub positions: Vec<Position>,
-    pub orders: Vec<serde_json::Value>,
+    pub orders: Vec<Order>,
     pub markets: Vec<MarketState>,
     pub books: Vec<Book>,
     pub event_count: u32,
