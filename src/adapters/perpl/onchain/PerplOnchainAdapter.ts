@@ -2,7 +2,7 @@ import { ExchangeAdapterError } from "../../AdapterError.js";
 import type { AccountVolume, CancelOrderResult, ExchangeAdapter, MarketPrice, NormalizedBalance, NormalizedFill, NormalizedMarginStatus, NormalizedOrder, NormalizedPosition, PlaceOrderParams, PlaceOrderResult } from "../../ExchangeAdapter.js";
 import { mapBridgeOrder, mapBridgePosition, validateSnapshot } from "./mappers.js";
 import type { PerplBridgeTransport } from "./PerplRustClient.js";
-import { PERPL_BRIDGE_PROTOCOL_VERSION, PERPL_TESTNET_RPC, type BridgeSnapshot } from "./protocol.js";
+import { PERPL_BRIDGE_PROTOCOL_VERSION, PERPL_MAINNET_ACCOUNT_ID, PERPL_MAINNET_RPC, type BridgeSnapshot } from "./protocol.js";
 
 export interface PerplOnchainAdapterConfig {
   rpcUrl: string;
@@ -11,9 +11,9 @@ export interface PerplOnchainAdapterConfig {
   staleAfterMs?: number;
 }
 
-/** Phase 1 adapter: public testnet state plus calldata preview; mutations are impossible. */
+/** Public mainnet account state only; signing and mutations are impossible. */
 export class PerplOnchainAdapter implements ExchangeAdapter {
-  readonly exchangeId = "perpl-onchain-testnet-readonly";
+  readonly exchangeId = "perpl-onchain-mainnet-readonly";
   private snapshot?: BridgeSnapshot;
   private block?: bigint;
   private connected = false;
@@ -21,14 +21,14 @@ export class PerplOnchainAdapter implements ExchangeAdapter {
 
   constructor(private readonly bridge: PerplBridgeTransport, private readonly config: PerplOnchainAdapterConfig, private readonly now = Date.now) {
     const [accountId] = config.accountIds ?? [];
-    if (config.rpcUrl !== PERPL_TESTNET_RPC && !config.rpcUrl.startsWith("http://127.0.0.1/")) throw new ExchangeAdapterError("Perpl adapter accepts only the approved testnet RPC");
-    if (!config.markets.length || config.markets.some((market) => !((market.symbol === "BTCUSD" && market.perpetualId === 16) || (market.symbol === "ETHUSD" && market.perpetualId === 32)))) throw new ExchangeAdapterError("Perpl adapter requires proven BTC/ETH mappings");
-    if (config.accountIds?.length !== 1 || accountId === undefined || !Number.isSafeInteger(accountId) || accountId <= 0) throw new ExchangeAdapterError("Perpl adapter requires exactly one positive account id");
+    if (config.rpcUrl !== PERPL_MAINNET_RPC && !config.rpcUrl.startsWith("http://127.0.0.1/")) throw new ExchangeAdapterError("Perpl adapter accepts only the approved mainnet RPC");
+    if (!config.markets.length || config.markets.some((market) => !((market.symbol === "BTCUSD" && market.perpetualId === 1) || (market.symbol === "ETHUSD" && market.perpetualId === 2)))) throw new ExchangeAdapterError("Perpl adapter requires proven mainnet BTC/ETH mappings");
+    if (config.accountIds?.length !== 1 || accountId !== PERPL_MAINNET_ACCOUNT_ID) throw new ExchangeAdapterError("Perpl adapter requires the pinned mainnet account id");
     bridge.onEvent?.((message) => { if (message.event === "state") this.acceptSnapshot(message.snapshot); });
   }
 
   async connect(): Promise<void> {
-    const response = await this.bridge.request({ version: PERPL_BRIDGE_PROTOCOL_VERSION, id: this.id(), command: "hello", network: "testnet", rpcUrl: this.config.rpcUrl, markets: this.config.markets, accountIds: this.config.accountIds ?? [] });
+    const response = await this.bridge.request({ version: PERPL_BRIDGE_PROTOCOL_VERSION, id: this.id(), command: "hello", network: "mainnet", rpcUrl: this.config.rpcUrl, markets: this.config.markets, accountIds: this.config.accountIds ?? [] });
     if (response.event !== "ready") throw new ExchangeAdapterError("Perpl bridge did not return a ready snapshot");
     this.acceptSnapshot(response.snapshot); this.connected = true;
   }
@@ -44,13 +44,8 @@ export class PerplOnchainAdapter implements ExchangeAdapter {
   async getMarketPrice(market: string): Promise<MarketPrice> { const position = this.getPositions(market)[0]; if (!position) throw new ExchangeAdapterError(`Perpl snapshot has no mark for ${market}`); return { market, mark: position.markPrice }; }
   async getAccountVolume(_params: { market?: string; since: string; until: string }): Promise<AccountVolume[]> { throw new ExchangeAdapterError("Phase-1 Perpl bridge does not expose authoritative account volume"); }
 
-  async prepareExecOrders(orders: import("./protocol.js").BridgePrepareOrder[]): Promise<{ blockNumber: string; calldata: string; calldataHash: string }> {
-    this.requireSnapshot();
-    const response = await this.bridge.request({ version: 1, id: this.id(), command: "prepare_exec_orders", revertOnFail: true, orders });
-    if (response.event !== "prepared") throw new ExchangeAdapterError("Perpl bridge did not return prepared calldata");
-    if (BigInt(response.blockNumber) !== this.block) throw new ExchangeAdapterError("Perpl calldata was prepared against a different snapshot block");
-    if (!/^0x[0-9a-f]+$/i.test(response.calldata) || !/^0x[0-9a-f]{64}$/i.test(response.calldataHash)) throw new ExchangeAdapterError("Perpl bridge returned malformed calldata");
-    return response;
+  async prepareExecOrders(_orders: import("./protocol.js").BridgePrepareOrder[]): Promise<{ blockNumber: string; calldata: string; calldataHash: string }> {
+    throw new ExchangeAdapterError("Mainnet read-only adapter cannot prepare transaction calldata");
   }
 
   private acceptSnapshot(snapshot: BridgeSnapshot): void { if (snapshot.accountId !== this.config.accountIds![0]) throw new ExchangeAdapterError("Perpl bridge snapshot account does not match configuration"); this.block = validateSnapshot(snapshot, this.block); this.snapshot = snapshot; }

@@ -18,7 +18,7 @@ use tokio::{
     sync::{Mutex, RwLock},
 };
 
-use protocol::{Request, Response, TESTNET_CHAIN_ID, TESTNET_EXCHANGE, VERSION};
+use protocol::{MAINNET_CHAIN_ID, MAINNET_EXCHANGE, Request, Response, VERSION};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -62,19 +62,7 @@ async fn main() {
         markets,
         account_ids,
         ..
-    } = request
-    else {
-        let _ = emit(
-            &output,
-            &Response::Fatal {
-                version: VERSION,
-                id: request.id().into(),
-                error: "hello must be first".into(),
-            },
-        )
-        .await;
-        return;
-    };
+    } = request;
     if let Err(error) = perpl::validate_hello(&network, &rpc_url, &markets, &account_ids) {
         let _ = emit(
             &output,
@@ -110,16 +98,16 @@ async fn main() {
     };
     client.set_poll_interval(Duration::from_millis(500));
     let provider = ProviderBuilder::new().connect_client(client);
-    let chain = Chain::testnet();
-    if chain.chain_id() != TESTNET_CHAIN_ID
-        || format!("{:#x}", chain.exchange()).to_lowercase() != TESTNET_EXCHANGE
+    let chain = Chain::mainnet();
+    if chain.chain_id() != MAINNET_CHAIN_ID
+        || format!("{:#x}", chain.exchange()).to_lowercase() != MAINNET_EXCHANGE
     {
         let _ = emit(
             &output,
             &Response::Fatal {
                 version: VERSION,
                 id,
-                error: "pinned SDK testnet deployment mismatch".into(),
+                error: "pinned SDK mainnet deployment mismatch".into(),
             },
         )
         .await;
@@ -140,13 +128,13 @@ async fn main() {
             return;
         }
     };
-    if actual_chain_id != TESTNET_CHAIN_ID {
+    if actual_chain_id != MAINNET_CHAIN_ID {
         let _ = emit(
             &output,
             &Response::Fatal {
                 version: VERSION,
                 id,
-                error: format!("RPC chain id {actual_chain_id} is not testnet"),
+                error: format!("RPC chain id {actual_chain_id} is not mainnet"),
             },
         )
         .await;
@@ -209,8 +197,8 @@ async fn main() {
         &Response::Ready {
             version: VERSION,
             id,
-            chain_id: TESTNET_CHAIN_ID,
-            exchange: TESTNET_EXCHANGE,
+            chain_id: MAINNET_CHAIN_ID,
+            exchange: MAINNET_EXCHANGE,
             snapshot: initial,
         },
     )
@@ -270,8 +258,8 @@ async fn main() {
                         &Response::State {
                             version: VERSION,
                             id: "stream".into(),
-                            chain_id: TESTNET_CHAIN_ID,
-                            exchange: TESTNET_EXCHANGE,
+                            chain_id: MAINNET_CHAIN_ID,
+                            exchange: MAINNET_EXCHANGE,
                             snapshot,
                         },
                     )
@@ -312,68 +300,16 @@ async fn main() {
                 return;
             }
         };
-        match request {
-            Request::Hello { id, .. } => {
-                let _ = emit(
-                    &output,
-                    &Response::Fatal {
-                        version: VERSION,
-                        id,
-                        error: "duplicate hello".into(),
-                    },
-                )
-                .await;
-                return;
-            }
-            Request::PrepareExecOrders {
+        let Request::Hello { id, .. } = request;
+        let _ = emit(
+            &output,
+            &Response::Fatal {
+                version: VERSION,
                 id,
-                revert_on_fail,
-                orders,
-                ..
-            } => {
-                if !revert_on_fail {
-                    let _ = emit(
-                        &output,
-                        &Response::Fatal {
-                            version: VERSION,
-                            id,
-                            error: "revertOnFail must be true".into(),
-                        },
-                    )
-                    .await;
-                    continue;
-                }
-                let exchange = shared.read().await;
-                let block_number = exchange.instant().block_number().to_string();
-                match perpl::prepare(&exchange, &markets, &orders) {
-                    Ok((calldata, calldata_hash)) => {
-                        let _ = emit(
-                            &output,
-                            &Response::Prepared {
-                                version: VERSION,
-                                id,
-                                chain_id: TESTNET_CHAIN_ID,
-                                exchange: TESTNET_EXCHANGE,
-                                block_number,
-                                calldata,
-                                calldata_hash,
-                            },
-                        )
-                        .await;
-                    }
-                    Err(error) => {
-                        let _ = emit(
-                            &output,
-                            &Response::Fatal {
-                                version: VERSION,
-                                id,
-                                error,
-                            },
-                        )
-                        .await;
-                    }
-                }
-            }
-        }
+                error: "duplicate hello".into(),
+            },
+        )
+        .await;
+        return;
     }
 }

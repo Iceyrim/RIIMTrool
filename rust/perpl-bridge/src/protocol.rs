@@ -19,24 +19,17 @@ pub enum Request {
         #[serde(rename = "accountIds")]
         account_ids: Vec<u32>,
     },
-    PrepareExecOrders {
-        version: u8,
-        id: String,
-        #[serde(rename = "revertOnFail")]
-        revert_on_fail: bool,
-        orders: Vec<PrepareOrder>,
-    },
 }
 
 impl Request {
     pub fn id(&self) -> &str {
         match self {
-            Self::Hello { id, .. } | Self::PrepareExecOrders { id, .. } => id,
+            Self::Hello { id, .. } => id,
         }
     }
     pub fn version(&self) -> u8 {
         match self {
-            Self::Hello { version, .. } | Self::PrepareExecOrders { version, .. } => *version,
+            Self::Hello { version, .. } => *version,
         }
     }
 }
@@ -153,18 +146,6 @@ pub enum Response {
         chain_id: u64,
         exchange: &'static str,
         snapshot: Snapshot,
-    },
-    Prepared {
-        version: u8,
-        id: String,
-        #[serde(rename = "chainId")]
-        chain_id: u64,
-        exchange: &'static str,
-        #[serde(rename = "blockNumber")]
-        block_number: String,
-        calldata: String,
-        #[serde(rename = "calldataHash")]
-        calldata_hash: String,
     },
     Fatal {
         version: u8,

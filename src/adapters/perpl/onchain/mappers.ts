@@ -30,7 +30,7 @@ export function validateSnapshot(snapshot: BridgeSnapshot, previousBlock?: bigin
   snapshot.positions.map(mapBridgePosition); snapshot.orders.map(mapBridgeOrder);
   if (!Number.isSafeInteger(snapshot.eventCount) || snapshot.eventCount < 0 || snapshot.quiet !== (snapshot.eventCount === 0)) throw new ExchangeAdapterError("Perpl bridge event evidence is invalid");
   if (snapshot.markets.length !== snapshot.positions.length || snapshot.books.length !== snapshot.positions.length) throw new ExchangeAdapterError("Perpl bridge market evidence is incomplete");
-  snapshot.markets.forEach((market) => { if (!((market.symbol === "BTCUSD" && market.perpetualId === 16) || (market.symbol === "ETHUSD" && market.perpetualId === 32))) throw new ExchangeAdapterError("Perpl bridge market identity is invalid"); });
-  snapshot.books.forEach((book) => { if (!((book.symbol === "BTCUSD" && book.perpetualId === 16) || (book.symbol === "ETHUSD" && book.perpetualId === 32)) || !Number.isSafeInteger(book.totalOrders) || book.totalOrders < 0) throw new ExchangeAdapterError("Perpl bridge book evidence is invalid"); });
+  snapshot.markets.forEach((market) => { if (!((market.symbol === "BTCUSD" && market.perpetualId === 1) || (market.symbol === "ETHUSD" && market.perpetualId === 2))) throw new ExchangeAdapterError("Perpl bridge market identity is invalid"); });
+  snapshot.books.forEach((book) => { if (!((book.symbol === "BTCUSD" && book.perpetualId === 1) || (book.symbol === "ETHUSD" && book.perpetualId === 2)) || !Number.isSafeInteger(book.totalOrders) || book.totalOrders < 0) throw new ExchangeAdapterError("Perpl bridge book evidence is invalid"); });
   return block;
 }

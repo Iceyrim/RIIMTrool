@@ -16,7 +16,8 @@ use crate::protocol::{
     Book, BookLevel, Market, MarketState, Order, Position, PrepareOrder, Snapshot,
 };
 
-pub const TESTNET_RPC_URL: &str = "https://testnet-rpc.monad.xyz";
+pub const MAINNET_RPC_URL: &str = "https://rpc.monad.xyz";
+pub const MAINNET_ACCOUNT_ID: u32 = 5071;
 
 pub type SharedExchange = Arc<RwLock<state::Exchange>>;
 
@@ -26,24 +27,24 @@ pub fn validate_hello(
     markets: &[Market],
     account_ids: &[u32],
 ) -> Result<(), String> {
-    if network != "testnet" {
-        return Err("only testnet is permitted".into());
+    if network != "mainnet" {
+        return Err("only the pinned mainnet read-only network is permitted".into());
     }
-    if rpc_url != TESTNET_RPC_URL && !rpc_url.starts_with("http://127.0.0.1/") {
-        return Err("only the approved Monad testnet RPC (or loopback tests) is permitted".into());
+    if rpc_url != MAINNET_RPC_URL && !rpc_url.starts_with("http://127.0.0.1/") {
+        return Err("only the approved Monad mainnet RPC (or loopback tests) is permitted".into());
     }
-    if account_ids.len() != 1 || account_ids[0] == 0 {
-        return Err("exactly one nonzero testnet account id is required".into());
+    if account_ids != [MAINNET_ACCOUNT_ID] {
+        return Err("only the pinned mainnet account id is permitted".into());
     }
     if markets.is_empty()
         || markets.iter().any(|market| {
             !matches!(
                 (market.symbol.as_str(), market.perpetual_id),
-                ("BTCUSD", 16) | ("ETHUSD", 32)
+                ("BTCUSD", 1) | ("ETHUSD", 2)
             )
         })
     {
-        return Err("unlisted testnet perpetual".into());
+        return Err("unlisted mainnet perpetual".into());
     }
     Ok(())
 }
