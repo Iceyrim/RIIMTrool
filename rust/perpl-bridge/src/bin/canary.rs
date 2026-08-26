@@ -15,7 +15,6 @@ use alloy::{
     primitives::Address,
     providers::ProviderBuilder,
     rpc::client::RpcClient,
-    signers::local::PrivateKeySigner,
     transports::layers::{RetryBackoffLayer, ThrottleLayer},
 };
 use fastnum::UD64;
@@ -24,32 +23,8 @@ use perpl_sdk::{
     state::SnapshotBuilder,
     types::{OrderRequest, RequestType},
 };
-use riim_perpl_bridge::{protocol, tx};
+use riim_perpl_bridge::{canary_support::FileSignerFactory, protocol, tx};
 use std::path::PathBuf;
-
-/// Reads and parses a signer's private key from a local file. Never invoked
-/// until after `WalletWorker::initialize` has confirmed the testnet
-/// attestation and the explicit submission gate.
-struct FileSignerFactory {
-    key_file: PathBuf,
-}
-
-impl tx::SignerFactory for FileSignerFactory {
-    type Signer = PrivateKeySigner;
-
-    fn initialize(self) -> Result<Self::Signer, String> {
-        let contents = std::fs::read_to_string(&self.key_file).map_err(|_| {
-            format!(
-                "unable to read --signer-key-file: {}",
-                self.key_file.display()
-            )
-        })?;
-        contents
-            .trim()
-            .parse::<PrivateKeySigner>()
-            .map_err(|_| "signer key file does not contain a valid private key".to_string())
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Side {

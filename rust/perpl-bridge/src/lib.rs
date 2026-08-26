@@ -1,3 +1,4 @@
+pub mod canary_support;
 pub mod execution;
 pub mod execution_backend;
 pub mod execution_port;
