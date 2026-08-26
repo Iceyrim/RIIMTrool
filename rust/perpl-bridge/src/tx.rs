@@ -295,7 +295,10 @@ fn mainnet_submission_nonces(
     Ok((order, cancel))
 }
 
-fn validate_pending_nonce(operator_nonce: u64, pending_nonce: u64) -> Result<u64, String> {
+pub(crate) fn validate_pending_nonce(
+    operator_nonce: u64,
+    pending_nonce: u64,
+) -> Result<u64, String> {
     if operator_nonce != pending_nonce {
         return Err(format!(
             "--chain-nonce ({operator_nonce}) does not match pending account nonce ({pending_nonce})"
@@ -422,7 +425,7 @@ pub struct CanaryResult {
     pub cancel_tx: TxHash,
 }
 
-fn validate_cancel_receipt(
+pub(crate) fn validate_cancel_receipt(
     receipt: &TransactionReceipt,
     exchange_address: Address,
     expected_account_id: U256,
