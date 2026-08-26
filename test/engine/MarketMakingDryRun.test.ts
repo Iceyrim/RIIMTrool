@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MarketMakingDryRun } from "../../src/engine/MarketMakingDryRun.js";
+import type { PerplEquityStatus } from "../../src/engine/PerplSessionEquityGuard.js";
 import type { EngineMarketConfig } from "../../src/engine/types.js";
 import { FakeExchangeAdapter } from "./fakeAdapter.js";
 
@@ -28,11 +29,26 @@ function config(): EngineMarketConfig {
   };
 }
 
-function planner(adapter: FakeExchangeAdapter): MarketMakingDryRun {
+const healthyEquityStatus: PerplEquityStatus = {
+  state: "active",
+  healthy: true,
+  baselineEquity: 18,
+  currentEquity: 18,
+  sessionChange: 0,
+  blockNumber: "100",
+};
+
+function planner(
+  adapter: FakeExchangeAdapter,
+  equityStatus: PerplEquityStatus | null = healthyEquityStatus,
+): MarketMakingDryRun {
   const directory = mkdtempSync(join(tmpdir(), "riimtrool-perpl-dry-run-"));
   return new MarketMakingDryRun(adapter, config(), {
     stateFilePath: join(directory, "orders.json"),
     tradeLogFilePath: join(directory, "trades.jsonl"),
+    ...(equityStatus
+      ? { sessionEquityGuard: { status: () => ({ ...equityStatus }) } }
+      : {}),
   });
 }
 
@@ -83,11 +99,38 @@ describe("MarketMakingDryRun", () => {
     expect(plan.executionReady).toBe(false);
     expect(plan.balances).toEqual([]);
     expect(plan.proposedCancellations).toEqual([]);
+    expect(plan.sessionEquityGuard).toEqual(healthyEquityStatus);
     expect(plan.readinessBlockers).toContain(
       "authoritative account-wide mainnet margin status is unavailable; position liquidation boundaries are enforced",
     );
     expect(adapter.placeOrderCalls).toHaveLength(0);
     expect(adapter.cancelOrderCalls).toHaveLength(0);
+  });
+
+  it("fails closed when the session equity guard is unavailable", async () => {
+    const adapter = new FakeExchangeAdapter();
+    seedMarket(adapter);
+    const dryRun = planner(adapter, null);
+    await dryRun.start();
+    const plan = await dryRun.planCycle();
+    expect(plan.proposals).toEqual([]);
+    expect(plan.sessionEquityGuard).toBeUndefined();
+    expect(plan.readinessBlockers).toContain("Perpl session equity guard is unavailable");
+  });
+
+  it("fails closed and exposes a halted session equity guard", async () => {
+    const adapter = new FakeExchangeAdapter();
+    seedMarket(adapter);
+    const dryRun = planner(adapter, {
+      state: "halted",
+      healthy: false,
+      haltReason: "Perpl session equity loss limit reached",
+    });
+    await dryRun.start();
+    const plan = await dryRun.planCycle();
+    expect(plan.proposals).toEqual([]);
+    expect(plan.sessionEquityGuard).toMatchObject({ state: "halted", healthy: false });
+    expect(plan.readinessBlockers).toContain("Perpl session equity loss limit reached");
   });
 
   it("blocks every proposal when the account is frozen", async () => {

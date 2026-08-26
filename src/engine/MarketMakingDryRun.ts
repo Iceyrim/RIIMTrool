@@ -9,6 +9,7 @@ import { generateQuoteLadder, pickOrderSize, type QuoteLevel } from "./QuoteLadd
 import { Reconciliation, type ReconciliationResult } from "./Reconciliation.js";
 import { RiskManager } from "./RiskManager.js";
 import { TradeLog } from "./TradeLog.js";
+import type { PerplEquityStatus } from "./PerplSessionEquityGuard.js";
 import type { EngineMarketConfig } from "./types.js";
 
 export interface DryRunProposal extends QuoteLevel {
@@ -37,6 +38,7 @@ export interface DryRunPlan {
   balances: NormalizedBalance[];
   accountEvidence?: Record<string, string | boolean>;
   positionSafetyEvidence?: DryRunPositionSafetyEvidence;
+  sessionEquityGuard?: PerplEquityStatus;
   fillCoverageStartBlock?: string;
   proposedCancellations: string[];
   proposals: DryRunProposal[];
@@ -47,6 +49,7 @@ export interface DryRunPlan {
 export interface MarketMakingDryRunOptions {
   stateFilePath: string;
   tradeLogFilePath: string;
+  sessionEquityGuard?: { status(): PerplEquityStatus };
 }
 
 /**
@@ -63,7 +66,7 @@ export class MarketMakingDryRun {
   constructor(
     private readonly adapter: ExchangeAdapter,
     private readonly config: EngineMarketConfig,
-    options: MarketMakingDryRunOptions,
+    private readonly options: MarketMakingDryRunOptions,
   ) {
     this.registry = new OrderRegistry(config.symbol, options.stateFilePath);
     this.reconciliation = new Reconciliation(
@@ -116,6 +119,12 @@ export class MarketMakingDryRun {
       : atLiquidationBoundary
         ? `Perpl ${this.config.symbol} position is at or beyond its liquidation boundary`
         : undefined;
+    const sessionEquityGuard = this.options.sessionEquityGuard?.status();
+    const equityBlocker = !sessionEquityGuard
+      ? "Perpl session equity guard is unavailable"
+      : sessionEquityGuard.state !== "active" || !sessionEquityGuard.healthy
+        ? sessionEquityGuard.haltReason ?? "Perpl session equity guard is not active"
+        : undefined;
     const fillCoverageStartBlock = evidenceAdapter.getFillCoverageStartBlock?.();
     const proposedCancellations =
       Math.abs(position?.baseSize ?? 0) > this.config.inventoryReductionThresholdBase
@@ -129,9 +138,10 @@ export class MarketMakingDryRun {
             )
             .map((order) => order.exchangeOrderId as string)
         : [];
-    const proposals = reconciliation.healthy && !safetyBlocker
-      ? this.buildProposals(position?.baseSize ?? 0, markPrice, observedOpenOrders, reconciliation)
-      : [];
+    const proposals =
+      reconciliation.healthy && !safetyBlocker && !equityBlocker
+        ? this.buildProposals(position?.baseSize ?? 0, markPrice, observedOpenOrders, reconciliation)
+        : [];
     return {
       market: this.config.symbol,
       generatedAt: Date.now(),
@@ -142,14 +152,16 @@ export class MarketMakingDryRun {
       balances: this.adapter.getBalances(),
       accountEvidence,
       positionSafetyEvidence: positionSafety,
+      sessionEquityGuard,
       fillCoverageStartBlock,
       proposedCancellations,
       proposals,
       executionReady: false,
       readinessBlockers: [
         ...(safetyBlocker ? [safetyBlocker] : []),
+        ...(equityBlocker ? [equityBlocker] : []),
         "authoritative account-wide mainnet margin status is unavailable; position liquidation boundaries are enforced",
-        "authoritative session realized PnL is unavailable",
+        "authoritative session realized PnL is unavailable; conservative session equity loss guard is enforced",
         `fill evidence is limited to maker fills observed since bridge startup${fillCoverageStartBlock ? ` at block ${fillCoverageStartBlock}` : ""}`,
         "execution remains disabled pending a separately approved canary-gated integration",
       ],
