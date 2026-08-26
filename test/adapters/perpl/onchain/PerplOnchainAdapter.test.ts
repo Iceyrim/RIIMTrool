@@ -126,6 +126,15 @@ describe("PerplOnchainAdapter", () => {
       maintenanceRequirement: "0.5",
       frozen: false,
     });
+    expect(adapter.getSessionEquityEvidence()).toEqual({
+      balance: "18.341694",
+      lockedBalance: "0",
+      positionDeposit: "1",
+      unrealizedPnl: "2",
+      frozen: false,
+      blockNumber: "12",
+      observedAt: 1000,
+    });
     expect(adapter.getFillCoverageStartBlock()).toBe("10");
     await expect(adapter.getOrderFills("9", "BTCUSD")).resolves.toMatchObject([
       { tradeId: "0xabc:1", size: 0.002 },

@@ -14,6 +14,7 @@ import type {
 } from "../../ExchangeAdapter.js";
 import { mapBridgeFill, mapBridgeOrder, mapBridgePosition, validateSnapshot } from "./mappers.js";
 import type { PerplBridgeTransport } from "./PerplRustClient.js";
+import type { PerplEquityEvidence } from "../../../engine/PerplSessionEquityGuard.js";
 import {
   PERPL_BRIDGE_PROTOCOL_VERSION,
   PERPL_MAINNET_ACCOUNT_ID,
@@ -112,12 +113,24 @@ export class PerplOnchainAdapter implements ExchangeAdapter {
   getAccountEvidence(): BridgeAccountEvidence {
     return this.requireSnapshot().account;
   }
+  getSessionEquityEvidence(): PerplEquityEvidence {
+    const snapshot = this.requireSnapshot();
+    return {
+      balance: snapshot.account.balance,
+      lockedBalance: snapshot.account.lockedBalance,
+      positionDeposit: snapshot.account.positionDeposit,
+      unrealizedPnl: snapshot.account.unrealizedPnl,
+      frozen: snapshot.account.frozen,
+      blockNumber: snapshot.blockNumber,
+      observedAt: snapshot.receivedAt,
+    };
+  }
   getFillCoverageStartBlock(): string {
     return this.requireSnapshot().fillCoverageStartBlock;
   }
   getPositionSafetyEvidence(market?: string): PerplPositionSafetyEvidence[] {
-    return this.requireSnapshot().positions
-      .filter((position) => !market || position.symbol === market)
+    return this.requireSnapshot()
+      .positions.filter((position) => !market || position.symbol === market)
       .map((position) => ({
         market: position.symbol,
         baseSize: Number(position.baseSize),
