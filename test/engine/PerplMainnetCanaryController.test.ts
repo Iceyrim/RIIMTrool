@@ -40,6 +40,14 @@ function plan(now = 1_000): DryRunPlan {
     observedOpenOrders: [],
     balances: [{ token: "AUSD", amount: 18 }],
     accountEvidence: { frozen: false },
+    sessionEquityGuard: {
+      state: "active",
+      healthy: true,
+      baselineEquity: 18,
+      currentEquity: 18,
+      sessionChange: 0,
+      blockNumber: "100",
+    },
     positionSafetyEvidence: {
       baseSize: 0,
       markPrice: 77_000,
@@ -96,13 +104,15 @@ describe("PerplMainnetCanaryController", () => {
     ["stale plan", { generatedAt: -10_000 }],
     ["unhealthy reconciliation", { reconciliation: { ...plan().reconciliation, healthy: false } }],
     ["frozen account", { accountEvidence: { frozen: true } }],
+    ["halted equity guard", { sessionEquityGuard: { state: "halted", healthy: false } }],
     ["existing order", { observedOpenOrders: [{}] }],
     ["over-notional proposal", { proposals: [{ ...plan().proposals[0]!, size: 0.001 }] }],
     ["non-post-only proposal", { proposals: [{ ...plan().proposals[0]!, type: "limit" }] }],
   ])("rejects %s before calling the executor", async (_name, override) => {
     const { controller, executor } = setup();
-    await expect(controller.placeOne({ ...plan(), ...override } as DryRunPlan, 0, "place-1"))
-      .rejects.toThrow();
+    await expect(
+      controller.placeOne({ ...plan(), ...override } as DryRunPlan, 0, "place-1"),
+    ).rejects.toThrow();
     expect(executor.placements).toEqual([]);
   });
 
@@ -110,7 +120,10 @@ describe("PerplMainnetCanaryController", () => {
     const { controller, executor } = setup();
     executor.placeResult = { state: "ambiguous", reason: "receipt timeout" };
     await controller.placeOne(plan(), 0, "place-1");
-    expect(controller.status()).toMatchObject({ state: "halted", reason: expect.stringContaining("timeout") });
+    expect(controller.status()).toMatchObject({
+      state: "halted",
+      reason: expect.stringContaining("timeout"),
+    });
     await expect(controller.placeOne(plan(), 0, "place-2")).rejects.toThrow(/not idle/);
     expect(executor.placements).toHaveLength(1);
   });
@@ -120,25 +133,34 @@ describe("PerplMainnetCanaryController", () => {
     await controller.placeOne(plan(), 0, "place-1");
     executor.cancelResult = { state: "confirmed", exchangeOrderId: "99" };
     await controller.cancelActive("cancel-1");
-    expect(controller.status()).toMatchObject({ state: "halted", reason: expect.stringContaining("identity") });
+    expect(controller.status()).toMatchObject({
+      state: "halted",
+      reason: expect.stringContaining("identity"),
+    });
   });
 
   it("halts on restart with any unresolved journal state", () => {
     const directory = mkdtempSync(join(tmpdir(), "perpl-canary-controller-restart-"));
     const journalPath = join(directory, "journal.json");
-    writeFileSync(journalPath, JSON.stringify({
-      version: 1,
-      state: "resting",
-      market: "BTCUSD",
-      clientActionId: "place-1",
-      exchangeOrderId: "47",
-      updatedAt: 900,
-    }));
+    writeFileSync(
+      journalPath,
+      JSON.stringify({
+        version: 1,
+        state: "resting",
+        market: "BTCUSD",
+        clientActionId: "place-1",
+        exchangeOrderId: "47",
+        updatedAt: 900,
+      }),
+    );
     const controller = new PerplMainnetCanaryController(new FakeExecutor(), {
       market: "BTCUSD",
       journalPath,
       now: () => 1_000,
     });
-    expect(controller.status()).toMatchObject({ state: "halted", reason: expect.stringContaining("manual review") });
+    expect(controller.status()).toMatchObject({
+      state: "halted",
+      reason: expect.stringContaining("manual review"),
+    });
   });
 });

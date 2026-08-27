@@ -144,13 +144,12 @@ export class PerplMainnetCanaryController {
           clientActionId,
         });
       } catch (error) {
-        this.persist(this.halted(`cancellation threw after intent was persisted: ${String(error)}`));
+        this.persist(
+          this.halted(`cancellation threw after intent was persisted: ${String(error)}`),
+        );
         return;
       }
-      if (
-        result.state !== "confirmed" ||
-        result.exchangeOrderId !== active.exchangeOrderId
-      ) {
+      if (result.state !== "confirmed" || result.exchangeOrderId !== active.exchangeOrderId) {
         const detail = result.state === "confirmed" ? "order identity mismatch" : result.reason;
         this.persist(this.halted(`cancellation ${result.state}: ${detail}`));
         return;
@@ -174,8 +173,10 @@ export class PerplMainnetCanaryController {
       throw new Error("canary requires zero existing or pending-cancellation orders");
     if (plan.accountEvidence?.frozen !== false)
       throw new Error("canary requires authoritative unfrozen account evidence");
-    if (!plan.positionSafetyEvidence)
-      throw new Error("canary requires position safety evidence");
+    if (plan.sessionEquityGuard?.state !== "active" || plan.sessionEquityGuard.healthy !== true) {
+      throw new Error("canary requires an active healthy session equity guard");
+    }
+    if (!plan.positionSafetyEvidence) throw new Error("canary requires position safety evidence");
     const safety = plan.positionSafetyEvidence;
     if (
       safety.baseSize !== 0 &&
@@ -213,8 +214,14 @@ export class PerplMainnetCanaryController {
 
   private loadJournal(): PerplCanaryJournal {
     try {
-      const parsed = JSON.parse(readFileSync(this.options.journalPath, "utf8")) as PerplCanaryJournal;
-      if (parsed.version !== 1 || typeof parsed.state !== "string" || !Number.isFinite(parsed.updatedAt))
+      const parsed = JSON.parse(
+        readFileSync(this.options.journalPath, "utf8"),
+      ) as PerplCanaryJournal;
+      if (
+        parsed.version !== 1 ||
+        typeof parsed.state !== "string" ||
+        !Number.isFinite(parsed.updatedAt)
+      )
         throw new Error("invalid journal shape");
       return parsed;
     } catch (error) {
