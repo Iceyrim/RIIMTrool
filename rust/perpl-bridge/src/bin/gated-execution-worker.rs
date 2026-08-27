@@ -1,4 +1,6 @@
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap, os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc, time::Duration,
+};
 
 use alloy::{
     network::EthereumWallet,
@@ -21,6 +23,7 @@ use riim_perpl_bridge::{
 use serde::Serialize;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixListener,
     sync::RwLock,
 };
 
@@ -29,6 +32,7 @@ struct Args {
     signer: Address,
     signer_key_file: PathBuf,
     journal_path: PathBuf,
+    socket_path: PathBuf,
     chain_nonce: u64,
     gas_limit: u64,
     max_snapshot_lag_blocks: u64,
@@ -38,6 +42,13 @@ struct ExplicitEnablement;
 impl ExecutionEnablement for ExplicitEnablement {
     fn is_enabled(&self) -> bool {
         true
+    }
+}
+
+struct SocketGuard(PathBuf);
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -149,14 +160,25 @@ async fn run() -> Result<(), String> {
         5071,
     )?;
     let worker = ExecutionWorker::open(backend, args.journal_path)?;
-    serve(worker).await
+    serve(worker, args.socket_path).await
 }
 
 async fn serve<B: riim_perpl_bridge::execution::ExecutionBackend>(
     worker: ExecutionWorker<B>,
+    socket_path: PathBuf,
 ) -> Result<(), String> {
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let mut stdout = tokio::io::stdout();
+    let listener = UnixListener::bind(&socket_path)
+        .map_err(|error| format!("execution socket bind failed: {error}"))?;
+    let _socket_guard = SocketGuard(socket_path.clone());
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("execution socket permissions failed: {error}"))?;
+    let (connection, _) = listener
+        .accept()
+        .await
+        .map_err(|error| format!("execution socket accept failed: {error}"))?;
+    drop(listener);
+    let (reader, mut writer) = connection.into_split();
+    let mut lines = BufReader::new(reader).lines();
     while let Some(line) = lines.next_line().await.map_err(|error| error.to_string())? {
         let intent = decode_execution_intent(&line)?;
         let (id, action_id) = identity(&intent);
@@ -191,13 +213,16 @@ async fn serve<B: riim_perpl_bridge::execution::ExecutionBackend>(
         };
         let mut bytes = serde_json::to_vec(&outcome).map_err(|error| error.to_string())?;
         bytes.push(b'\n');
-        stdout
+        writer
             .write_all(&bytes)
             .await
             .map_err(|error| error.to_string())?;
-        stdout.flush().await.map_err(|error| error.to_string())?;
+        writer.flush().await.map_err(|error| error.to_string())?;
     }
-    Ok(())
+    match worker.status().await.state {
+        WorkerState::Idle => Ok(()),
+        _ => Err("execution client disconnected with unresolved worker state".into()),
+    }
 }
 
 fn map_state(
@@ -272,6 +297,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         "signer",
         "signer-key-file",
         "journal-path",
+        "socket-path",
         "chain-nonce",
         "gas-limit",
         "max-snapshot-lag-blocks",
@@ -284,6 +310,10 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         .map_err(|_| "invalid --signer")?;
     let signer_key_file = PathBuf::from(required("signer-key-file")?);
     let journal_path = PathBuf::from(required("journal-path")?);
+    let socket_path = PathBuf::from(required("socket-path")?);
+    if socket_path.as_os_str().is_empty() || socket_path.exists() {
+        return Err("execution socket path must be non-empty and absent".into());
+    }
     let chain_nonce = required("chain-nonce")?
         .parse()
         .map_err(|_| "invalid --chain-nonce")?;
@@ -303,6 +333,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         signer,
         signer_key_file,
         journal_path,
+        socket_path,
         chain_nonce,
         gas_limit,
         max_snapshot_lag_blocks,
@@ -320,6 +351,7 @@ mod tests {
             "--signer=0x1111111111111111111111111111111111111111",
             "--signer-key-file=/never/read",
             "--journal-path=/tmp/journal",
+            "--socket-path=/tmp/riimtrool-never-created.sock",
             "--chain-nonce=1",
             "--gas-limit=1300000",
             "--max-snapshot-lag-blocks=2",
@@ -349,7 +381,7 @@ mod tests {
         a.push("--gate=mainnet".into());
         assert!(parse_args(&a).is_err());
         let mut a = valid();
-        a[7] = "--gas-limit=1300001".into();
+        a[8] = "--gas-limit=1300001".into();
         assert!(parse_args(&a).is_err());
     }
 }
