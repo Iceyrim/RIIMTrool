@@ -26,9 +26,12 @@ export class PerplOperatorSocketTransport implements PerplExecutionTransport {
       this.socket.once("connect", resolve);
       this.socket.once("error", reject);
     });
-    createInterface({ input: this.socket, crlfDelay: Infinity }).on("line", (line) =>
-      this.ingest(line),
-    );
+    // A plan may fail local preflight before request() awaits readiness. Keep that asynchronous
+    // connection failure observed while preserving the original rejection for a later request.
+    void this.ready.catch(() => undefined);
+    const lines = createInterface({ input: this.socket, crlfDelay: Infinity });
+    lines.on("line", (line) => this.ingest(line));
+    lines.on("error", (error) => this.fail(`operator socket reader failed: ${error.message}`));
     this.socket.on("error", (error) => this.fail(`operator socket failed: ${error.message}`));
     this.socket.on("close", () => {
       if (this.pending.size) this.fail("operator socket disconnected with a pending action");
