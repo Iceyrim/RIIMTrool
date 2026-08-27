@@ -128,6 +128,20 @@ export class PerplOnchainAdapter implements ExchangeAdapter {
   getFillCoverageStartBlock(): string {
     return this.requireSnapshot().fillCoverageStartBlock;
   }
+  getBookEvidence(market: string): { bestBid: number; bestAsk: number } {
+    const book = this.requireSnapshot().books.find((item) => item.symbol === market);
+    const bestBid = Number(book?.bestBid?.price);
+    const bestAsk = Number(book?.bestAsk?.price);
+    if (
+      !Number.isFinite(bestBid) ||
+      !Number.isFinite(bestAsk) ||
+      bestBid <= 0 ||
+      bestAsk <= bestBid
+    ) {
+      throw new ExchangeAdapterError(`Perpl ${market} book evidence is unavailable or crossed`);
+    }
+    return { bestBid, bestAsk };
+  }
   getPositionSafetyEvidence(market?: string): PerplPositionSafetyEvidence[] {
     return this.requireSnapshot()
       .positions.filter((position) => !market || position.symbol === market)

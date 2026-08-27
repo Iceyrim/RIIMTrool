@@ -76,7 +76,15 @@ class FakeBridge implements PerplBridgeTransport {
             openInterest: "0",
           },
         ],
-        books: [{ symbol: "BTCUSD", perpetualId: 1, totalOrders: 1 }],
+        books: [
+          {
+            symbol: "BTCUSD",
+            perpetualId: 1,
+            bestBid: { price: "64990", size: "0.1" },
+            bestAsk: { price: "65010", size: "0.1" },
+            totalOrders: 1,
+          },
+        ],
         eventCount: 0,
         quiet: true,
       },
@@ -136,6 +144,7 @@ describe("PerplOnchainAdapter", () => {
       observedAt: 1000,
     });
     expect(adapter.getFillCoverageStartBlock()).toBe("10");
+    expect(adapter.getBookEvidence("BTCUSD")).toEqual({ bestBid: 64990, bestAsk: 65010 });
     await expect(adapter.getOrderFills("9", "BTCUSD")).resolves.toMatchObject([
       { tradeId: "0xabc:1", size: 0.002 },
     ]);
