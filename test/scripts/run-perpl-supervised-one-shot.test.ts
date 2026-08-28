@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildInvocations,
+  classifyFinalEvidence,
   parseArgs,
 } from "../../scripts/run-perpl-supervised-one-shot.js";
 
@@ -44,4 +45,48 @@ describe("supervised Perpl one-shot CLI", () => {
     ["unsafe timeout", [...valid, "--socket-timeout-ms=5000"]],
     ["duplicate", [...valid, "--market=ETHUSD"]],
   ])("rejects %s", (_name, argv) => expect(() => parseArgs(argv)).toThrow());
+
+  it("reports only an exact two-transaction flat lifecycle as completed", () => {
+    const evidence = {
+      pendingNonce: 15,
+      openOrderCount: 0,
+      positionBaseSize: 0,
+      lockedBalance: "0.000000",
+    };
+    expect(
+      classifyFinalEvidence({ beforeNonce: 13, runnerCode: 0, workerCode: 0, evidence }),
+    ).toBe("completed-flat");
+    expect(
+      classifyFinalEvidence({
+        beforeNonce: 13,
+        runnerCode: 1,
+        workerCode: 1,
+        evidence: { ...evidence, pendingNonce: 13 },
+      }),
+    ).toBe("ambiguous");
+    expect(
+      classifyFinalEvidence({ beforeNonce: 13, runnerCode: 0, workerCode: 0 }),
+    ).toBe("ambiguous");
+  });
+
+  it.each([
+    { openOrderCount: 1 },
+    { positionBaseSize: 0.00018 },
+    { lockedBalance: "14.211000" },
+  ])("requires cleanup for residual exposure: %o", (override) => {
+    expect(
+      classifyFinalEvidence({
+        beforeNonce: 13,
+        runnerCode: 0,
+        workerCode: 0,
+        evidence: {
+          pendingNonce: 15,
+          openOrderCount: 0,
+          positionBaseSize: 0,
+          lockedBalance: "0",
+          ...override,
+        },
+      }),
+    ).toBe("cleanup-required");
+  });
 });

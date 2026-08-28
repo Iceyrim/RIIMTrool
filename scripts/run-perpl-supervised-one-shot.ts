@@ -2,6 +2,17 @@ import { existsSync, mkdirSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { PerplOnchainAdapter } from "../src/adapters/perpl/onchain/PerplOnchainAdapter.js";
+import { PerplRustClient } from "../src/adapters/perpl/onchain/PerplRustClient.js";
+
+export interface FinalEvidence {
+  pendingNonce: number;
+  openOrderCount: number;
+  positionBaseSize: number;
+  lockedBalance: string;
+}
+
+export type FinalStatus = "completed-flat" | "cleanup-required" | "ambiguous";
 
 export interface SupervisedOneShotArgs {
   signer: string;
@@ -134,6 +145,78 @@ export function buildInvocations(args: SupervisedOneShotArgs) {
   };
 }
 
+export function classifyFinalEvidence(input: {
+  beforeNonce: number;
+  runnerCode?: number | null;
+  workerCode?: number | null;
+  lifecycleError?: string;
+  evidence?: FinalEvidence;
+}): FinalStatus {
+  if (!input.evidence) return "ambiguous";
+  if (
+    input.evidence.openOrderCount !== 0 ||
+    input.evidence.positionBaseSize !== 0 ||
+    Number(input.evidence.lockedBalance) !== 0
+  )
+    return "cleanup-required";
+  if (
+    input.lifecycleError ||
+    input.runnerCode !== 0 ||
+    input.workerCode !== 0 ||
+    input.evidence.pendingNonce !== input.beforeNonce + 2
+  )
+    return "ambiguous";
+  return "completed-flat";
+}
+
+export async function fetchPendingNonce(signer: string): Promise<number> {
+  const response = await fetch("https://rpc.monad.xyz", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      method: "eth_getTransactionCount",
+      params: [signer, "pending"],
+      id: 1,
+    }),
+  });
+  if (!response.ok) throw new Error(`pending nonce RPC failed with HTTP ${response.status}`);
+  const payload = (await response.json()) as { result?: unknown; error?: unknown };
+  if (typeof payload.result !== "string" || !/^0x[0-9a-f]+$/i.test(payload.result))
+    throw new Error(`pending nonce RPC returned an invalid result: ${JSON.stringify(payload.error)}`);
+  const nonce = Number(BigInt(payload.result));
+  if (!Number.isSafeInteger(nonce)) throw new Error("pending nonce exceeds safe integer range");
+  return nonce;
+}
+
+async function collectFinalEvidence(
+  market: SupervisedOneShotArgs["market"],
+  signer: string,
+): Promise<FinalEvidence> {
+  const perpetualId = market === "BTCUSD" ? 1 : 20;
+  const bridge = new PerplRustClient(
+    resolve("rust/perpl-bridge/target/release/riim-perpl-bridge"),
+  );
+  const adapter = new PerplOnchainAdapter(bridge, {
+    rpcUrl: "https://rpc.monad.xyz",
+    markets: [{ symbol: market, perpetualId }],
+    accountIds: [5071],
+  });
+  try {
+    await adapter.connect();
+    const position = adapter.getPositions(market)[0];
+    const account = adapter.getAccountEvidence();
+    return {
+      pendingNonce: await fetchPendingNonce(signer),
+      openOrderCount: adapter.getOpenOrders().length,
+      positionBaseSize: position?.baseSize ?? Number.NaN,
+      lockedBalance: account.lockedBalance,
+    };
+  } finally {
+    await adapter.disconnect();
+  }
+}
+
 async function waitForSocket(path: string, worker: ChildProcess): Promise<void> {
   for (let elapsed = 0; elapsed < 120_000; elapsed += 100) {
     if (existsSync(path)) return;
@@ -156,7 +239,11 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<number | n
 }
 
 async function main(): Promise<void> {
-  const invocation = buildInvocations(parseArgs(process.argv.slice(2)));
+  const args = parseArgs(process.argv.slice(2));
+  const beforeNonce = await fetchPendingNonce(args.signer);
+  if (beforeNonce !== args.chainNonce)
+    throw new Error(`pending nonce changed: reviewed ${args.chainNonce}, current ${beforeNonce}`);
+  const invocation = buildInvocations(args);
   if (existsSync(invocation.state) || existsSync(invocation.socket))
     throw new Error("one-shot session state or socket already exists; choose a new session id");
   mkdirSync(invocation.state, { recursive: true, mode: 0o700 });
@@ -167,30 +254,61 @@ async function main(): Promise<void> {
   let workerOutput = "";
   worker.stdout?.on("data", (chunk) => (workerOutput += String(chunk)));
   worker.stderr?.on("data", (chunk) => (workerOutput += String(chunk)));
+  let runnerCode: number | null | undefined;
+  let workerCode: number | null | undefined;
+  let lifecycleError: string | undefined;
   try {
     await waitForSocket(invocation.socket, worker);
     const runner = spawn(invocation.runner[0], invocation.runner[1], {
       stdio: "inherit",
       shell: false,
     });
-    const runnerCode = await waitForExit(runner, 360_000);
-    const workerCode = await waitForExit(worker, 60_000);
-    console.log(
-      JSON.stringify(
-        {
-          mode: "supervised-mainnet-one-shot",
-          runnerCode,
-          workerCode,
-          workerOutput: workerOutput.trim(),
-        },
-        null,
-        2,
-      ),
-    );
-    if (runnerCode !== 0 || workerCode !== 0) process.exitCode = 1;
+    runnerCode = await waitForExit(runner, 360_000);
+    workerCode = await waitForExit(worker, 60_000);
+  } catch (error) {
+    lifecycleError = String(error);
   } finally {
-    if (worker.exitCode === null) worker.kill("SIGTERM");
+    if (worker.exitCode === null) {
+      worker.kill("SIGTERM");
+      try {
+        workerCode = await waitForExit(worker, 10_000);
+      } catch (error) {
+        lifecycleError = `${lifecycleError ? `${lifecycleError}; ` : ""}${String(error)}`;
+      }
+    }
   }
+  let evidence: FinalEvidence | undefined;
+  let reconciliationError: string | undefined;
+  try {
+    evidence = await collectFinalEvidence(args.market, args.signer);
+  } catch (error) {
+    reconciliationError = String(error);
+  }
+  const finalStatus = classifyFinalEvidence({
+    beforeNonce,
+    runnerCode,
+    workerCode,
+    lifecycleError: lifecycleError ?? reconciliationError,
+    evidence,
+  });
+  console.log(
+    JSON.stringify(
+      {
+        mode: "supervised-mainnet-one-shot",
+        finalStatus,
+        beforeNonce,
+        runnerCode,
+        workerCode,
+        ...(lifecycleError ? { lifecycleError } : {}),
+        ...(reconciliationError ? { reconciliationError } : {}),
+        ...(evidence ? { evidence } : {}),
+        workerOutput: workerOutput.trim(),
+      },
+      null,
+      2,
+    ),
+  );
+  if (finalStatus !== "completed-flat") process.exitCode = 1;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
