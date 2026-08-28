@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use alloy::{
+    eips::BlockId,
     primitives::{Address, U256},
     providers::Provider,
 };
@@ -83,7 +84,7 @@ impl<P: Provider + Clone + Send + Sync + 'static> SdkMainnetTransactionPort<P> {
         let pending = self.pending_nonce().await?;
         let refreshed = self.refresh_snapshot().await?;
         let snapshot = self.snapshot.read().await;
-        let current = self.current_block().await?;
+        let current = self.current_safe_block().await?;
         policy.validate(
             refreshed,
             pending,
@@ -120,7 +121,7 @@ impl<P: Provider + Clone + Send + Sync + 'static> SdkMainnetTransactionPort<P> {
         let pending = self.pending_nonce().await?;
         let refreshed = self.refresh_snapshot().await?;
         let snapshot = self.snapshot.read().await;
-        let current = self.current_block().await?;
+        let current = self.current_safe_block().await?;
         policy.validate(
             refreshed,
             pending,
@@ -165,11 +166,13 @@ impl<P: Provider + Clone + Send + Sync + 'static> SdkMainnetTransactionPort<P> {
             .map_err(|error| format!("pending nonce refresh failed: {error}"))
     }
 
-    async fn current_block(&self) -> Result<u64, String> {
+    async fn current_safe_block(&self) -> Result<u64, String> {
         self.provider
-            .get_block_number()
+            .get_block(BlockId::safe())
             .await
-            .map_err(|error| format!("block refresh failed: {error}"))
+            .map_err(|error| format!("safe block refresh failed: {error}"))?
+            .map(|block| block.header.number)
+            .ok_or_else(|| "safe block refresh returned no block".to_string())
     }
 }
 
