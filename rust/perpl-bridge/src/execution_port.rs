@@ -66,7 +66,7 @@ impl<P> SdkMainnetTransactionPort<P> {
 }
 
 impl<P: Provider + Clone + Send + Sync + 'static> SdkMainnetTransactionPort<P> {
-    async fn refresh_snapshot(&self) -> Result<(), String> {
+    async fn refresh_snapshot(&self) -> Result<SnapshotRefreshEvidence, String> {
         let chain = Chain::mainnet();
         let refreshed = SnapshotBuilder::new(&chain, self.provider.clone())
             .with_perpetuals(vec![1, 20])
@@ -75,16 +75,21 @@ impl<P: Provider + Clone + Send + Sync + 'static> SdkMainnetTransactionPort<P> {
             .await
             .map_err(|error| format!("execution snapshot refresh failed: {error}"))?;
         *self.snapshot.write().await = refreshed;
-        Ok(())
+        Ok(SnapshotRefreshEvidence(()))
     }
 
     async fn submit_place(&self, action: PreparedPlacement) -> Result<String, String> {
         let mut policy = self.policy.lock().await;
         let pending = self.pending_nonce().await?;
-        self.refresh_snapshot().await?;
+        let refreshed = self.refresh_snapshot().await?;
         let snapshot = self.snapshot.read().await;
         let current = self.current_block().await?;
-        policy.validate(pending, current, snapshot.instant().block_number())?;
+        policy.validate(
+            refreshed,
+            pending,
+            current,
+            snapshot.instant().block_number(),
+        )?;
         let receipt = tx::submit_exec_orders_receipt_mainnet(
             self.provider.clone(),
             self.attestation,
@@ -113,10 +118,15 @@ impl<P: Provider + Clone + Send + Sync + 'static> SdkMainnetTransactionPort<P> {
     async fn submit_cancel(&self, action: PreparedCancellation) -> Result<String, String> {
         let mut policy = self.policy.lock().await;
         let pending = self.pending_nonce().await?;
-        self.refresh_snapshot().await?;
+        let refreshed = self.refresh_snapshot().await?;
         let snapshot = self.snapshot.read().await;
         let current = self.current_block().await?;
-        policy.validate(pending, current, snapshot.instant().block_number())?;
+        policy.validate(
+            refreshed,
+            pending,
+            current,
+            snapshot.instant().block_number(),
+        )?;
         let receipt = tx::submit_exec_orders_receipt_mainnet(
             self.provider.clone(),
             self.attestation,
@@ -163,6 +173,9 @@ impl<P: Provider + Clone + Send + Sync + 'static> SdkMainnetTransactionPort<P> {
     }
 }
 
+/// Unforgeable outside this module: validation can only follow a successful refresh.
+struct SnapshotRefreshEvidence(());
+
 struct PortPolicy {
     next_nonce: u64,
     gas_limit: u64,
@@ -185,6 +198,7 @@ impl PortPolicy {
     }
     fn validate(
         &self,
+        _refreshed: SnapshotRefreshEvidence,
         pending_nonce: u64,
         current_block: u64,
         snapshot_block: u64,
@@ -250,14 +264,28 @@ mod tests {
     }
 
     #[test]
-    fn policy_enforces_gas_nonce_and_snapshot_and_advances_only_on_confirmation() {
+    fn policy_requires_refresh_evidence_and_enforces_gas_nonce_and_snapshot() {
         assert!(PortPolicy::new(7, 0, 2).is_err());
         assert!(PortPolicy::new(7, tx::MAINNET_MAX_GAS_LIMIT + 1, 2).is_err());
         let mut policy = PortPolicy::new(7, tx::MAINNET_MAX_GAS_LIMIT, 2).unwrap();
-        assert!(policy.validate(8, 100, 100).is_err());
-        assert!(policy.validate(7, 100, 97).is_err());
-        assert!(policy.validate(7, 99, 100).is_err());
-        policy.validate(7, 100, 98).unwrap();
+        assert!(
+            policy
+                .validate(SnapshotRefreshEvidence(()), 8, 100, 100)
+                .is_err()
+        );
+        assert!(
+            policy
+                .validate(SnapshotRefreshEvidence(()), 7, 100, 97)
+                .is_err()
+        );
+        assert!(
+            policy
+                .validate(SnapshotRefreshEvidence(()), 7, 99, 100)
+                .is_err()
+        );
+        policy
+            .validate(SnapshotRefreshEvidence(()), 7, 100, 98)
+            .unwrap();
         assert_eq!(policy.next_nonce, 7);
         policy.confirm().unwrap();
         assert_eq!(policy.next_nonce, 8);
