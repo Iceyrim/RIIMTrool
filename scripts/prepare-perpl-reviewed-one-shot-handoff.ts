@@ -67,12 +67,29 @@ export function prepareReviewedHandoff(input: ReviewedHandoffInput) {
     `--equity-journal=${state}/equity.json`,
     `--controller-journal=${state}/controller.json`,
   ];
+  const supervisor = [
+    "./node_modules/.bin/tsx",
+    "scripts/run-perpl-supervised-one-shot.ts",
+    "--arm=EXECUTE REVIEWED PERPL ONE-SHOT",
+    `--signer=${input.signer}`,
+    "--signer-key-file=SIGNER_KEY_FILE",
+    `--session-id=${input.sessionId}`,
+    `--market=${input.market}`,
+    `--side=${input.side}`,
+    `--price=${input.price}`,
+    `--size=${input.size}`,
+    `--placement-action-id=${input.placementActionId}`,
+    `--cancellation-action-id=${input.cancellationActionId}`,
+    `--chain-nonce=${input.chainNonce}`,
+    "--socket-timeout-ms=180000",
+  ];
   return {
     mode: "operator-review-only",
     executable: false as const,
     review: { ...input, notionalUsd: Number((input.price * input.size).toFixed(12)) },
     terminal1WorkerTemplate: worker.map(shellQuote).join(" "),
     terminal2Runner: runner.map(shellQuote).join(" "),
+    supervisedCommand: supervisor.map(shellQuote).join(" "),
   };
 }
 

@@ -37,6 +37,10 @@ describe("reviewed one-shot handoff", () => {
       "state/perpl-reviewed-one-shot/2026082801/equity.json",
     );
     expect(result.terminal2Runner).not.toMatch(/signer|key|wallet/i);
+    expect(result.supervisedCommand).toContain("run-perpl-supervised-one-shot.ts");
+    expect(result.supervisedCommand).toContain("--session-id=2026082801");
+    expect(result.supervisedCommand).toContain("--socket-timeout-ms=180000");
+    expect(result.supervisedCommand).toContain("SIGNER_KEY_FILE");
   });
 
   it.each([
