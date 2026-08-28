@@ -4,7 +4,11 @@ use alloy::{
     primitives::{Address, U256},
     providers::Provider,
 };
-use perpl_sdk::state;
+use perpl_sdk::{
+    Chain,
+    state::{self, SnapshotBuilder},
+    types::AccountAddressOrID,
+};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
@@ -62,9 +66,22 @@ impl<P> SdkMainnetTransactionPort<P> {
 }
 
 impl<P: Provider + Clone + Send + Sync + 'static> SdkMainnetTransactionPort<P> {
+    async fn refresh_snapshot(&self) -> Result<(), String> {
+        let chain = Chain::mainnet();
+        let refreshed = SnapshotBuilder::new(&chain, self.provider.clone())
+            .with_perpetuals(vec![1, 20])
+            .with_accounts(vec![AccountAddressOrID::ID(5071)])
+            .build()
+            .await
+            .map_err(|error| format!("execution snapshot refresh failed: {error}"))?;
+        *self.snapshot.write().await = refreshed;
+        Ok(())
+    }
+
     async fn submit_place(&self, action: PreparedPlacement) -> Result<String, String> {
         let mut policy = self.policy.lock().await;
         let pending = self.pending_nonce().await?;
+        self.refresh_snapshot().await?;
         let snapshot = self.snapshot.read().await;
         let current = self.current_block().await?;
         policy.validate(pending, current, snapshot.instant().block_number())?;
@@ -96,6 +113,7 @@ impl<P: Provider + Clone + Send + Sync + 'static> SdkMainnetTransactionPort<P> {
     async fn submit_cancel(&self, action: PreparedCancellation) -> Result<String, String> {
         let mut policy = self.policy.lock().await;
         let pending = self.pending_nonce().await?;
+        self.refresh_snapshot().await?;
         let snapshot = self.snapshot.read().await;
         let current = self.current_block().await?;
         policy.validate(pending, current, snapshot.instant().block_number())?;
