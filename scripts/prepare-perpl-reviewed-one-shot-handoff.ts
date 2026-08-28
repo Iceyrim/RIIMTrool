@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 export interface ReviewedHandoffInput {
   signer: string;
   socketPath: string;
+  sessionId: string;
   market: "BTCUSD" | "ETHUSD";
   side: "buy" | "sell";
   price: number;
@@ -20,6 +21,7 @@ export function prepareReviewedHandoff(input: ReviewedHandoffInput) {
     throw new Error("invalid market or side");
   if (!input.socketPath.startsWith("/") || /[\0\r\n]/.test(input.socketPath))
     throw new Error("invalid socket path");
+  if (!/^\d{10,20}$/.test(input.sessionId)) throw new Error("invalid session id");
   if (
     ![input.price, input.size, input.bestBid, input.bestAsk].every(
       (value) => Number.isFinite(value) && value > 0,
@@ -37,7 +39,7 @@ export function prepareReviewedHandoff(input: ReviewedHandoffInput) {
     throw new Error("invalid action ids");
   if (!Number.isSafeInteger(input.chainNonce) || input.chainNonce < 0)
     throw new Error("invalid pending nonce");
-  const state = "state/perpl-reviewed-one-shot";
+  const state = `state/perpl-reviewed-one-shot/${input.sessionId}`;
   const worker = [
     "rust/perpl-bridge/target/release/gated-execution-worker",
     "--gate=mainnet",
@@ -94,6 +96,7 @@ function parseCli(argv: string[]): ReviewedHandoffInput {
   const allowed = [
     "signer",
     "socket-path",
+    "session-id",
     "market",
     "side",
     "price",
@@ -109,6 +112,7 @@ function parseCli(argv: string[]): ReviewedHandoffInput {
   return {
     signer: get("signer"),
     socketPath: get("socket-path"),
+    sessionId: get("session-id"),
     market: get("market") as ReviewedHandoffInput["market"],
     side: get("side") as ReviewedHandoffInput["side"],
     price: Number(get("price")),

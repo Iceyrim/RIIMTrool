@@ -7,6 +7,7 @@ import {
 const valid: ReviewedHandoffInput = {
   signer: "0xa89bC210BaB1156113571F2a9193c5282efBF78a",
   socketPath: "/tmp/perpl-reviewed.sock",
+  sessionId: "2026082801",
   market: "BTCUSD",
   side: "buy",
   price: 77000,
@@ -28,7 +29,13 @@ describe("reviewed one-shot handoff", () => {
     });
     expect(result.terminal1WorkerTemplate).toContain("SIGNER_KEY_FILE");
     expect(result.terminal1WorkerTemplate).toContain("gated-execution-worker");
+    expect(result.terminal1WorkerTemplate).toContain(
+      "state/perpl-reviewed-one-shot/2026082801/rust-worker.json",
+    );
     expect(result.terminal2Runner).toContain("run-perpl-reviewed-one-shot.ts");
+    expect(result.terminal2Runner).toContain(
+      "state/perpl-reviewed-one-shot/2026082801/equity.json",
+    );
     expect(result.terminal2Runner).not.toMatch(/signer|key|wallet/i);
   });
 
@@ -36,6 +43,7 @@ describe("reviewed one-shot handoff", () => {
     { price: 77100 },
     { size: 1 },
     { chainNonce: -1 },
+    { sessionId: "../old-session" },
     { cancellationActionId: "2026082701" },
   ])("rejects unsafe review input: %o", (override) =>
     expect(() => prepareReviewedHandoff({ ...valid, ...override })).toThrow(),
