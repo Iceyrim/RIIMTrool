@@ -80,4 +80,10 @@ describe("PerplOperatorSocketTransport", () => {
     ).rejects.toThrow(/exactly one pending action/);
     await expect(first).rejects.toThrow(/timed out/);
   });
+
+  it("rejects unbounded operator timeouts", () => {
+    expect(() => new PerplOperatorSocketTransport("/tmp/perpl.sock", 300_001)).toThrow(
+      /configuration is invalid/,
+    );
+  });
 });

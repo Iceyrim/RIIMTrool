@@ -74,7 +74,7 @@ async function main(): Promise<void> {
       executionReady: false,
       readinessBlockers: ["operator-approved one-shot socket execution only"],
     };
-    socket = new PerplOperatorSocketTransport(args.socketPath);
+    socket = new PerplOperatorSocketTransport(args.socketPath, args.socketTimeoutMs);
     const controller = new PerplMainnetCanaryController(new PerplCanaryExecutor(socket), {
       market: args.market,
       journalPath: args.controllerJournal,
@@ -112,6 +112,7 @@ export function parseArgs(argv: string[]) {
     "equity-journal",
     "controller-journal",
     "bridge",
+    "socket-timeout-ms",
   ]);
   const values = new Map<string, string>();
   for (const item of argv) {
@@ -135,12 +136,20 @@ export function parseArgs(argv: string[]) {
   const size = Number(get("size"));
   if (![price, size].every((value) => Number.isFinite(value) && value > 0))
     throw new Error("invalid price or size");
+  const socketTimeoutMs = Number(values.get("socket-timeout-ms") ?? "180000");
+  if (
+    !Number.isSafeInteger(socketTimeoutMs) ||
+    socketTimeoutMs < 30_000 ||
+    socketTimeoutMs > 300_000
+  )
+    throw new Error("socket timeout must be 30000..300000 milliseconds");
   return {
     socketPath: get("socket-path"),
     market: market as "BTCUSD" | "ETHUSD",
     side: side as "buy" | "sell",
     price,
     size,
+    socketTimeoutMs,
     placementActionId: get("placement-action-id"),
     cancellationActionId: get("cancellation-action-id"),
     equityJournal: resolve(get("equity-journal")),

@@ -24,6 +24,7 @@ describe("reviewed Perpl one-shot CLI", () => {
       price: 77000,
       size: 0.00018,
       socketPath: "/tmp/perpl.sock",
+      socketTimeoutMs: 180000,
     });
   });
 
@@ -32,6 +33,7 @@ describe("reviewed Perpl one-shot CLI", () => {
     ["unknown input", [...valid, "--signer=forbidden"]],
     ["duplicate input", [...valid, "--market=ETHUSD"]],
     ["invalid price", valid.map((value) => (value.startsWith("--price=") ? "--price=0" : value))],
+    ["unsafe timeout", [...valid, "--socket-timeout-ms=5000"]],
   ])("rejects %s before connecting", (_case, argv) => {
     expect(() => parseArgs(argv)).toThrow();
   });

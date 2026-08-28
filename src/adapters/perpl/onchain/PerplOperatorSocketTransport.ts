@@ -16,9 +16,14 @@ export class PerplOperatorSocketTransport implements PerplExecutionTransport {
 
   constructor(
     socketPath: string,
-    private readonly timeoutMs = 5_000,
+    private readonly timeoutMs = 180_000,
   ) {
-    if (!socketPath.startsWith("/") || socketPath.includes("\0") || timeoutMs < 100) {
+    if (
+      !socketPath.startsWith("/") ||
+      socketPath.includes("\0") ||
+      timeoutMs < 100 ||
+      timeoutMs > 300_000
+    ) {
       throw new ExchangeAdapterError("Perpl operator socket configuration is invalid");
     }
     this.socket = createConnection({ path: socketPath });
