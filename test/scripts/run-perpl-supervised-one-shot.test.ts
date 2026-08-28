@@ -1,8 +1,12 @@
+import { mkdtempSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildInvocations,
   classifyFinalEvidence,
   parseArgs,
+  superviseInvocation,
 } from "../../scripts/run-perpl-supervised-one-shot.js";
 
 const valid = [
@@ -88,5 +92,37 @@ describe("supervised Perpl one-shot CLI", () => {
         },
       }),
     ).toBe("cleanup-required");
+  });
+
+  it("supervises fake worker and runner processes through completed-flat", async () => {
+    const root = mkdtempSync(join(tmpdir(), "perpl-supervisor-rehearsal-"));
+    const state = join(root, "state");
+    const socket = join(root, "worker.sock");
+    mkdirSync(state);
+    const workerSource =
+      'const n=require("node:net"),p=process.argv[1];const s=n.createServer(c=>c.on("end",()=>s.close()));s.listen(p)';
+    const runnerSource =
+      'const n=require("node:net"),p=process.argv[1];const c=n.createConnection(p,()=>c.end())';
+    const report = await superviseInvocation(
+      {
+        state,
+        socket,
+        worker: [process.execPath, ["-e", workerSource, socket]],
+        runner: [process.execPath, ["-e", runnerSource, socket]],
+      },
+      13,
+      async () => ({
+        pendingNonce: 15,
+        openOrderCount: 0,
+        positionBaseSize: 0,
+        lockedBalance: "0",
+      }),
+    );
+    expect(report).toMatchObject({
+      finalStatus: "completed-flat",
+      beforeNonce: 13,
+      runnerCode: 0,
+      workerCode: 0,
+    });
   });
 });

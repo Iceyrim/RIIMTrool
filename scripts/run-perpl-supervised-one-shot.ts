@@ -14,6 +14,24 @@ export interface FinalEvidence {
 
 export type FinalStatus = "completed-flat" | "cleanup-required" | "ambiguous";
 
+export interface SupervisorInvocation {
+  state: string;
+  socket: string;
+  worker: readonly [string, readonly string[]];
+  runner: readonly [string, readonly string[]];
+}
+
+export interface SupervisorReport {
+  finalStatus: FinalStatus;
+  beforeNonce: number;
+  runnerCode?: number | null;
+  workerCode?: number | null;
+  lifecycleError?: string;
+  reconciliationError?: string;
+  evidence?: FinalEvidence;
+  workerOutput: string;
+}
+
 export interface SupervisedOneShotArgs {
   signer: string;
   signerKeyFile: string;
@@ -238,15 +256,11 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<number | n
   });
 }
 
-async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
-  const beforeNonce = await fetchPendingNonce(args.signer);
-  if (beforeNonce !== args.chainNonce)
-    throw new Error(`pending nonce changed: reviewed ${args.chainNonce}, current ${beforeNonce}`);
-  const invocation = buildInvocations(args);
-  if (existsSync(invocation.state) || existsSync(invocation.socket))
-    throw new Error("one-shot session state or socket already exists; choose a new session id");
-  mkdirSync(invocation.state, { recursive: true, mode: 0o700 });
+export async function superviseInvocation(
+  invocation: SupervisorInvocation,
+  beforeNonce: number,
+  reconcile: () => Promise<FinalEvidence>,
+): Promise<SupervisorReport> {
   const worker = spawn(invocation.worker[0], invocation.worker[1], {
     stdio: ["ignore", "pipe", "pipe"],
     shell: false,
@@ -280,7 +294,7 @@ async function main(): Promise<void> {
   let evidence: FinalEvidence | undefined;
   let reconciliationError: string | undefined;
   try {
-    evidence = await collectFinalEvidence(args.market, args.signer);
+    evidence = await reconcile();
   } catch (error) {
     reconciliationError = String(error);
   }
@@ -291,24 +305,41 @@ async function main(): Promise<void> {
     lifecycleError: lifecycleError ?? reconciliationError,
     evidence,
   });
+  return {
+    finalStatus,
+    beforeNonce,
+    runnerCode,
+    workerCode,
+    ...(lifecycleError ? { lifecycleError } : {}),
+    ...(reconciliationError ? { reconciliationError } : {}),
+    ...(evidence ? { evidence } : {}),
+    workerOutput: workerOutput.trim(),
+  };
+}
+
+async function main(): Promise<void> {
+  const args = parseArgs(process.argv.slice(2));
+  const beforeNonce = await fetchPendingNonce(args.signer);
+  if (beforeNonce !== args.chainNonce)
+    throw new Error(`pending nonce changed: reviewed ${args.chainNonce}, current ${beforeNonce}`);
+  const invocation = buildInvocations(args);
+  if (existsSync(invocation.state) || existsSync(invocation.socket))
+    throw new Error("one-shot session state or socket already exists; choose a new session id");
+  mkdirSync(invocation.state, { recursive: true, mode: 0o700 });
+  const report = await superviseInvocation(invocation, beforeNonce, () =>
+    collectFinalEvidence(args.market, args.signer),
+  );
   console.log(
     JSON.stringify(
       {
         mode: "supervised-mainnet-one-shot",
-        finalStatus,
-        beforeNonce,
-        runnerCode,
-        workerCode,
-        ...(lifecycleError ? { lifecycleError } : {}),
-        ...(reconciliationError ? { reconciliationError } : {}),
-        ...(evidence ? { evidence } : {}),
-        workerOutput: workerOutput.trim(),
+        ...report,
       },
       null,
       2,
     ),
   );
-  if (finalStatus !== "completed-flat") process.exitCode = 1;
+  if (report.finalStatus !== "completed-flat") process.exitCode = 1;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
