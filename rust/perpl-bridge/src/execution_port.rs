@@ -1,13 +1,15 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use alloy::{
     eips::BlockId,
     primitives::{Address, U256},
     providers::Provider,
 };
+use futures::StreamExt;
 use perpl_sdk::{
     Chain,
     state::{self, SnapshotBuilder},
+    stream,
     types::AccountAddressOrID,
 };
 use tokio::sync::{Mutex, RwLock};
@@ -67,14 +69,15 @@ impl<P> SdkMainnetTransactionPort<P> {
 }
 
 impl<P: Provider + Clone + Send + Sync + 'static> SdkMainnetTransactionPort<P> {
-    async fn refresh_snapshot(&self) -> Result<SnapshotRefreshEvidence, String> {
-        let chain = Chain::mainnet();
-        let refreshed = SnapshotBuilder::new(&chain, self.provider.clone())
-            .with_perpetuals(vec![1, 20])
-            .with_accounts(vec![AccountAddressOrID::ID(5071)])
-            .build()
-            .await
-            .map_err(|error| format!("execution snapshot refresh failed: {error}"))?;
+    async fn refresh_snapshot(
+        &self,
+        max_lag_blocks: u64,
+    ) -> Result<SnapshotRefreshEvidence, String> {
+        let (refreshed, _) = build_caught_up_mainnet_snapshot(
+            self.provider.clone(),
+            max_lag_blocks,
+        )
+        .await?;
         *self.snapshot.write().await = refreshed;
         Ok(SnapshotRefreshEvidence(()))
     }
@@ -82,7 +85,9 @@ impl<P: Provider + Clone + Send + Sync + 'static> SdkMainnetTransactionPort<P> {
     async fn submit_place(&self, action: PreparedPlacement) -> Result<String, String> {
         let mut policy = self.policy.lock().await;
         let pending = self.pending_nonce().await?;
-        let refreshed = self.refresh_snapshot().await?;
+        let refreshed = self
+            .refresh_snapshot(policy.max_snapshot_lag_blocks)
+            .await?;
         let snapshot = self.snapshot.read().await;
         let current = self.current_safe_block().await?;
         policy.validate(
@@ -119,7 +124,9 @@ impl<P: Provider + Clone + Send + Sync + 'static> SdkMainnetTransactionPort<P> {
     async fn submit_cancel(&self, action: PreparedCancellation) -> Result<String, String> {
         let mut policy = self.policy.lock().await;
         let pending = self.pending_nonce().await?;
-        let refreshed = self.refresh_snapshot().await?;
+        let refreshed = self
+            .refresh_snapshot(policy.max_snapshot_lag_blocks)
+            .await?;
         let snapshot = self.snapshot.read().await;
         let current = self.current_safe_block().await?;
         policy.validate(
@@ -173,6 +180,83 @@ impl<P: Provider + Clone + Send + Sync + 'static> SdkMainnetTransactionPort<P> {
             .map_err(|error| format!("safe block refresh failed: {error}"))?
             .map(|block| block.header.number)
             .ok_or_else(|| "safe block refresh returned no block".to_string())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SnapshotFreshness {
+    pub snapshot_block: u64,
+    pub safe_block: u64,
+    pub lag_blocks: u64,
+    pub replayed_blocks: u64,
+}
+
+/// Builds the pinned mainnet execution snapshot and replays every safe block needed to
+/// preserve the strict freshness limit. This is read-only and never constructs a signer.
+pub async fn build_caught_up_mainnet_snapshot<P>(
+    provider: P,
+    max_lag_blocks: u64,
+) -> Result<(state::Exchange, SnapshotFreshness), String>
+where
+    P: Provider + Clone + Send + Sync + 'static,
+{
+    if max_lag_blocks == 0 {
+        return Err("snapshot catch-up lag limit is invalid".into());
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let chain = Chain::mainnet();
+    let mut snapshot = tokio::time::timeout_at(
+        deadline,
+        SnapshotBuilder::new(&chain, provider.clone())
+            .with_perpetuals(vec![1, 20])
+            .with_accounts(vec![AccountAddressOrID::ID(5071)])
+            .build(),
+    )
+    .await
+    .map_err(|_| "execution snapshot build timed out".to_string())?
+    .map_err(|error| format!("execution snapshot failed: {error}"))?;
+    let initial_block = snapshot.instant().block_number();
+
+    loop {
+        let safe_block = provider
+            .get_block(BlockId::safe())
+            .await
+            .map_err(|error| format!("safe block refresh failed: {error}"))?
+            .map(|block| block.header.number)
+            .ok_or_else(|| "safe block refresh returned no block".to_string())?;
+        let snapshot_block = snapshot.instant().block_number();
+        if safe_block < snapshot_block {
+            return Err("execution snapshot is ahead of safe chain state".into());
+        }
+        let lag_blocks = safe_block - snapshot_block;
+        if lag_blocks <= max_lag_blocks {
+            return Ok((
+                snapshot,
+                SnapshotFreshness {
+                    snapshot_block,
+                    safe_block,
+                    lag_blocks,
+                    replayed_blocks: snapshot_block - initial_block,
+                },
+            ));
+        }
+
+        let mut blocks = Box::pin(stream::raw(
+            &chain,
+            provider.clone(),
+            snapshot.instant().next(),
+            tokio::time::sleep,
+        ));
+        while snapshot.instant().block_number() < safe_block {
+            let block = tokio::time::timeout_at(deadline, blocks.next())
+                .await
+                .map_err(|_| "execution snapshot catch-up timed out".to_string())?
+                .ok_or_else(|| "execution snapshot event stream ended".to_string())?
+                .map_err(|error| format!("execution snapshot catch-up failed: {error}"))?;
+            snapshot
+                .apply_events(&block)
+                .map_err(|error| format!("execution snapshot event apply failed: {error}"))?;
+        }
     }
 }
 
