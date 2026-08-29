@@ -92,7 +92,6 @@ async fn run() -> Result<(), String> {
     let attestation =
         MainnetAttestation::verify(MAINNET_CHAIN_ID, MAINNET_EXCHANGE).map_err(str::to_string)?;
     let client = RpcClient::builder()
-        .layer(ThrottleLayer::new(12))
         .layer(RetryBackoffLayer::new(5, 100, 200))
         .connect(tx::MAINNET_RPC)
         .await
@@ -134,7 +133,7 @@ async fn run() -> Result<(), String> {
         return Err("signer is not mapped to pinned account 5071".into());
     }
     let chain = Chain::mainnet();
-    let snapshot = SnapshotBuilder::new(&chain, provider.clone())
+    let snapshot = SnapshotBuilder::new(&chain, readonly.clone())
         .with_perpetuals(vec![1, 20])
         .with_accounts(vec![AccountAddressOrID::ID(5071)])
         .build()
@@ -142,6 +141,7 @@ async fn run() -> Result<(), String> {
         .map_err(|error| format!("execution snapshot failed: {error}"))?;
     let port = SdkMainnetTransactionPort::new(SdkMainnetTransactionPortConfig {
         provider,
+        state_provider: readonly,
         attestation,
         gate: SubmissionGate::explicitly_enabled(true),
         snapshot: Arc::new(RwLock::new(snapshot)),

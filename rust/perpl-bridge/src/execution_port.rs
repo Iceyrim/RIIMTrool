@@ -1,16 +1,20 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use alloy::{
     eips::BlockId,
     primitives::{Address, U256},
     providers::Provider,
+    rpc::types::Filter,
+    sol_types::SolEventInterface,
 };
 use futures::StreamExt;
 use perpl_sdk::{
     Chain,
+    abi::dex::Exchange::ExchangeEvents,
     state::{self, SnapshotBuilder},
-    stream,
+    stream::{RawBlockEvents, RawEvent},
     types::AccountAddressOrID,
+    types::StateInstant,
 };
 use tokio::sync::{Mutex, RwLock};
 
@@ -24,8 +28,9 @@ use crate::{
 
 /// Dormant SDK transaction port. No binary constructs this type; the caller must inject an
 /// already wallet-capable provider, attestation, explicit gate, signer, snapshot, and nonce.
-pub struct SdkMainnetTransactionPort<P> {
+pub struct SdkMainnetTransactionPort<P, S> {
     provider: P,
+    state_provider: S,
     attestation: MainnetAttestation,
     gate: SubmissionGate,
     snapshot: Arc<RwLock<state::Exchange>>,
@@ -35,8 +40,9 @@ pub struct SdkMainnetTransactionPort<P> {
     policy: Mutex<PortPolicy>,
 }
 
-pub struct SdkMainnetTransactionPortConfig<P> {
+pub struct SdkMainnetTransactionPortConfig<P, S> {
     pub provider: P,
+    pub state_provider: S,
     pub attestation: MainnetAttestation,
     pub gate: SubmissionGate,
     pub snapshot: Arc<RwLock<state::Exchange>>,
@@ -48,8 +54,8 @@ pub struct SdkMainnetTransactionPortConfig<P> {
     pub max_snapshot_lag_blocks: u64,
 }
 
-impl<P> SdkMainnetTransactionPort<P> {
-    pub fn new(config: SdkMainnetTransactionPortConfig<P>) -> Result<Self, String> {
+impl<P, S> SdkMainnetTransactionPort<P, S> {
+    pub fn new(config: SdkMainnetTransactionPortConfig<P, S>) -> Result<Self, String> {
         let policy = PortPolicy::new(
             config.pending_nonce,
             config.gas_limit,
@@ -57,6 +63,7 @@ impl<P> SdkMainnetTransactionPort<P> {
         )?;
         Ok(Self {
             provider: config.provider,
+            state_provider: config.state_provider,
             attestation: config.attestation,
             gate: config.gate,
             snapshot: config.snapshot,
@@ -68,13 +75,19 @@ impl<P> SdkMainnetTransactionPort<P> {
     }
 }
 
-impl<P: Provider + Clone + Send + Sync + 'static> SdkMainnetTransactionPort<P> {
+impl<P, S> SdkMainnetTransactionPort<P, S>
+where
+    P: Provider + Clone + Send + Sync + 'static,
+    S: Provider + Clone + Send + Sync + 'static,
+{
     async fn refresh_snapshot(
         &self,
         max_lag_blocks: u64,
+        perpetual_id: u32,
     ) -> Result<SnapshotRefreshEvidence, String> {
         let (refreshed, _) = build_caught_up_mainnet_snapshot(
-            self.provider.clone(),
+            self.state_provider.clone(),
+            vec![perpetual_id],
             max_lag_blocks,
         )
         .await?;
@@ -86,7 +99,7 @@ impl<P: Provider + Clone + Send + Sync + 'static> SdkMainnetTransactionPort<P> {
         let mut policy = self.policy.lock().await;
         let pending = self.pending_nonce().await?;
         let refreshed = self
-            .refresh_snapshot(policy.max_snapshot_lag_blocks)
+            .refresh_snapshot(policy.max_snapshot_lag_blocks, action.audit.perpetual_id)
             .await?;
         let snapshot = self.snapshot.read().await;
         let current = self.current_safe_block().await?;
@@ -125,7 +138,7 @@ impl<P: Provider + Clone + Send + Sync + 'static> SdkMainnetTransactionPort<P> {
         let mut policy = self.policy.lock().await;
         let pending = self.pending_nonce().await?;
         let refreshed = self
-            .refresh_snapshot(policy.max_snapshot_lag_blocks)
+            .refresh_snapshot(policy.max_snapshot_lag_blocks, action.audit.perpetual_id)
             .await?;
         let snapshot = self.snapshot.read().await;
         let current = self.current_safe_block().await?;
@@ -174,7 +187,7 @@ impl<P: Provider + Clone + Send + Sync + 'static> SdkMainnetTransactionPort<P> {
     }
 
     async fn current_safe_block(&self) -> Result<u64, String> {
-        self.provider
+        self.state_provider
             .get_block(BlockId::safe())
             .await
             .map_err(|error| format!("safe block refresh failed: {error}"))?
@@ -195,6 +208,7 @@ pub struct SnapshotFreshness {
 /// preserve the strict freshness limit. This is read-only and never constructs a signer.
 pub async fn build_caught_up_mainnet_snapshot<P>(
     provider: P,
+    perpetual_ids: Vec<u32>,
     max_lag_blocks: u64,
 ) -> Result<(state::Exchange, SnapshotFreshness), String>
 where
@@ -203,12 +217,15 @@ where
     if max_lag_blocks == 0 {
         return Err("snapshot catch-up lag limit is invalid".into());
     }
+    if !matches!(perpetual_ids.as_slice(), [1] | [20]) {
+        return Err("snapshot catch-up perpetual scope is invalid".into());
+    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     let chain = Chain::mainnet();
     let mut snapshot = tokio::time::timeout_at(
         deadline,
         SnapshotBuilder::new(&chain, provider.clone())
-            .with_perpetuals(vec![1, 20])
+            .with_perpetuals(perpetual_ids)
             .with_accounts(vec![AccountAddressOrID::ID(5071)])
             .build(),
     )
@@ -241,23 +258,89 @@ where
             ));
         }
 
-        let mut blocks = Box::pin(stream::raw(
-            &chain,
+        replay_safe_range(
             provider.clone(),
-            snapshot.instant().next(),
-            tokio::time::sleep,
-        ));
-        while snapshot.instant().block_number() < safe_block {
-            let block = tokio::time::timeout_at(deadline, blocks.next())
-                .await
-                .map_err(|_| "execution snapshot catch-up timed out".to_string())?
-                .ok_or_else(|| "execution snapshot event stream ended".to_string())?
-                .map_err(|error| format!("execution snapshot catch-up failed: {error}"))?;
-            snapshot
-                .apply_events(&block)
-                .map_err(|error| format!("execution snapshot event apply failed: {error}"))?;
-        }
+            &chain,
+            &mut snapshot,
+            safe_block,
+            deadline,
+        )
+        .await?;
     }
+}
+
+async fn replay_safe_range<P>(
+    provider: P,
+    chain: &Chain,
+    snapshot: &mut state::Exchange,
+    target_block: u64,
+    deadline: tokio::time::Instant,
+) -> Result<(), String>
+where
+    P: Provider + Clone + Send + Sync + 'static,
+{
+    let first_block = snapshot.instant().next().block_number();
+    if first_block > target_block {
+        return Ok(());
+    }
+    let filter = Filter::new()
+        .address(chain.exchange())
+        .from_block(first_block)
+        .to_block(target_block);
+    let logs = tokio::time::timeout_at(deadline, provider.get_logs(&filter))
+        .await
+        .map_err(|_| "execution snapshot log catch-up timed out".to_string())?
+        .map_err(|error| format!("execution snapshot log catch-up failed: {error}"))?;
+    let mut events_by_block: HashMap<u64, Vec<RawEvent>> = HashMap::new();
+    for log in logs {
+        let block_number = log
+            .block_number
+            .ok_or_else(|| "execution snapshot catch-up log omitted block number".to_string())?;
+        let event = RawEvent::new(
+            log.transaction_hash.unwrap_or_default(),
+            log.transaction_index.unwrap_or_default(),
+            log.log_index.unwrap_or_default(),
+            ExchangeEvents::decode_log(&log.inner)
+                .map_err(|error| format!("execution snapshot event decode failed: {error}"))?
+                .data,
+        );
+        events_by_block.entry(block_number).or_default().push(event);
+    }
+    for events in events_by_block.values_mut() {
+        events.sort_by_key(|event| event.log_index());
+    }
+
+    let mut headers = futures::stream::iter(first_block..=target_block)
+        .map(|block_number| {
+            let provider = provider.clone();
+            async move {
+                let block = provider
+                    .get_block(BlockId::number(block_number))
+                    .await
+                    .map_err(|error| format!("safe block {block_number} fetch failed: {error}"))?
+                    .ok_or_else(|| format!("safe block {block_number} is unavailable"))?;
+                Ok::<_, String>((block_number, block.header.timestamp))
+            }
+        })
+        .buffer_unordered(24)
+        .collect::<Vec<_>>();
+    let mut headers = tokio::time::timeout_at(deadline, &mut headers)
+        .await
+        .map_err(|_| "execution snapshot header catch-up timed out".to_string())?
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    headers.sort_unstable_by_key(|(block_number, _)| *block_number);
+
+    for (block_number, timestamp) in headers {
+        let events = events_by_block.remove(&block_number).unwrap_or_default();
+        snapshot
+            .apply_events(&RawBlockEvents::new(
+                StateInstant::new(block_number, timestamp),
+                events,
+            ))
+            .map_err(|error| format!("execution snapshot event apply failed: {error}"))?;
+    }
+    Ok(())
 }
 
 /// Unforgeable outside this module: validation can only follow a successful refresh.
@@ -307,8 +390,10 @@ impl PortPolicy {
     }
 }
 
-impl<P: Provider + Clone + Send + Sync + 'static> MainnetTransactionPort
-    for SdkMainnetTransactionPort<P>
+impl<P, S> MainnetTransactionPort for SdkMainnetTransactionPort<P, S>
+where
+    P: Provider + Clone + Send + Sync + 'static,
+    S: Provider + Clone + Send + Sync + 'static,
 {
     fn place<'a>(&'a self, action: PreparedPlacement) -> TransactionPortFuture<'a> {
         Box::pin(async move { classify(self.submit_place(action).await) })

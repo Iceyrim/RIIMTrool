@@ -1,21 +1,22 @@
 use std::time::Duration;
 
-use alloy::providers::ProviderBuilder;
-use riim_perpl_bridge::{
-    execution_port::build_caught_up_mainnet_snapshot,
-    tx,
+use alloy::{
+    providers::ProviderBuilder, rpc::client::RpcClient, transports::layers::RetryBackoffLayer,
 };
+use riim_perpl_bridge::{execution_port::build_caught_up_mainnet_snapshot, tx};
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
     let (checks, interval_ms) = parse_args(&std::env::args().skip(1).collect::<Vec<_>>())?;
-    let url = tx::MAINNET_RPC
-        .parse()
-        .map_err(|_| "invalid pinned mainnet RPC".to_string())?;
-    let provider = ProviderBuilder::new().connect_http(url);
+    let client = RpcClient::builder()
+        .layer(RetryBackoffLayer::new(5, 100, 200))
+        .connect(tx::MAINNET_RPC)
+        .await
+        .map_err(|error| format!("read-only RPC connection failed: {error}"))?;
+    let provider = ProviderBuilder::new().connect_client(client);
 
     for check in 1..=checks {
-        let (_, freshness) = build_caught_up_mainnet_snapshot(provider.clone(), 2).await?;
+        let (_, freshness) = build_caught_up_mainnet_snapshot(provider.clone(), vec![1], 2).await?;
         println!(
             "{}",
             serde_json::json!({
@@ -48,9 +49,7 @@ fn parse_args(args: &[String]) -> Result<(u8, u64), String> {
             .ok_or("arguments must be --key=value")?;
         match key {
             "checks" => checks = value.parse().map_err(|_| "invalid --checks")?,
-            "interval-ms" => {
-                interval_ms = value.parse().map_err(|_| "invalid --interval-ms")?
-            }
+            "interval-ms" => interval_ms = value.parse().map_err(|_| "invalid --interval-ms")?,
             _ => return Err(format!("unknown --{key}")),
         }
     }
