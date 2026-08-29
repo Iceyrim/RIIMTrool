@@ -36,6 +36,7 @@ struct Args {
     chain_nonce: u64,
     gas_limit: u64,
     max_snapshot_lag_blocks: u64,
+    max_actions: u32,
 }
 
 struct ExplicitEnablement;
@@ -160,12 +161,13 @@ async fn run() -> Result<(), String> {
         5071,
     )?;
     let worker = ExecutionWorker::open(backend, args.journal_path)?;
-    serve(worker, args.socket_path).await
+    serve(worker, args.socket_path, args.max_actions).await
 }
 
 async fn serve<B: riim_perpl_bridge::execution::ExecutionBackend>(
     worker: ExecutionWorker<B>,
     socket_path: PathBuf,
+    max_actions: u32,
 ) -> Result<(), String> {
     let listener = UnixListener::bind(&socket_path)
         .map_err(|error| format!("execution socket bind failed: {error}"))?;
@@ -179,7 +181,11 @@ async fn serve<B: riim_perpl_bridge::execution::ExecutionBackend>(
     drop(listener);
     let (reader, mut writer) = connection.into_split();
     let mut lines = BufReader::new(reader).lines();
+    let mut action_count = 0u32;
     while let Some(line) = lines.next_line().await.map_err(|error| error.to_string())? {
+        if action_count >= max_actions {
+            return Err("execution action cap exhausted".into());
+        }
         let intent = decode_execution_intent(&line)?;
         let (id, action_id) = identity(&intent);
         let before = worker.status().await.state;
@@ -218,6 +224,13 @@ async fn serve<B: riim_perpl_bridge::execution::ExecutionBackend>(
             .await
             .map_err(|error| error.to_string())?;
         writer.flush().await.map_err(|error| error.to_string())?;
+        action_count += 1;
+        if action_count == max_actions {
+            return match worker.status().await.state {
+                WorkerState::Idle => Ok(()),
+                _ => Err("execution action cap reached with unresolved worker state".into()),
+            };
+        }
     }
     match worker.status().await.state {
         WorkerState::Idle => Ok(()),
@@ -284,11 +297,14 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             .copied()
             .ok_or_else(|| format!("missing --{key}"))
     };
+    let execution_mode = required("execution-mode")?;
     if required("gate")? != "mainnet"
         || required("i-accept-mainnet-risk")? != "yes"
-        || required("execution-mode")? != "single-order"
+        || !matches!(execution_mode, "single-order" | "bounded-session")
     {
-        return Err("gated worker requires --gate=mainnet --i-accept-mainnet-risk=yes --execution-mode=single-order".into());
+        return Err(
+            "gated worker requires the exact mainnet gate and a supported execution mode".into(),
+        );
     }
     let known = [
         "gate",
@@ -301,6 +317,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         "chain-nonce",
         "gas-limit",
         "max-snapshot-lag-blocks",
+        "max-actions",
     ];
     if let Some(key) = map.keys().find(|key| !known.contains(key)) {
         return Err(format!("unknown --{key}"));
@@ -329,6 +346,18 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     if max_snapshot_lag_blocks == 0 || max_snapshot_lag_blocks > 5 {
         return Err("snapshot lag must be 1..5 blocks".into());
     }
+    let max_actions = match map.get("max-actions") {
+        Some(value) => value.parse().map_err(|_| "invalid --max-actions")?,
+        None if execution_mode == "single-order" => 2,
+        None => return Err("bounded session requires --max-actions".into()),
+    };
+    if max_actions == 0
+        || max_actions > 20
+        || max_actions % 2 != 0
+        || (execution_mode == "single-order" && max_actions != 2)
+    {
+        return Err("execution action cap must be an even value from 2 through 20".into());
+    }
     Ok(Args {
         signer,
         signer_key_file,
@@ -337,6 +366,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         chain_nonce,
         gas_limit,
         max_snapshot_lag_blocks,
+        max_actions,
     })
 }
 
@@ -383,5 +413,17 @@ mod tests {
         let mut a = valid();
         a[8] = "--gas-limit=1300001".into();
         assert!(parse_args(&a).is_err());
+    }
+
+    #[test]
+    fn bounded_sessions_require_an_even_action_cap() {
+        let mut args = valid();
+        args[2] = "--execution-mode=bounded-session".into();
+        assert!(parse_args(&args).is_err());
+        args.push("--max-actions=20".into());
+        assert_eq!(parse_args(&args).unwrap().max_actions, 20);
+        let last = args.len() - 1;
+        args[last] = "--max-actions=9".into();
+        assert!(parse_args(&args).is_err());
     }
 }
