@@ -85,14 +85,17 @@ where
         max_lag_blocks: u64,
         perpetual_id: u32,
     ) -> Result<SnapshotRefreshEvidence, String> {
-        let (refreshed, _) = build_caught_up_mainnet_snapshot(
+        let (refreshed, freshness) = build_caught_up_mainnet_snapshot(
             self.state_provider.clone(),
             vec![perpetual_id],
             max_lag_blocks,
         )
         .await?;
         *self.snapshot.write().await = refreshed;
-        Ok(SnapshotRefreshEvidence(()))
+        Ok(SnapshotRefreshEvidence {
+            snapshot_block: freshness.snapshot_block,
+            safe_block: freshness.safe_block,
+        })
     }
 
     async fn submit_place(&self, action: PreparedPlacement) -> Result<String, String> {
@@ -102,13 +105,7 @@ where
             .refresh_snapshot(policy.max_snapshot_lag_blocks, action.audit.perpetual_id)
             .await?;
         let snapshot = self.snapshot.read().await;
-        let current = self.current_safe_block().await?;
-        policy.validate(
-            refreshed,
-            pending,
-            current,
-            snapshot.instant().block_number(),
-        )?;
+        policy.validate(refreshed, pending, snapshot.instant().block_number())?;
         let receipt = tx::submit_exec_orders_receipt_mainnet(
             self.provider.clone(),
             self.attestation,
@@ -141,13 +138,7 @@ where
             .refresh_snapshot(policy.max_snapshot_lag_blocks, action.audit.perpetual_id)
             .await?;
         let snapshot = self.snapshot.read().await;
-        let current = self.current_safe_block().await?;
-        policy.validate(
-            refreshed,
-            pending,
-            current,
-            snapshot.instant().block_number(),
-        )?;
+        policy.validate(refreshed, pending, snapshot.instant().block_number())?;
         let receipt = tx::submit_exec_orders_receipt_mainnet(
             self.provider.clone(),
             self.attestation,
@@ -184,15 +175,6 @@ where
             .pending()
             .await
             .map_err(|error| format!("pending nonce refresh failed: {error}"))
-    }
-
-    async fn current_safe_block(&self) -> Result<u64, String> {
-        self.state_provider
-            .get_block(BlockId::safe())
-            .await
-            .map_err(|error| format!("safe block refresh failed: {error}"))?
-            .map(|block| block.header.number)
-            .ok_or_else(|| "safe block refresh returned no block".to_string())
     }
 }
 
@@ -344,7 +326,10 @@ where
 }
 
 /// Unforgeable outside this module: validation can only follow a successful refresh.
-struct SnapshotRefreshEvidence(());
+struct SnapshotRefreshEvidence {
+    snapshot_block: u64,
+    safe_block: u64,
+}
 
 struct PortPolicy {
     next_nonce: u64,
@@ -368,14 +353,14 @@ impl PortPolicy {
     }
     fn validate(
         &self,
-        _refreshed: SnapshotRefreshEvidence,
+        refreshed: SnapshotRefreshEvidence,
         pending_nonce: u64,
-        current_block: u64,
         snapshot_block: u64,
     ) -> Result<(), String> {
         tx::validate_pending_nonce(self.next_nonce, pending_nonce)?;
-        if current_block < snapshot_block
-            || current_block - snapshot_block > self.max_snapshot_lag_blocks
+        if refreshed.snapshot_block != snapshot_block
+            || refreshed.safe_block < refreshed.snapshot_block
+            || refreshed.safe_block - refreshed.snapshot_block > self.max_snapshot_lag_blocks
         {
             return Err("execution snapshot is stale or ahead of chain state".into());
         }
@@ -442,21 +427,49 @@ mod tests {
         let mut policy = PortPolicy::new(7, tx::MAINNET_MAX_GAS_LIMIT, 2).unwrap();
         assert!(
             policy
-                .validate(SnapshotRefreshEvidence(()), 8, 100, 100)
+                .validate(
+                    SnapshotRefreshEvidence {
+                        snapshot_block: 100,
+                        safe_block: 100,
+                    },
+                    8,
+                    100,
+                )
                 .is_err()
         );
         assert!(
             policy
-                .validate(SnapshotRefreshEvidence(()), 7, 100, 97)
+                .validate(
+                    SnapshotRefreshEvidence {
+                        snapshot_block: 97,
+                        safe_block: 100,
+                    },
+                    7,
+                    97,
+                )
                 .is_err()
         );
         assert!(
             policy
-                .validate(SnapshotRefreshEvidence(()), 7, 99, 100)
+                .validate(
+                    SnapshotRefreshEvidence {
+                        snapshot_block: 100,
+                        safe_block: 99,
+                    },
+                    7,
+                    100,
+                )
                 .is_err()
         );
         policy
-            .validate(SnapshotRefreshEvidence(()), 7, 100, 98)
+            .validate(
+                SnapshotRefreshEvidence {
+                    snapshot_block: 98,
+                    safe_block: 100,
+                },
+                7,
+                98,
+            )
             .unwrap();
         assert_eq!(policy.next_nonce, 7);
         policy.confirm().unwrap();
