@@ -27,7 +27,7 @@ export function estimatePerplRestingNotional(
     const mark = marks.get(market.symbol);
     if (!mark || !Number.isFinite(mark))
       throw new Error(`fresh mark unavailable for ${market.symbol}`);
-    return total + 2 * market.quoteLevels * market.orderSize.max * mark;
+    return total + (2 * market.quoteLevels * market.orderSize.max * mark) / (market.leverage ?? 1);
   }, 0);
 }
 

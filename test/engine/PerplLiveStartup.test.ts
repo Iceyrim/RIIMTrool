@@ -26,45 +26,13 @@ describe("Perpl Live startup gates", () => {
   });
 
   it("blocks ladders that exceed collateral or worker capacity", () => {
-    expect(() =>
-      assertPerplLiveCapacity({
-        availableBalance: 18,
-        lockedBalance: 0,
-        estimatedRestingNotional: 40,
-        configuredOpenOrders: 4,
-        workerOpenOrderCap: 4,
-      }),
-    ).toThrow(/insufficient/);
-    expect(() =>
-      assertPerplLiveCapacity({
-        availableBalance: 100,
-        lockedBalance: 0,
-        estimatedRestingNotional: 40,
-        configuredOpenOrders: 5,
-        workerOpenOrderCap: 4,
-      }),
-    ).toThrow(/open-order cap/);
-    expect(() =>
-      assertPerplLiveCapacity({
-        availableBalance: 100,
-        lockedBalance: 0,
-        estimatedRestingNotional: 40,
-        configuredOpenOrders: 4,
-        workerOpenOrderCap: 4,
-      }),
-    ).not.toThrow();
+    expect(() => assertPerplLiveCapacity({ availableBalance: 18, lockedBalance: 0, estimatedRestingNotional: 40, configuredOpenOrders: 4, workerOpenOrderCap: 4 })).toThrow(/insufficient/);
+    expect(() => assertPerplLiveCapacity({ availableBalance: 100, lockedBalance: 0, estimatedRestingNotional: 40, configuredOpenOrders: 5, workerOpenOrderCap: 4 })).toThrow(/open-order cap/);
+    expect(() => assertPerplLiveCapacity({ availableBalance: 100, lockedBalance: 0, estimatedRestingNotional: 40, configuredOpenOrders: 4, workerOpenOrderCap: 4 })).not.toThrow();
   });
 
   it("loads the production config and estimates both sides of every level", () => {
     const config = loadMarketsConfig(join(process.cwd(), "config/markets.perpl-live.yaml"));
-    expect(
-      estimatePerplRestingNotional(
-        config.markets,
-        new Map([
-          ["BTCUSD", 75_000],
-          ["ETHUSD", 2_500],
-        ]),
-      ),
-    ).toBeCloseTo(94, 8);
+    expect(estimatePerplRestingNotional(config.markets, new Map([["BTCUSD", 75_000], ["ETHUSD", 2_500]]))).toBeCloseTo(6.93, 2);
   });
 });

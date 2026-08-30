@@ -150,11 +150,16 @@ pub fn validate_execution_intent(intent: &ExecutionIntent) -> Result<(), String>
                 *perpetual_id,
                 action_id,
             )?;
+            let leverage_value = canonical_positive_decimal(leverage, "leverage")?;
+            let maximum_leverage = if market == "BTCUSD" { 15u8 } else { 12u8 };
             if !matches!(side.as_str(), "buy" | "sell")
                 || order_type != "postOnly"
-                || leverage != "1"
+                || leverage_value > UD128::from(maximum_leverage)
+                || leverage.contains('.')
             {
-                return Err("execution placement is not a one-leverage post-only order".into());
+                return Err(
+                    "execution placement violates the market leverage or post-only limit".into(),
+                );
             }
             let notional = canonical_positive_decimal(price, "price")?
                 * canonical_positive_decimal(size, "size")?;

@@ -162,7 +162,10 @@ async function main(): Promise<void> {
   console.log(`Positions: ${JSON.stringify(positions)}`);
   console.log(`Open orders: ${JSON.stringify(orders)}`);
   console.log(`Configured resting quotes: ${configuredOpenOrders}/${workerOpenOrderCap}`);
-  console.log(`Estimated 1x resting notional: $${estimatedRestingNotional.toFixed(2)}`);
+  console.log(
+    `Leverage: ${enabled.map((market) => `${market.symbol}=${market.leverage ?? 1}x`).join(", ")}`,
+  );
+  console.log(`Estimated initial collateral: $${estimatedRestingNotional.toFixed(2)}`);
   console.log(`Session equity-loss cap: $${config.accountRisk.sessionLossCapUsd}`);
   console.log(`Fill coverage begins at block: ${readonly.getFillCoverageStartBlock()}`);
   for (const market of enabled)
@@ -219,7 +222,13 @@ async function main(): Promise<void> {
     console.error(`[PERPL LIVE] HALT: ${reason}`);
     if (runner && !shuttingDown) void shutdown(reason);
   };
-  const liveAdapter = new PerplLiveAdapter(readonly, executor, requestShutdown, true);
+  const liveAdapter = new PerplLiveAdapter(
+    readonly,
+    executor,
+    requestShutdown,
+    true,
+    Object.fromEntries(enabled.map((market) => [market.symbol, market.leverage ?? 1])),
+  );
   const equityGuard = new PerplSessionEquityGuard(
     join(stateRoot, "equity.json"),
     config.accountRisk.sessionLossCapUsd,

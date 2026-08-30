@@ -16,6 +16,7 @@ export interface PerplCanaryExecutor {
     postOnly: true;
     reduceOnly: boolean;
     clientActionId: string;
+    leverage?: number;
   }): Promise<CanaryExecutionResult>;
   cancel(input: {
     market: string;

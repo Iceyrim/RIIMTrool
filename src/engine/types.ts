@@ -50,6 +50,7 @@ export interface ReduceOnlyExitConfig {
 
 export interface EngineMarketConfig {
   symbol: string;
+  leverage?: number;
   orderSize: { min: number; max: number };
   spreadBps: { normal: number; min: number; max: number };
   exitSpreadBps: number;

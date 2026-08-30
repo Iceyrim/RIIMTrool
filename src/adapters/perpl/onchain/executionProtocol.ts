@@ -25,7 +25,7 @@ export interface PerplPlaceIntent extends ExecutionEnvelope {
   price: string;
   size: string;
   reduceOnly: boolean;
-  leverage: "1";
+  leverage: string;
 }
 
 export interface PerplCancelIntent extends ExecutionEnvelope {
@@ -42,10 +42,12 @@ export type PerplExecutionOutcome =
 const forbidden = /(private.?key|secret|seed|mnemonic|wallet|signer|keystore|nonce)/i;
 
 export function assertNoExecutionSecrets(value: unknown, path = "intent"): void {
-  if (Array.isArray(value)) return value.forEach((item, index) => assertNoExecutionSecrets(item, `${path}[${index}]`));
+  if (Array.isArray(value))
+    return value.forEach((item, index) => assertNoExecutionSecrets(item, `${path}[${index}]`));
   if (!value || typeof value !== "object") return;
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-    if (forbidden.test(key)) throw new ExchangeAdapterError(`Forbidden execution input at ${path}.${key}`);
+    if (forbidden.test(key))
+      throw new ExchangeAdapterError(`Forbidden execution input at ${path}.${key}`);
     assertNoExecutionSecrets(item, `${path}.${key}`);
   }
 }
@@ -59,22 +61,32 @@ export function validateExecutionIntent(intent: PerplExecutionIntent): void {
     intent.accountId !== PERPL_MAINNET_ACCOUNT_ID ||
     !intent.id ||
     !intent.actionId ||
-    !((intent.market === "BTCUSD" && intent.perpetualId === 1) ||
-      (intent.market === "ETHUSD" && intent.perpetualId === 20))
-  ) throw new ExchangeAdapterError("Perpl execution intent identity is invalid");
+    !(
+      (intent.market === "BTCUSD" && intent.perpetualId === 1) ||
+      (intent.market === "ETHUSD" && intent.perpetualId === 20)
+    )
+  )
+    throw new ExchangeAdapterError("Perpl execution intent identity is invalid");
   if (intent.action === "place") {
     const price = Number(intent.price);
     const size = Number(intent.size);
     if (
       intent.orderType !== "postOnly" ||
-      intent.leverage !== "1" ||
+      !/^\d+$/.test(intent.leverage) ||
+      Number(intent.leverage) < 1 ||
+      Number(intent.leverage) > (intent.market === "BTCUSD" ? 15 : 12) ||
       !Number.isFinite(price) ||
       !Number.isFinite(size) ||
       price <= 0 ||
       size <= 0 ||
       price * size > 20
-    ) throw new ExchangeAdapterError("Perpl placement intent violates canary limits");
-  } else if (!intent.exchangeOrderId || !intent.placementActionId || intent.actionId === intent.placementActionId) {
+    )
+      throw new ExchangeAdapterError("Perpl placement intent violates canary limits");
+  } else if (
+    !intent.exchangeOrderId ||
+    !intent.placementActionId ||
+    intent.actionId === intent.placementActionId
+  ) {
     throw new ExchangeAdapterError("Perpl cancellation identity is invalid");
   }
 }
@@ -84,11 +96,13 @@ export function parseExecutionOutcome(
   expected: { id: string; actionId: string },
 ): PerplExecutionOutcome {
   assertNoExecutionSecrets(value);
-  if (!value || typeof value !== "object") throw new ExchangeAdapterError("Malformed Perpl execution outcome");
+  if (!value || typeof value !== "object")
+    throw new ExchangeAdapterError("Malformed Perpl execution outcome");
   const outcome = value as Record<string, unknown>;
-  const allowed = outcome.event === "confirmed"
-    ? ["version", "id", "event", "actionId", "exchangeOrderId"]
-    : ["version", "id", "event", "actionId", "reason"];
+  const allowed =
+    outcome.event === "confirmed"
+      ? ["version", "id", "event", "actionId", "exchangeOrderId"]
+      : ["version", "id", "event", "actionId", "reason"];
   if (Object.keys(outcome).some((key) => !allowed.includes(key)))
     throw new ExchangeAdapterError("Perpl execution outcome contains unknown fields");
   if (
@@ -96,7 +110,8 @@ export function parseExecutionOutcome(
     outcome.id !== expected.id ||
     outcome.actionId !== expected.actionId ||
     !["confirmed", "rejected", "ambiguous"].includes(String(outcome.event))
-  ) throw new ExchangeAdapterError("Perpl execution outcome identity is invalid");
+  )
+    throw new ExchangeAdapterError("Perpl execution outcome identity is invalid");
   if (outcome.event === "confirmed" ? !outcome.exchangeOrderId : !outcome.reason)
     throw new ExchangeAdapterError("Perpl execution outcome is incomplete");
   return outcome as unknown as PerplExecutionOutcome;

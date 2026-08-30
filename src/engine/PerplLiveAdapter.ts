@@ -36,6 +36,7 @@ export class PerplLiveAdapter implements ExchangeAdapter {
     private readonly executor: PerplCanaryExecutor,
     private readonly onAmbiguous: (reason: string) => void = () => undefined,
     private readonly alreadyConnected = false,
+    private readonly leverageByMarket: Readonly<Record<string, number>> = {},
   ) {}
 
   connect(): Promise<void> {
@@ -86,6 +87,13 @@ export class PerplLiveAdapter implements ExchangeAdapter {
         message: "Perpl Live permits post-only orders only",
       };
     const actionId = params.clientOrderId ?? numericActionId();
+    const leverage = this.leverageByMarket[params.market] ?? 1;
+    if (!Number.isSafeInteger(leverage) || leverage <= 0)
+      return {
+        success: false,
+        reason: "REJECTED",
+        message: `Perpl leverage is invalid for ${params.market}`,
+      };
     const result = await this.executor.place({
       market: params.market,
       side: params.side,
@@ -94,6 +102,7 @@ export class PerplLiveAdapter implements ExchangeAdapter {
       postOnly: true,
       reduceOnly: params.isReduceOnly,
       clientActionId: actionId,
+      leverage,
     });
     if (result.state !== "confirmed") {
       if (result.state === "ambiguous") this.onAmbiguous(result.reason);

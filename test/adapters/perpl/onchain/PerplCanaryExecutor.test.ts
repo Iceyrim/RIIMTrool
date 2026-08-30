@@ -22,13 +22,13 @@ describe("PerplCanaryExecutor", () => {
     const executor = new PerplCanaryExecutor(transport);
     await expect(executor.place({
       market: "BTCUSD", side: "buy", price: 77_000, size: 0.00018,
-      postOnly: true, reduceOnly: false, clientActionId: "place-1",
+      postOnly: true, reduceOnly: false, clientActionId: "place-1", leverage: 15,
     })).resolves.toEqual({ state: "confirmed", exchangeOrderId: "47" });
     await expect(executor.cancel({
       market: "BTCUSD", exchangeOrderId: "47", clientActionId: "cancel-1",
     })).resolves.toEqual({ state: "confirmed", exchangeOrderId: "47" });
     expect(transport.requests).toMatchObject([
-      { action: "place", chainId: 143, accountId: 5071, perpetualId: 1, orderType: "postOnly" },
+      { action: "place", chainId: 143, accountId: 5071, perpetualId: 1, orderType: "postOnly", leverage: "15" },
       { action: "cancel", exchangeOrderId: "47", placementActionId: "place-1" },
     ]);
   });
@@ -49,6 +49,8 @@ describe("PerplCanaryExecutor", () => {
     expect(() => validateExecutionIntent({ ...base, signerKey: "forbidden" } as never)).toThrow(/Forbidden/);
     expect(() => validateExecutionIntent({ ...base, size: "1" })).toThrow(/limits/);
     expect(() => validateExecutionIntent({ ...base, perpetualId: 20 } as never)).toThrow(/identity/);
+    expect(() => validateExecutionIntent({ ...base, leverage: "16" })).toThrow(/limits/);
+    expect(() => validateExecutionIntent({ ...base, market: "ETHUSD", perpetualId: 20, leverage: "13" })).toThrow(/limits/);
   });
 
   it("fails closed on unknown or mismatched outcome fields", async () => {

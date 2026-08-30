@@ -48,6 +48,8 @@ export const marketConfigSchema = z
     exchange: z.enum(["n1", "stub", "risex", "perpl"]),
     exchangeSymbol: z.string().min(1),
     enabled: z.boolean(),
+    /** Explicit order leverage. Defaults to 1 for existing N1/RiseX configurations. */
+    leverage: z.number().int().positive().max(100).optional(),
     orderSize: orderSizeSchema,
     spreadBps: spreadBpsSchema,
     exitSpreadBps: z.number().positive(),
@@ -62,7 +64,9 @@ export const marketConfigSchema = z
     quoteRepriceThresholdBps: z.number().positive().default(1),
     quoteMaximumLifetimeMs: z.number().int().nonnegative().default(120_000),
   })
-  .strict("Unknown market configuration key (sessionLossCapUsd is now accountRisk.sessionLossCapUsd)")
+  .strict(
+    "Unknown market configuration key (sessionLossCapUsd is now accountRisk.sessionLossCapUsd)",
+  )
   .refine((m) => m.levelSpacingBps.length === m.quoteLevels, {
     message: "levelSpacingBps length must match quoteLevels",
     path: ["levelSpacingBps"],

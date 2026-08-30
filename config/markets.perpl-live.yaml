@@ -5,6 +5,7 @@ markets:
     exchange: perpl
     exchangeSymbol: BTC
     enabled: true
+    leverage: 15
     orderSize: { min: 0.00018, max: 0.00018 }
     spreadBps: { normal: 5, min: 4, max: 7.5 }
     exitSpreadBps: 2.5
@@ -26,6 +27,7 @@ markets:
     exchange: perpl
     exchangeSymbol: ETH
     enabled: true
+    leverage: 12
     orderSize: { min: 0.004, max: 0.004 }
     spreadBps: { normal: 5, min: 4, max: 7.5 }
     exitSpreadBps: 2.5

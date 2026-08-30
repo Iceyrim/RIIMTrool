@@ -66,6 +66,14 @@ fn rejects_testnet_custom_signer_and_prepare_fields() {
 fn validates_unwired_mainnet_execution_intents_without_adding_them_to_bridge_requests() {
     let place = r#"{"version":1,"id":"x","action":"place","chainId":143,"exchange":"0x34b6552d57a35a1d042ccae1951bd1c370112a6f","accountId":5071,"market":"BTCUSD","perpetualId":1,"actionId":"place-1","side":"buy","orderType":"postOnly","price":"77000","size":"0.00018","reduceOnly":false,"leverage":"1"}"#;
     decode_execution_intent(place).unwrap();
+    decode_execution_intent(&place.replace(r#""leverage":"1""#, r#""leverage":"15""#)).unwrap();
+    let eth = place
+        .replace(
+            r#""market":"BTCUSD","perpetualId":1"#,
+            r#""market":"ETHUSD","perpetualId":20"#,
+        )
+        .replace(r#""leverage":"1""#, r#""leverage":"12""#);
+    decode_execution_intent(&eth).unwrap();
     assert!(decode(place).is_err());
     let cancel = r#"{"version":1,"id":"y","action":"cancel","chainId":143,"exchange":"0x34b6552d57a35a1d042ccae1951bd1c370112a6f","accountId":5071,"market":"ETHUSD","perpetualId":20,"actionId":"cancel-1","exchangeOrderId":"47","placementActionId":"place-1"}"#;
     decode_execution_intent(cancel).unwrap();
@@ -78,6 +86,8 @@ fn rejects_unsafe_or_unpinned_execution_intents() {
         r#"{"version":1,"id":"x","action":"place","chainId":143,"exchange":"0x34b6552d57a35a1d042ccae1951bd1c370112a6f","accountId":5071,"market":"BTCUSD","perpetualId":1,"actionId":"place-1","side":"buy","orderType":"postOnly","price":"77000","size":"1","reduceOnly":false,"leverage":"1"}"#,
         r#"{"version":1,"id":"x","action":"place","chainId":143,"exchange":"0x34b6552d57a35a1d042ccae1951bd1c370112a6f","accountId":5071,"market":"BTCUSD","perpetualId":20,"actionId":"place-1","side":"buy","orderType":"postOnly","price":"77000","size":"0.00018","reduceOnly":false,"leverage":"1"}"#,
         r#"{"version":1,"id":"x","action":"place","chainId":143,"exchange":"0x34b6552d57a35a1d042ccae1951bd1c370112a6f","accountId":5071,"market":"BTCUSD","perpetualId":1,"actionId":"place-1","side":"buy","orderType":"postOnly","price":"77000","size":"0.00018","reduceOnly":false,"leverage":"1","signerKey":"forbidden"}"#,
+        r#"{"version":1,"id":"x","action":"place","chainId":143,"exchange":"0x34b6552d57a35a1d042ccae1951bd1c370112a6f","accountId":5071,"market":"BTCUSD","perpetualId":1,"actionId":"place-1","side":"buy","orderType":"postOnly","price":"77000","size":"0.00018","reduceOnly":false,"leverage":"16"}"#,
+        r#"{"version":1,"id":"x","action":"place","chainId":143,"exchange":"0x34b6552d57a35a1d042ccae1951bd1c370112a6f","accountId":5071,"market":"ETHUSD","perpetualId":20,"actionId":"place-1","side":"buy","orderType":"postOnly","price":"2500","size":"0.004","reduceOnly":false,"leverage":"13"}"#,
         r#"{"version":1,"id":"y","action":"cancel","chainId":143,"exchange":"0x34b6552d57a35a1d042ccae1951bd1c370112a6f","accountId":5071,"market":"BTCUSD","perpetualId":1,"actionId":"same","exchangeOrderId":"47","placementActionId":"same"}"#,
     ];
     for value in unsafe_cases {
