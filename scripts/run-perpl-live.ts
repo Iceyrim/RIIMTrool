@@ -83,13 +83,19 @@ async function waitForSocket(path: string, worker: ChildProcess): Promise<void> 
 }
 
 async function main(): Promise<void> {
-  requirePerplLiveCliFlag(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  const preflightOnly = argv.includes("--preflight-only");
+  const unknownArgs = argv.filter(
+    (argument) =>
+      argument !== "--preflight-only" && argument !== "--i-understand-this-places-real-orders",
+  );
+  if (unknownArgs.length) throw new Error(`Unknown argument: ${unknownArgs[0]}`);
+  if (!preflightOnly) requirePerplLiveCliFlag(argv);
   const stateRoot = resolve("state/perpl-live");
   mkdirSync(stateRoot, { recursive: true });
-  consumePerplLiveArmFile(join(stateRoot, "ARMED"));
+  if (!preflightOnly) consumePerplLiveArmFile(join(stateRoot, "ARMED"));
 
   const signer = requiredEnv("PERPL_SIGNER_ADDRESS");
-  const signerKeyFile = requiredEnv("PERPL_SIGNER_KEY_FILE");
   if (!/^0x[0-9a-fA-F]{40}$/.test(signer)) throw new Error("PERPL_SIGNER_ADDRESS is invalid");
   const configPath =
     process.env.PERPL_MARKETS_CONFIG_PATH ?? resolve("config/markets.perpl-live.yaml");
@@ -118,10 +124,6 @@ async function main(): Promise<void> {
   const account = readonly.getAccountEvidence();
   const positions = enabled.flatMap((market) => readonly.getPositions(market.symbol));
   const orders = enabled.flatMap((market) => readonly.getOpenOrders(market.symbol));
-  if (positions.some((position) => position.baseSize !== 0))
-    throw new Error("Perpl Live startup requires flat configured markets");
-  if (orders.length)
-    throw new Error("Perpl Live startup requires no existing configured-market orders");
   const marks = new Map(
     await Promise.all(
       enabled.map(
@@ -136,13 +138,21 @@ async function main(): Promise<void> {
     0,
   );
   const estimatedRestingNotional = estimatePerplRestingNotional(enabled, marks);
-  assertPerplLiveCapacity({
-    availableBalance: Number(account.availableBalance),
-    lockedBalance: Number(account.lockedBalance),
-    estimatedRestingNotional,
-    configuredOpenOrders,
-    workerOpenOrderCap,
-  });
+  const blockers: string[] = [];
+  if (positions.some((position) => position.baseSize !== 0))
+    blockers.push("startup requires flat configured markets");
+  if (orders.length) blockers.push("startup requires no existing configured-market orders");
+  try {
+    assertPerplLiveCapacity({
+      availableBalance: Number(account.availableBalance),
+      lockedBalance: Number(account.lockedBalance),
+      estimatedRestingNotional,
+      configuredOpenOrders,
+      workerOpenOrderCap,
+    });
+  } catch (error) {
+    blockers.push(error instanceof Error ? error.message : String(error));
+  }
 
   console.log("\n=== [PERPL LIVE] Pre-flight account snapshot ===");
   console.log(`Markets: ${enabled.map((m) => m.symbol).join(", ")}`);
@@ -159,8 +169,20 @@ async function main(): Promise<void> {
     console.log(
       `Book [${market.symbol}]: ${JSON.stringify(readonly.getBookEvidence(market.symbol))}`,
     );
+  console.log(`Preflight status: ${blockers.length ? "BLOCKED" : "READY"}`);
+  for (const blocker of blockers) console.log(`Blocker: ${blocker}`);
+
+  if (preflightOnly) {
+    await readonly.disconnect();
+    console.log(
+      "[PERPL LIVE] Read-only preflight complete; no signer was opened and no transaction was submitted.",
+    );
+    return;
+  }
+  if (blockers.length) throw new Error("Perpl Live preflight is blocked");
 
   await confirm(`CONFIRM LIVE PERPL ${enabled.map((m) => m.symbol).join(",")}`);
+  const signerKeyFile = requiredEnv("PERPL_SIGNER_KEY_FILE");
 
   const socketPath = "/tmp/perpl-live.sock";
   if (existsSync(socketPath)) throw new Error(`execution socket already exists: ${socketPath}`);
