@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DryRunPlan } from "../../src/engine/MarketMakingDryRun.js";
 import {
+  boundedActionId,
   buildBoundedWorkerInvocation,
   parseBoundedSessionArgs,
   requirePassivePlan,
@@ -26,6 +27,15 @@ describe("bounded Perpl session", () => {
     expect(invocation.argv).toContain("--max-actions=20");
     expect(invocation.argv).toContain("--chain-nonce=15");
     expect(invocation.state).toContain("202608290401");
+  });
+
+  it("derives distinct numeric u64 action identities", () => {
+    const place = boundedActionId("202608290601", 1, "place");
+    const cancel = boundedActionId("202608290601", 2, "cancel");
+    const cleanup = boundedActionId("202608290601", 99, "cleanup");
+    expect([place, cancel, cleanup].every((id) => /^\d+$/.test(id))).toBe(true);
+    expect(new Set([place, cancel, cleanup]).size).toBe(3);
+    expect(BigInt(cleanup)).toBeLessThanOrEqual(18_446_744_073_709_551_615n);
   });
 
   it.each([

@@ -62,7 +62,7 @@ export function parseBoundedSessionArgs(argv: string[]): BoundedSessionArgs {
   const chainNonce = Number(get("chain-nonce"));
   const maxNotionalUsd = Number(get("max-notional-usd"));
   if (!/^0x[0-9a-fA-F]{40}$/.test(signer)) throw new Error("invalid signer address");
-  if (!/^\d{10,20}$/.test(sessionId)) throw new Error("invalid session id");
+  if (!/^\d{10,16}$/.test(sessionId)) throw new Error("invalid session id");
   if (!/^(BTCUSD|ETHUSD)$/.test(market)) throw new Error("invalid market");
   if (!Number.isSafeInteger(cycles) || cycles < 2 || cycles > 20 || cycles % 2 !== 0)
     throw new Error("cycles must be an even value from 2 through 20");
@@ -81,6 +81,20 @@ export function parseBoundedSessionArgs(argv: string[]): BoundedSessionArgs {
     chainNonce,
     maxNotionalUsd,
   };
+}
+
+export function boundedActionId(
+  sessionId: string,
+  cycle: number,
+  action: "place" | "cancel" | "cleanup",
+): string {
+  if (!/^\d{10,16}$/.test(sessionId) || !Number.isSafeInteger(cycle) || cycle < 1 || cycle > 99)
+    throw new Error("bounded action identity input is invalid");
+  const suffix = action === "place" ? "1" : action === "cancel" ? "2" : "3";
+  const id = `${sessionId}${String(cycle).padStart(2, "0")}${suffix}`;
+  if (BigInt(id) > 18_446_744_073_709_551_615n)
+    throw new Error("bounded action identity exceeds u64");
+  return id;
 }
 
 export function buildBoundedWorkerInvocation(args: BoundedSessionArgs) {
@@ -203,6 +217,7 @@ async function main(): Promise<void> {
     controller,
     args.market,
     args.sessionId,
+    (cycle, action) => boundedActionId(args.sessionId, cycle, action),
   );
   let stopRequested = false;
   const requestStop = () => {
@@ -252,7 +267,7 @@ async function main(): Promise<void> {
     const status = controller.status();
     if (status.state === "resting") {
       try {
-        await controller.cancelActive(`${args.sessionId}-shutdown-cancel`);
+        await controller.cancelActive(boundedActionId(args.sessionId, 99, "cleanup"));
         if (controller.status().state === "idle") confirmedActions += 1;
       } catch (error) {
         failure = failure ?? error;

@@ -106,4 +106,24 @@ describe("PerplAutomationSessionOrchestrator", () => {
     await expect(orchestrator.step(plan(), 2)).rejects.toThrow(/cycles/);
     expect(executor.calls).toEqual([]);
   });
+
+  it("uses an injected protocol-safe action identity factory", async () => {
+    const executor = new FakeExecutor();
+    const controller = new PerplMainnetCanaryController(executor, {
+      market: "BTCUSD",
+      journalPath: join(mkdtempSync(join(tmpdir(), "perpl-numeric-actions-")), "journal.json"),
+      now: () => 1_000,
+    });
+    const orchestrator = new PerplAutomationSessionOrchestrator(
+      controller,
+      "BTCUSD",
+      "offline-session",
+      (cycle, action) => `${cycle}${action === "place" ? "1" : "2"}`,
+    );
+    await orchestrator.step(plan(), 1);
+    await orchestrator.step(plan(), 2);
+    expect(
+      executor.calls.map((call) => (call.input as { clientActionId: string }).clientActionId),
+    ).toEqual(["11", "22"]);
+  });
 });

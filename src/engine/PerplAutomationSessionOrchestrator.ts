@@ -11,6 +11,12 @@ export interface PerplAutomationStepResult {
   controller: PerplCanaryJournal;
 }
 
+export type PerplAutomationActionKind = "place" | "cancel" | "cleanup";
+export type PerplAutomationActionIdFactory = (
+  cycle: number,
+  action: PerplAutomationActionKind,
+) => string;
+
 /**
  * Offline-only automation rehearsal coordinator. It deliberately performs at most one injected
  * executor action per cycle and has no production construction path. Unsafe plans trigger cleanup
@@ -23,6 +29,8 @@ export class PerplAutomationSessionOrchestrator {
     private readonly controller: PerplMainnetCanaryController,
     private readonly market: string,
     private readonly sessionId: string,
+    private readonly actionIdFactory: PerplAutomationActionIdFactory = (cycle, action) =>
+      `${sessionId}-${cycle}-${action}`,
   ) {
     if (!sessionId || !/^[A-Za-z0-9_-]+$/.test(sessionId)) {
       throw new Error("Perpl automation rehearsal session id is invalid");
@@ -43,9 +51,7 @@ export class PerplAutomationSessionOrchestrator {
 
     const blocker = this.blocker(plan);
     if (before.state === "resting") {
-      await this.controller.cancelActive(
-        `${this.sessionId}-${cycle}-${blocker ? "safety-cleanup" : "requote-cancel"}`,
-      );
+      await this.controller.cancelActive(this.actionId(cycle, blocker ? "cleanup" : "cancel"));
       const after = this.controller.status();
       if (after.state === "halted") return this.result(cycle, "halted", after.reason);
       return this.result(cycle, blocker ? "cleaned_after_halt" : "cancelled_for_requote", blocker);
@@ -58,10 +64,16 @@ export class PerplAutomationSessionOrchestrator {
 
     const proposalIndex = plan.proposals.findIndex((proposal) => proposal.allowed);
     if (proposalIndex < 0) return this.result(cycle, "blocked", "plan has no allowed proposal");
-    await this.controller.placeOne(plan, proposalIndex, `${this.sessionId}-${cycle}-place`);
+    await this.controller.placeOne(plan, proposalIndex, this.actionId(cycle, "place"));
     const after = this.controller.status();
     if (after.state === "halted") return this.result(cycle, "halted", after.reason);
     return this.result(cycle, "placed");
+  }
+
+  private actionId(cycle: number, action: PerplAutomationActionKind): string {
+    const id = this.actionIdFactory(cycle, action);
+    if (!id || id.length > 64) throw new Error("Perpl automation action id is invalid");
+    return id;
   }
 
   private blocker(plan: DryRunPlan): string | undefined {
