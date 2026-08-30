@@ -15,6 +15,7 @@ use riim_perpl_bridge::{
     execution::{ExecutionWorker, WorkerState},
     execution_backend::{ExecutionEnablement, MainnetExecutionBackend},
     execution_port::{SdkMainnetTransactionPort, SdkMainnetTransactionPortConfig},
+    multi_execution::MultiOrderExecutionWorker,
     protocol::{
         ExecutionIntent, MAINNET_CHAIN_ID, MAINNET_EXCHANGE, VERSION, decode_execution_intent,
     },
@@ -36,7 +37,9 @@ struct Args {
     chain_nonce: u64,
     gas_limit: u64,
     max_snapshot_lag_blocks: u64,
-    max_actions: u32,
+    execution_mode: String,
+    max_actions: Option<u32>,
+    max_open_orders: usize,
 }
 
 struct ExplicitEnablement;
@@ -160,11 +163,22 @@ async fn run() -> Result<(), String> {
         MAINNET_EXCHANGE,
         5071,
     )?;
-    let worker = ExecutionWorker::open(backend, args.journal_path)?;
-    serve(worker, args.socket_path, args.max_actions).await
+    if args.execution_mode == "live-session" {
+        let worker =
+            MultiOrderExecutionWorker::open(backend, args.journal_path, args.max_open_orders)?;
+        serve_multi(worker, args.socket_path).await
+    } else {
+        let worker = ExecutionWorker::open(backend, args.journal_path)?;
+        serve_single(
+            worker,
+            args.socket_path,
+            args.max_actions.expect("non-live mode has an action cap"),
+        )
+        .await
+    }
 }
 
-async fn serve<B: riim_perpl_bridge::execution::ExecutionBackend>(
+async fn serve_single<B: riim_perpl_bridge::execution::ExecutionBackend>(
     worker: ExecutionWorker<B>,
     socket_path: PathBuf,
     max_actions: u32,
@@ -238,6 +252,66 @@ async fn serve<B: riim_perpl_bridge::execution::ExecutionBackend>(
     }
 }
 
+async fn serve_multi<B: riim_perpl_bridge::execution::ExecutionBackend>(
+    worker: MultiOrderExecutionWorker<B>,
+    socket_path: PathBuf,
+) -> Result<(), String> {
+    let listener = UnixListener::bind(&socket_path)
+        .map_err(|error| format!("execution socket bind failed: {error}"))?;
+    let _socket_guard = SocketGuard(socket_path.clone());
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("execution socket permissions failed: {error}"))?;
+    let (connection, _) = listener
+        .accept()
+        .await
+        .map_err(|error| format!("execution socket accept failed: {error}"))?;
+    drop(listener);
+    let (reader, mut writer) = connection.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    while let Some(line) = lines.next_line().await.map_err(|error| error.to_string())? {
+        let intent = decode_execution_intent(&line)?;
+        let (id, action_id) = identity(&intent);
+        let result = match &intent {
+            ExecutionIntent::Place { .. } => worker.place(&intent).await,
+            ExecutionIntent::Cancel { .. } => worker.cancel(&intent).await,
+        };
+        let status = worker.status().await;
+        let outcome = match result {
+            Ok(exchange_order_id) => Outcome::Confirmed {
+                version: VERSION,
+                id,
+                action_id,
+                exchange_order_id,
+            },
+            Err(reason) if status.halted_reason.is_some() => Outcome::Ambiguous {
+                version: VERSION,
+                id,
+                action_id,
+                reason: status.halted_reason.unwrap_or(reason),
+            },
+            Err(reason) => Outcome::Rejected {
+                version: VERSION,
+                id,
+                action_id,
+                reason,
+            },
+        };
+        let mut bytes = serde_json::to_vec(&outcome).map_err(|error| error.to_string())?;
+        bytes.push(b'\n');
+        writer
+            .write_all(&bytes)
+            .await
+            .map_err(|error| error.to_string())?;
+        writer.flush().await.map_err(|error| error.to_string())?;
+    }
+    let status = worker.status().await;
+    if status.is_idle() {
+        Ok(())
+    } else {
+        Err("execution client disconnected with unresolved multi-order state".into())
+    }
+}
+
 fn map_state(
     state: WorkerState,
     id: String,
@@ -300,7 +374,10 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     let execution_mode = required("execution-mode")?;
     if required("gate")? != "mainnet"
         || required("i-accept-mainnet-risk")? != "yes"
-        || !matches!(execution_mode, "single-order" | "bounded-session")
+        || !matches!(
+            execution_mode,
+            "single-order" | "bounded-session" | "live-session"
+        )
     {
         return Err(
             "gated worker requires the exact mainnet gate and a supported execution mode".into(),
@@ -318,6 +395,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         "gas-limit",
         "max-snapshot-lag-blocks",
         "max-actions",
+        "max-open-orders",
     ];
     if let Some(key) = map.keys().find(|key| !known.contains(key)) {
         return Err(format!("unknown --{key}"));
@@ -346,17 +424,38 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     if max_snapshot_lag_blocks == 0 || max_snapshot_lag_blocks > 5 {
         return Err("snapshot lag must be 1..5 blocks".into());
     }
-    let max_actions = match map.get("max-actions") {
-        Some(value) => value.parse().map_err(|_| "invalid --max-actions")?,
-        None if execution_mode == "single-order" => 2,
-        None => return Err("bounded session requires --max-actions".into()),
+    let max_actions = match (execution_mode, map.get("max-actions")) {
+        ("single-order", None) => Some(2),
+        ("single-order" | "bounded-session", Some(value)) => {
+            Some(value.parse().map_err(|_| "invalid --max-actions")?)
+        }
+        ("bounded-session", None) => return Err("bounded session requires --max-actions".into()),
+        ("live-session", None) => None,
+        ("live-session", Some(_)) => {
+            return Err("live session does not accept --max-actions".into());
+        }
+        _ => unreachable!(),
     };
-    if max_actions == 0
-        || max_actions > 20
-        || max_actions % 2 != 0
-        || (execution_mode == "single-order" && max_actions != 2)
+    if let Some(max_actions) = max_actions
+        && (max_actions == 0
+            || max_actions > 20
+            || max_actions % 2 != 0
+            || (execution_mode == "single-order" && max_actions != 2))
     {
         return Err("execution action cap must be an even value from 2 through 20".into());
+    }
+    let max_open_orders = match map.get("max-open-orders") {
+        Some(value) => value.parse().map_err(|_| "invalid --max-open-orders")?,
+        None if execution_mode == "live-session" => {
+            return Err("live session requires --max-open-orders".into());
+        }
+        None => 1,
+    };
+    if max_open_orders == 0
+        || max_open_orders > 12
+        || (execution_mode != "live-session" && max_open_orders != 1)
+    {
+        return Err("execution open-order cap is invalid".into());
     }
     Ok(Args {
         signer,
@@ -366,7 +465,9 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         chain_nonce,
         gas_limit,
         max_snapshot_lag_blocks,
+        execution_mode: execution_mode.into(),
         max_actions,
+        max_open_orders,
     })
 }
 
@@ -421,9 +522,22 @@ mod tests {
         args[2] = "--execution-mode=bounded-session".into();
         assert!(parse_args(&args).is_err());
         args.push("--max-actions=20".into());
-        assert_eq!(parse_args(&args).unwrap().max_actions, 20);
+        assert_eq!(parse_args(&args).unwrap().max_actions, Some(20));
         let last = args.len() - 1;
         args[last] = "--max-actions=9".into();
+        assert!(parse_args(&args).is_err());
+    }
+
+    #[test]
+    fn live_sessions_require_a_bounded_open_order_capacity_and_no_action_cap() {
+        let mut args = valid();
+        args[2] = "--execution-mode=live-session".into();
+        assert!(parse_args(&args).is_err());
+        args.push("--max-open-orders=4".into());
+        let parsed = parse_args(&args).unwrap();
+        assert_eq!(parsed.max_open_orders, 4);
+        assert_eq!(parsed.max_actions, None);
+        args.push("--max-actions=20".into());
         assert!(parse_args(&args).is_err());
     }
 }

@@ -1,0 +1,120 @@
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import type { PerplCanaryExecutor } from "../../src/adapters/perpl/onchain/PerplCanaryExecutor.js";
+import type { PerplOnchainAdapter } from "../../src/adapters/perpl/onchain/PerplOnchainAdapter.js";
+import { PerplEquityPnlSource } from "../../src/engine/PerplEquityPnlSource.js";
+import { PerplLiveAdapter } from "../../src/engine/PerplLiveAdapter.js";
+import {
+  PerplSessionEquityGuard,
+  type PerplEquityEvidence,
+} from "../../src/engine/PerplSessionEquityGuard.js";
+
+function readonly(evidence: PerplEquityEvidence) {
+  return {
+    connect: vi.fn(async () => undefined),
+    disconnect: vi.fn(async () => undefined),
+    refreshAccountState: vi.fn(async () => undefined),
+    getPositions: vi.fn(() => []),
+    getOpenOrders: vi.fn(() => []),
+    getBalances: vi.fn(() => [{ token: "AUSD", amount: 20 }]),
+    getAccountEvidence: vi.fn(() => ({
+      balance: evidence.balance,
+      lockedBalance: evidence.lockedBalance,
+      availableBalance: evidence.balance,
+      unrealizedPnl: evidence.unrealizedPnl,
+      positionDeposit: evidence.positionDeposit,
+      maintenanceRequirement: "0",
+      frozen: evidence.frozen,
+    })),
+    getSessionEquityEvidence: vi.fn(() => evidence),
+    getPositionSafetyEvidence: vi.fn(() => []),
+    getBookEvidence: vi.fn(() => ({ bestBid: 99, bestAsk: 101 })),
+    getFillCoverageStartBlock: vi.fn(() => "1"),
+    getOrderFills: vi.fn(async () => []),
+    getMarketPrice: vi.fn(async () => ({ market: "BTCUSD", mark: 100 })),
+    getAccountVolume: vi.fn(async () => []),
+  } as unknown as PerplOnchainAdapter;
+}
+
+describe("PerplLiveAdapter", () => {
+  it("maps confirmed placement and exact cancellation through the isolated executor", async () => {
+    const evidence: PerplEquityEvidence = {
+      balance: "20",
+      lockedBalance: "0",
+      positionDeposit: "0",
+      unrealizedPnl: "0",
+      frozen: false,
+      blockNumber: "1",
+      observedAt: Date.now(),
+    };
+    const executor = {
+      place: vi.fn(async () => ({ state: "confirmed", exchangeOrderId: "42" })),
+      cancel: vi.fn(async () => ({ state: "confirmed", exchangeOrderId: "42" })),
+    } as unknown as PerplCanaryExecutor;
+    const adapter = new PerplLiveAdapter(readonly(evidence), executor);
+    const placed = await adapter.placeOrder({
+      market: "BTCUSD",
+      side: "buy",
+      type: "postOnly",
+      size: 0.001,
+      price: 100,
+      isReduceOnly: false,
+      clientOrderId: "123",
+    });
+    expect(placed.success && placed.order.exchangeOrderId).toBe("42");
+    expect((await adapter.cancelOrder("42", "BTCUSD")).success).toBe(true);
+  });
+
+  it("permanently signals an ambiguous execution outcome", async () => {
+    const evidence: PerplEquityEvidence = {
+      balance: "20",
+      lockedBalance: "0",
+      positionDeposit: "0",
+      unrealizedPnl: "0",
+      frozen: false,
+      blockNumber: "1",
+      observedAt: Date.now(),
+    };
+    const halt = vi.fn();
+    const executor = {
+      place: vi.fn(async () => ({ state: "ambiguous", reason: "receipt unknown" })),
+    } as unknown as PerplCanaryExecutor;
+    const result = await new PerplLiveAdapter(readonly(evidence), executor, halt).placeOrder({
+      market: "BTCUSD",
+      side: "buy",
+      type: "postOnly",
+      size: 0.001,
+      price: 100,
+      isReduceOnly: false,
+    });
+    expect(result).toMatchObject({ success: false, reason: "UNRESOLVED_NOT_CONFIRMED" });
+    expect(halt).toHaveBeenCalledWith("receipt unknown");
+  });
+
+  it("turns equity declines into conservative account loss and halts at the cap", async () => {
+    let evidence: PerplEquityEvidence = {
+      balance: "20",
+      lockedBalance: "0",
+      positionDeposit: "0",
+      unrealizedPnl: "0",
+      frozen: false,
+      blockNumber: "1",
+      observedAt: Date.now(),
+    };
+    const sourceAdapter = readonly(evidence);
+    vi.mocked(sourceAdapter.getSessionEquityEvidence).mockImplementation(() => evidence);
+    const adapter = new PerplLiveAdapter(sourceAdapter, {} as PerplCanaryExecutor);
+    const halt = vi.fn();
+    const guard = new PerplSessionEquityGuard(
+      join("/tmp", `perpl-live-equity-${process.pid}-${Date.now()}.json`),
+      3,
+    );
+    const source = new PerplEquityPnlSource(adapter, guard, halt);
+    source.arm();
+    evidence = { ...evidence, balance: "19", blockNumber: "2", observedAt: Date.now() };
+    expect(await source.drainRealizedPnlDeltaUsd()).toBe(-1);
+    evidence = { ...evidence, balance: "16", blockNumber: "3", observedAt: Date.now() };
+    await expect(source.drainRealizedPnlDeltaUsd()).rejects.toThrow(/loss limit/);
+    expect(halt).toHaveBeenCalled();
+  });
+});
