@@ -43,6 +43,12 @@ describe("PerplApiExecutionTransport", () => {
     await connecting;
 
     expect(socket.sent[0]).toMatchObject({ mt: 29, chain_id: 143, api_key: "opaque-token" });
+    expect(transport.getConnectionEvidence()).toEqual({
+      chainId: 143,
+      accountId: 5071,
+      walletAddress: "0xa89bC210BaB1156113571F2a9193c5282efBF78a",
+      lastForwardedRequestId: 100,
+    });
     const outcomePromise = transport.request(intent);
     await Promise.resolve();
     const order = socket.sent[1]!;

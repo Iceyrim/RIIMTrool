@@ -34,6 +34,13 @@ export interface PerplApiExecutionOptions {
   marketScales?: Readonly<Record<"BTCUSD" | "ETHUSD", MarketScale>>;
 }
 
+export interface PerplApiConnectionEvidence {
+  chainId: number;
+  accountId: number;
+  walletAddress: string;
+  lastForwardedRequestId: number;
+}
+
 const OPEN = 1;
 
 function scaled(value: string, decimals: number, field: string): number {
@@ -65,6 +72,7 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
   private connecting?: Promise<void>;
   private ready = false;
   private pending = new Map<number, PendingRequest>();
+  private connectionEvidence?: PerplApiConnectionEvidence;
 
   constructor(options: PerplApiExecutionOptions) {
     this.accountId = options.accountId ?? 5071;
@@ -102,6 +110,12 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
             const account = accounts.find((item) => item.id === this.accountId);
             if (!account) throw new ExchangeAdapterError(`Perpl API wallet snapshot omitted account ${this.accountId}`);
             this.protocol.acceptWalletSnapshot(frame.sn, accounts);
+            this.connectionEvidence = {
+              chainId: this.chainId,
+              accountId: account.id,
+              walletAddress: frame.addr,
+              lastForwardedRequestId: account.lfr,
+            };
             this.ready = true;
             clearTimeout(timer);
             resolve();
@@ -149,11 +163,18 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
     });
   }
 
+  getConnectionEvidence(): PerplApiConnectionEvidence {
+    if (!this.ready || !this.connectionEvidence)
+      throw new ExchangeAdapterError("Perpl API connection evidence is unavailable");
+    return { ...this.connectionEvidence };
+  }
+
   close(): void {
     this.failAll("Perpl API transport closed before definitive order outcome");
     this.socket?.close();
     this.socket = undefined;
     this.ready = false;
+    this.connectionEvidence = undefined;
   }
 
   private frame(intent: PerplExecutionIntent, sn: number, rq: number): PerplOrderRequest {
