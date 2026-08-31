@@ -6,7 +6,7 @@ describe("Perpl API canary", () => {
     const price = passiveBtcBuyPrice(77_734.5);
     expect(price).toBe(77_579);
     expect(price).toBeLessThan(77_734.5);
-    expect(price * 0.00018).toBeLessThan(15);
+    expect(price * 0.00030).toBeLessThan(30);
   });
   it("rejects invalid book evidence", () => {
     expect(() => passiveBtcBuyPrice(0)).toThrow(/invalid/);

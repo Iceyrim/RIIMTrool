@@ -8,9 +8,9 @@ import { PerplOnchainAdapter } from "../src/adapters/perpl/onchain/PerplOnchainA
 import { PerplRustClient } from "../src/adapters/perpl/onchain/PerplRustClient.js";
 
 const RPC = "https://rpc.monad.xyz";
-const ACCOUNT_ID = 5071;
-const SIZE = 0.00018;
-const MAX_NOTIONAL = 15;
+const ACCOUNT_ID = 5198;
+const SIZE = 0.00030;
+const MAX_NOTIONAL = 30;
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 
 export function passiveBtcBuyPrice(bestBid: number): number {
@@ -49,7 +49,7 @@ async function main(): Promise<void> {
   if (before.account.frozen) throw new Error("API canary account is frozen");
   const price = passiveBtcBuyPrice(before.book.bestBid);
   const notionalUsd = price * SIZE;
-  if (notionalUsd > MAX_NOTIONAL) throw new Error("dynamic API canary exceeds the $15 maximum notional");
+  if (notionalUsd > MAX_NOTIONAL) throw new Error("dynamic API canary exceeds the $30 maximum notional");
   const actionBase = BigInt(Date.now()) * 10n;
   const placementActionId = actionBase.toString();
   const cancellationActionId = (actionBase + 1n).toString();
