@@ -34,6 +34,7 @@ export class PerplLiveAdapter implements ExchangeAdapter {
   connect(): Promise<void> { return this.alreadyConnected ? Promise.resolve() : this.readonlyAdapter.connect(); }
   disconnect(): Promise<void> { return this.readonlyAdapter.disconnect(); }
   async refreshAccountState(): Promise<void> {
+    await this.liveOrderSource?.connect();
     const before = this.readonlyAdapter.getSessionEquityEvidence().blockNumber;
     await this.readonlyAdapter.refreshAccountState();
     await this.readonlyAdapter.waitForSnapshotAfter(before);

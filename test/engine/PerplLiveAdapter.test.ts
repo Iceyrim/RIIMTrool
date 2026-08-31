@@ -39,6 +39,7 @@ describe("PerplLiveAdapter", () => {
     const evidence: PerplEquityEvidence = { balance: "20", lockedBalance: "0", positionDeposit: "0", unrealizedPnl: "0", frozen: false, blockNumber: "100", observedAt: Date.now() };
     const source = readonly(evidence);
     const api = {
+      connect: vi.fn(async () => undefined),
       getOpenOrders: vi.fn(() => [{ exchangeOrderId: "47", market: "ETHUSD", side: "sell" as const, price: 2455.51, size: 0.004, filledSize: 0, remainingSize: 0.004, isReduceOnly: false, state: "open" as const }]),
       getOrderFills: vi.fn(async () => [{ exchangeOrderId: "47", market: "ETHUSD", side: "sell" as const, price: 2455.51, size: 0.004, timestamp: 1 }]),
     };
@@ -46,6 +47,14 @@ describe("PerplLiveAdapter", () => {
     expect(adapter.getOpenOrders("ETHUSD")[0]?.exchangeOrderId).toBe("47");
     expect((await adapter.getOrderFills("47", "ETHUSD"))[0]?.size).toBe(0.004);
     expect(source.getOpenOrders).not.toHaveBeenCalled();
+  });
+
+  it("refreshes an expired One-Click stream before startup reconciliation", async () => {
+    const evidence: PerplEquityEvidence = { balance: "20", lockedBalance: "0", positionDeposit: "0", unrealizedPnl: "0", frozen: false, blockNumber: "100", observedAt: Date.now() };
+    const source = readonly(evidence);
+    const api = { connect: vi.fn(async () => undefined), getOpenOrders: vi.fn(() => []), getOrderFills: vi.fn(async () => []) };
+    await new PerplLiveAdapter(source, {} as PerplCanaryExecutor, undefined, false, {}, api).refreshAccountState();
+    expect(api.connect).toHaveBeenCalledOnce();
   });
 
   it("permanently signals an ambiguous execution outcome", async () => {

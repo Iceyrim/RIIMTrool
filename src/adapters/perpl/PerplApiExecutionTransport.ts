@@ -43,6 +43,7 @@ export interface PerplApiConnectionEvidence {
 }
 
 export interface PerplApiLiveOrderSource {
+  connect(): Promise<void>;
   getOpenOrders(market?: string): NormalizedOrder[];
   getOrderFills(exchangeOrderId: string, market: string): Promise<NormalizedFill[]>;
 }
@@ -151,6 +152,7 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
       socket.addEventListener("close", () => {
         clearTimeout(timer);
         this.ready = false;
+        this.ordersSnapshotReady = false;
         this.protocol.disconnect();
         this.failAll("trading websocket disconnected before definitive order outcome");
         reject(new ExchangeAdapterError("Perpl API trading websocket closed before authentication"));
