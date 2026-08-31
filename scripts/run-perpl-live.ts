@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { PerplCanaryExecutor } from "../src/adapters/perpl/onchain/PerplCanaryExecutor.js";
 import { PerplApiExecutionTransport } from "../src/adapters/perpl/PerplApiExecutionTransport.js";
+import { loadPerplApiCredentials } from "../src/adapters/perpl/PerplApiCredentials.js";
 import { PerplOnchainAdapter } from "../src/adapters/perpl/onchain/PerplOnchainAdapter.js";
 import { PerplRustClient } from "../src/adapters/perpl/onchain/PerplRustClient.js";
 import { createAlertBusFromEnv } from "../src/alerting/createAlertBusFromEnv.js";
@@ -32,12 +33,6 @@ import { PaperRunner, type PaperRunnerMarket } from "../src/paperRunner/PaperRun
 
 const RPC = "https://rpc.monad.xyz";
 const ACCOUNT_ID = 5071;
-function requiredEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`Missing required env var ${name}`);
-  return value;
-}
-
 async function confirm(phrase: string): Promise<void> {
   if (!process.stdin.isTTY)
     throw new Error("Perpl Live requires a human at an interactive terminal");
@@ -104,6 +99,8 @@ async function main(): Promise<void> {
   );
   const estimatedRestingNotional = estimatePerplRestingNotional(enabled, marks);
   const blockers: string[] = [];
+  let transport: PerplApiExecutionTransport | undefined;
+  let apiEvidence: ReturnType<PerplApiExecutionTransport["getConnectionEvidence"]> | undefined;
   if (positions.some((position) => position.baseSize !== 0))
     blockers.push("startup requires flat configured markets");
   if (orders.length) blockers.push("startup requires no existing configured-market orders");
@@ -118,12 +115,27 @@ async function main(): Promise<void> {
   } catch (error) {
     blockers.push(error instanceof Error ? error.message : String(error));
   }
+  try {
+    const credentials = loadPerplApiCredentials();
+    transport = new PerplApiExecutionTransport({
+      apiKey: credentials.apiKey,
+      apiKeySecret: credentials.apiKeySecret,
+      accountId: ACCOUNT_ID,
+    });
+    await transport.connect();
+    apiEvidence = transport.getConnectionEvidence();
+  } catch (error) {
+    transport?.close();
+    transport = undefined;
+    blockers.push(`Perpl One-Click authentication failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   console.log("\n=== [PERPL LIVE] Pre-flight account snapshot ===");
   console.log(`Markets: ${enabled.map((m) => m.symbol).join(", ")}`);
   console.log(`Balances: ${JSON.stringify(readonly.getBalances())}`);
   console.log(`Account: ${JSON.stringify(account)}`);
   console.log("Execution: Perpl trade-scoped One-Click API (no wallet signer; no per-order MON gas)");
+  console.log(`One-Click authentication: ${apiEvidence ? JSON.stringify(apiEvidence) : "UNAVAILABLE"}`);
   console.log(`Positions: ${JSON.stringify(positions)}`);
   console.log(`Open orders: ${JSON.stringify(orders)}`);
   console.log(`Configured resting quotes: ${configuredOpenOrders}/${workerOpenOrderCap}`);
@@ -141,23 +153,29 @@ async function main(): Promise<void> {
   for (const blocker of blockers) console.log(`Blocker: ${blocker}`);
 
   if (preflightOnly) {
+    transport?.close();
     await readonly.disconnect();
     console.log(
       "[PERPL LIVE] Read-only preflight complete; no signer was opened and no transaction was submitted.",
     );
     return;
   }
-  if (blockers.length) throw new Error("Perpl Live preflight is blocked");
+  if (blockers.length) {
+    transport?.close();
+    await readonly.disconnect();
+    throw new Error("Perpl Live preflight is blocked");
+  }
 
-  await confirm(`CONFIRM LIVE PERPL ${enabled.map((m) => m.symbol).join(",")}`);
-  // API credentials are deliberately opened only after the human confirmation.
-  const transport = new PerplApiExecutionTransport({
-    apiKey: requiredEnv("PERPL_API_KEY"),
-    apiKeySecret: requiredEnv("PERPL_API_KEY_SECRET"),
-    accountId: ACCOUNT_ID,
-  });
-  await transport.connect();
-  const executor = new PerplCanaryExecutor(transport);
+  try {
+    await confirm(`CONFIRM LIVE PERPL ${enabled.map((m) => m.symbol).join(",")}`);
+  } catch (error) {
+    transport?.close();
+    await readonly.disconnect();
+    throw error;
+  }
+  if (!transport || !apiEvidence) throw new Error("Perpl One-Click preflight evidence is unavailable");
+  const executionTransport = transport;
+  const executor = new PerplCanaryExecutor(executionTransport);
   let runner: PaperRunner | undefined;
   let shuttingDown = false;
   const requestShutdown = (reason: string) => {
@@ -244,7 +262,7 @@ async function main(): Promise<void> {
     const result = await runner!.shutdown();
     snapshotPublisher.stop();
     await new Promise<void>((done) => dashboardServer.close(() => done()));
-    transport.close();
+    executionTransport.close();
     await readonly.disconnect();
     const finalBridge = new PerplRustClient(
       resolve("rust/perpl-bridge/target/release/riim-perpl-bridge"),
