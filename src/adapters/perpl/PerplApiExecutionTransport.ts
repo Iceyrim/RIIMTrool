@@ -43,13 +43,21 @@ export interface PerplApiConnectionEvidence {
 
 const OPEN = 1;
 
-function scaled(value: string, decimals: number, field: string): number {
+function scaled(value: string, decimals: number, field: string, mode: "exact" | "floor" | "ceil" = "exact"): number {
   if (!/^\d+(?:\.\d+)?$/.test(value)) throw new ExchangeAdapterError(`${field} is malformed`);
   const [whole, fraction = ""] = value.split(".");
-  if (fraction.length > decimals) throw new ExchangeAdapterError(`${field} exceeds market precision`);
-  const result = BigInt(whole!) * 10n ** BigInt(decimals) + BigInt(fraction.padEnd(decimals, "0") || "0");
+  const retained = fraction.slice(0, decimals).padEnd(decimals, "0");
+  const discarded = fraction.slice(decimals);
+  if (mode === "exact" && /[1-9]/.test(discarded)) throw new ExchangeAdapterError(`${field} exceeds market precision`);
+  let result = BigInt(whole!) * 10n ** BigInt(decimals) + BigInt(retained || "0");
+  if (mode === "ceil" && /[1-9]/.test(discarded)) result += 1n;
   if (result > BigInt(Number.MAX_SAFE_INTEGER)) throw new ExchangeAdapterError(`${field} exceeds safe integer range`);
   return Number(result);
+}
+
+export function quantizePerplLimitPrice(value: string | number, decimals: number, side: "buy" | "sell"): number {
+  const factor = 10 ** decimals;
+  return scaled(String(value), decimals, "Perpl API price", side === "buy" ? "floor" : "ceil") / factor;
 }
 
 function secretBytes(secret: string): Uint8Array {
@@ -185,11 +193,16 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
       if (!Number.isSafeInteger(oid) || oid <= 0) throw new ExchangeAdapterError("Perpl API cancellation order ID is invalid");
       return { ...common, oid, t: 5, s: 0, fl: 0, lv: 0 };
     }
+    const price = quantizePerplLimitPrice(intent.price, this.scales[market].priceDecimals, intent.side);
+    const encodedPrice = scaled(String(price), this.scales[market].priceDecimals, "Perpl API price");
+    const encodedSize = scaled(intent.size, this.scales[market].sizeDecimals, "Perpl API size");
+    if (price * (encodedSize / 10 ** this.scales[market].sizeDecimals) > 15)
+      throw new ExchangeAdapterError("Perpl API quantized order exceeds the $15 maximum notional");
     return {
       ...common,
       t: intent.reduceOnly ? (intent.side === "sell" ? 3 : 4) : intent.side === "buy" ? 1 : 2,
-      p: scaled(intent.price, this.scales[market].priceDecimals, "Perpl API price"),
-      s: scaled(intent.size, this.scales[market].sizeDecimals, "Perpl API size"),
+      p: encodedPrice,
+      s: encodedSize,
       fl: 1,
       lv: Number(intent.leverage) * 100,
     };

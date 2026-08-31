@@ -246,6 +246,7 @@ async function main(): Promise<void> {
   snapshotPublisher.start();
   runner = new PaperRunner(markets, {
     intervalMs,
+    runnerLabel: "PerplLiveRunner",
     logFilePath: join(
       stateRoot,
       "logs",

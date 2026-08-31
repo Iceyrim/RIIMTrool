@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PerplApiExecutionTransport } from "../../../src/adapters/perpl/PerplApiExecutionTransport.js";
+import { PerplApiExecutionTransport, quantizePerplLimitPrice } from "../../../src/adapters/perpl/PerplApiExecutionTransport.js";
 import type { PerplPlaceIntent } from "../../../src/adapters/perpl/onchain/executionProtocol.js";
 import { PERPL_MAINNET_EXCHANGE } from "../../../src/adapters/perpl/onchain/protocol.js";
 
@@ -31,6 +31,12 @@ const intent: PerplPlaceIntent = {
 };
 
 describe("PerplApiExecutionTransport", () => {
+  it("rounds maker prices away from crossing at each market tick", () => {
+    expect(quantizePerplLimitPrice(78_000.987, 1, "buy")).toBe(78_000.9);
+    expect(quantizePerplLimitPrice(78_000.901, 1, "sell")).toBe(78_001);
+    expect(quantizePerplLimitPrice(2_453.5678, 2, "buy")).toBe(2_453.56);
+    expect(quantizePerplLimitPrice(2_453.5601, 2, "sell")).toBe(2_453.57);
+  });
   it("signs in first, allocates rq from account lfr, and waits for a definitive order update", async () => {
     const socket = new FakeSocket();
     const transport = new PerplApiExecutionTransport({

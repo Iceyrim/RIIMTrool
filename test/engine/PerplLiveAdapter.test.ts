@@ -36,6 +36,14 @@ describe("PerplLiveAdapter", () => {
     expect(halt).toHaveBeenCalledWith("receipt unknown");
   });
 
+  it("reports the same directionally tick-rounded price sent to One-Click", async () => {
+    const evidence: PerplEquityEvidence = { balance: "20", lockedBalance: "0", positionDeposit: "0", unrealizedPnl: "0", frozen: false, blockNumber: "1", observedAt: Date.now() };
+    const executor = { place: vi.fn(async () => ({ state: "confirmed", exchangeOrderId: "42" })) } as unknown as PerplCanaryExecutor;
+    const result = await new PerplLiveAdapter(readonly(evidence), executor, undefined, false, { BTCUSD: 15 }).placeOrder({ market: "BTCUSD", side: "buy", type: "postOnly", size: 0.00018, price: 78_000.987, isReduceOnly: false });
+    expect(executor.place).toHaveBeenCalledWith(expect.objectContaining({ price: 78_000.9 }));
+    expect(result.success && result.order.price).toBe(78_000.9);
+  });
+
   it("turns equity declines into conservative account loss and halts at the cap", async () => {
     let evidence: PerplEquityEvidence = { balance: "20", lockedBalance: "0", positionDeposit: "0", unrealizedPnl: "0", frozen: false, blockNumber: "1", observedAt: Date.now() };
     const sourceAdapter = readonly(evidence);
