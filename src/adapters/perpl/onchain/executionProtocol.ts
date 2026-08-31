@@ -77,7 +77,7 @@ export function validateExecutionIntent(intent: PerplExecutionIntent): void {
       !Number.isFinite(size) ||
       price <= 0 ||
       size <= 0 ||
-      price * size > 15
+      price * size > 30
     ) throw new ExchangeAdapterError("Perpl placement intent violates canary limits");
   } else if (!intent.exchangeOrderId || !intent.placementActionId || intent.actionId === intent.placementActionId) {
     throw new ExchangeAdapterError("Perpl cancellation identity is invalid");

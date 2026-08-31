@@ -51,8 +51,8 @@ describe("PerplCanaryExecutor", () => {
     expect(() => validateExecutionIntent({ ...base, perpetualId: 20 } as never)).toThrow(/identity/);
     expect(() => validateExecutionIntent({ ...base, leverage: "16" })).toThrow(/limits/);
     expect(() => validateExecutionIntent({ ...base, market: "ETHUSD", perpetualId: 20, leverage: "13" })).toThrow(/limits/);
-    expect(() => validateExecutionIntent({ ...base, price: "83333.34", size: "0.00018" })).toThrow(/limits/);
-    expect(() => validateExecutionIntent({ ...base, price: "83333.33", size: "0.00018" })).not.toThrow();
+    expect(() => validateExecutionIntent({ ...base, price: "100000.01", size: "0.00030" })).toThrow(/limits/);
+    expect(() => validateExecutionIntent({ ...base, price: "100000", size: "0.00030" })).not.toThrow();
   });
 
   it("fails closed on unknown or mismatched outcome fields", async () => {
