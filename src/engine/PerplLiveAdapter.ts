@@ -62,19 +62,27 @@ export class PerplLiveAdapter implements ExchangeAdapter {
   }
 
   async placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
-    if (params.type !== "postOnly") return { success: false, reason: "REJECTED", message: "Perpl Live permits post-only orders only" };
+    if (
+      params.type !== "postOnly" &&
+      !(params.type === "immediateOrCancel" && params.isReduceOnly)
+    ) return { success: false, reason: "REJECTED", message: "Perpl Live permits post-only quotes and reduce-only IOC exits only" };
     const actionId = params.clientOrderId ?? numericActionId();
     const leverage = this.leverageByMarket[params.market] ?? 1;
     const priceDecimals = params.market === "BTCUSD" ? 1 : params.market === "ETHUSD" ? 2 : undefined;
     if (priceDecimals === undefined) return { success: false, reason: "REJECTED", message: `Unsupported Perpl market ${params.market}` };
-    const executionPrice = quantizePerplLimitPrice(params.price, priceDecimals, params.side);
+    const book = this.readonlyAdapter.getBookEvidence(params.market);
+    const boundedPrice = params.type === "postOnly"
+      ? params.side === "buy" ? Math.min(params.price, book.bestBid) : Math.max(params.price, book.bestAsk)
+      : params.price;
+    const executionPrice = quantizePerplLimitPrice(boundedPrice, priceDecimals, params.side);
     if (!Number.isSafeInteger(leverage) || leverage <= 0) return { success: false, reason: "REJECTED", message: `Perpl leverage is invalid for ${params.market}` };
-    const result = await this.executor.place({ market: params.market, side: params.side, price: executionPrice, size: params.size, postOnly: true, reduceOnly: params.isReduceOnly, clientActionId: actionId, leverage });
+    const result = await this.executor.place({ market: params.market, side: params.side, price: executionPrice, size: params.size, postOnly: params.type === "postOnly", immediateOrCancel: params.type === "immediateOrCancel", reduceOnly: params.isReduceOnly, clientActionId: actionId, leverage });
     if (result.state !== "confirmed") {
       if (result.state === "ambiguous") this.onAmbiguous(result.reason);
       return { success: false, reason: result.state === "ambiguous" ? "UNRESOLVED_NOT_CONFIRMED" : "REJECTED", message: result.reason };
     }
-    return { success: true, order: { exchangeOrderId: result.exchangeOrderId, clientOrderId: actionId, market: params.market, side: params.side, type: "postOnly", price: executionPrice, size: params.size, filledSize: 0, remainingSize: params.size, isReduceOnly: params.isReduceOnly, state: "open" }, fills: [] };
+    const immediate = params.type === "immediateOrCancel";
+    return { success: true, order: { exchangeOrderId: result.exchangeOrderId, clientOrderId: actionId, market: params.market, side: params.side, type: params.type, price: executionPrice, size: params.size, filledSize: immediate ? params.size : 0, remainingSize: immediate ? 0 : params.size, isReduceOnly: params.isReduceOnly, state: immediate ? "filled" : "open" }, fills: [] };
   }
 
   async cancelOrder(exchangeOrderId: string, market: string): Promise<CancelOrderResult> {

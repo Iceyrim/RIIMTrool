@@ -68,10 +68,25 @@ describe("PerplLiveAdapter", () => {
 
   it("reports the same directionally tick-rounded price sent to One-Click", async () => {
     const evidence: PerplEquityEvidence = { balance: "20", lockedBalance: "0", positionDeposit: "0", unrealizedPnl: "0", frozen: false, blockNumber: "1", observedAt: Date.now() };
+    const source = readonly(evidence);
+    vi.mocked(source.getBookEvidence).mockReturnValue({ bestBid: 78_001, bestAsk: 78_002 });
     const executor = { place: vi.fn(async () => ({ state: "confirmed", exchangeOrderId: "42" })) } as unknown as PerplCanaryExecutor;
-    const result = await new PerplLiveAdapter(readonly(evidence), executor, undefined, false, { BTCUSD: 15 }).placeOrder({ market: "BTCUSD", side: "buy", type: "postOnly", size: 0.00018, price: 78_000.987, isReduceOnly: false });
+    const result = await new PerplLiveAdapter(source, executor, undefined, false, { BTCUSD: 15 }).placeOrder({ market: "BTCUSD", side: "buy", type: "postOnly", size: 0.00018, price: 78_000.987, isReduceOnly: false });
     expect(executor.place).toHaveBeenCalledWith(expect.objectContaining({ price: 78_000.9 }));
     expect(result.success && result.order.price).toBe(78_000.9);
+  });
+
+  it("clamps normal quotes to the passive book side and permits only reduce-only IOC exits", async () => {
+    const evidence: PerplEquityEvidence = { balance: "20", lockedBalance: "0", positionDeposit: "0", unrealizedPnl: "0", frozen: false, blockNumber: "1", observedAt: Date.now() };
+    const source = readonly(evidence);
+    vi.mocked(source.getBookEvidence).mockReturnValue({ bestBid: 100, bestAsk: 101 });
+    const executor = { place: vi.fn(async () => ({ state: "confirmed", exchangeOrderId: "api:55" })) } as unknown as PerplCanaryExecutor;
+    const adapter = new PerplLiveAdapter(source, executor, undefined, false, { BTCUSD: 15 });
+    await adapter.placeOrder({ market: "BTCUSD", side: "buy", type: "postOnly", size: 0.00018, price: 102, isReduceOnly: false });
+    expect(executor.place).toHaveBeenLastCalledWith(expect.objectContaining({ price: 100, postOnly: true }));
+    await adapter.placeOrder({ market: "BTCUSD", side: "buy", type: "immediateOrCancel", size: 0.00018, price: 102, isReduceOnly: true });
+    expect(executor.place).toHaveBeenLastCalledWith(expect.objectContaining({ price: 102, postOnly: false, immediateOrCancel: true, reduceOnly: true }));
+    await expect(adapter.placeOrder({ market: "BTCUSD", side: "buy", type: "immediateOrCancel", size: 0.00018, price: 102, isReduceOnly: false })).resolves.toMatchObject({ success: false });
   });
 
   it("turns equity declines into conservative account loss and halts at the cap", async () => {

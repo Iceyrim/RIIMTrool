@@ -241,7 +241,7 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
       t: intent.reduceOnly ? (intent.side === "sell" ? 3 : 4) : intent.side === "buy" ? 1 : 2,
       p: encodedPrice,
       s: encodedSize,
-      fl: 1,
+      fl: intent.orderType === "immediateOrCancel" ? 4 : 1,
       lv: Number(intent.leverage) * 100,
     };
   }
@@ -281,7 +281,11 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
         if (pending.rq === order.rq) {
           const exchangeOrderId = pending.intent.action === "cancel"
             ? pending.intent.exchangeOrderId
-            : order.scid > 0 ? String(order.scid) : undefined;
+            : order.scid > 0
+              ? String(order.scid)
+              : pending.intent.orderType === "immediateOrCancel" && order.oid > 0
+                ? `api:${order.oid}`
+                : undefined;
           this.finish(sn, resolution, exchangeOrderId);
         }
       }

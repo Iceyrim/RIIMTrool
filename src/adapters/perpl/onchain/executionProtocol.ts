@@ -21,7 +21,7 @@ interface ExecutionEnvelope {
 export interface PerplPlaceIntent extends ExecutionEnvelope {
   action: "place";
   side: "buy" | "sell";
-  orderType: "postOnly";
+  orderType: "postOnly" | "immediateOrCancel";
   price: string;
   size: string;
   reduceOnly: boolean;
@@ -66,7 +66,10 @@ export function validateExecutionIntent(intent: PerplExecutionIntent): void {
     const price = Number(intent.price);
     const size = Number(intent.size);
     if (
-      intent.orderType !== "postOnly" ||
+      !(
+        intent.orderType === "postOnly" ||
+        (intent.orderType === "immediateOrCancel" && intent.reduceOnly)
+      ) ||
       !/^\d+$/.test(intent.leverage) ||
       Number(intent.leverage) < 1 ||
       Number(intent.leverage) > (intent.market === "BTCUSD" ? 15 : 12) ||

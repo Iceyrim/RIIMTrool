@@ -150,6 +150,16 @@ describe("PerplApiExecutionTransport", () => {
     transport.close();
   });
 
+  it("encodes a reduce-only shutdown exit as immediate-or-cancel", async () => {
+    const socket = new FakeSocket();
+    const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "77".repeat(32), socketFactory: () => socket, timeoutMs: 10 });
+    const connecting = transport.connect(); socket.open(); await connecting;
+    void transport.request({ ...intent, id: "ioc", actionId: "125", side: "buy", reduceOnly: true, orderType: "immediateOrCancel" });
+    await Promise.resolve();
+    expect(socket.sent[1]).toMatchObject({ t: 4, fl: 4 });
+    transport.close();
+  });
+
   it("returns a definitive exchange failure as rejected without waiting for timeout", async () => {
     const socket = new FakeSocket();
     const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "33".repeat(32), socketFactory: () => socket });

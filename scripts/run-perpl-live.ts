@@ -26,6 +26,7 @@ import {
   assertPerplLiveCapacity,
   consumePerplLiveArmFile,
   estimatePerplRestingNotional,
+  planPerplShutdownChunks,
   requirePerplLiveCliFlag,
 } from "../src/engine/PerplLiveStartup.js";
 import { PerplSessionEquityGuard } from "../src/engine/PerplSessionEquityGuard.js";
@@ -262,6 +263,64 @@ async function main(): Promise<void> {
     shuttingDown = true;
     console.log(`\n[PERPL LIVE] Shutting down: ${reason}`);
     const result = await runner!.shutdown();
+    const flattening: Array<{
+      market: string;
+      initialBaseSize: number;
+      attemptedChunks: number[];
+      confirmedChunks: number[];
+      failures: string[];
+    }> = [];
+    let shutdownActionId = BigInt(Date.now()) * 1_000n;
+    for (const market of enabled) {
+      const initialBaseSize = liveAdapter.getPositions(market.symbol)[0]?.baseSize ?? 0;
+      const entry = {
+        market: market.symbol,
+        initialBaseSize,
+        attemptedChunks: [] as number[],
+        confirmedChunks: [] as number[],
+        failures: [] as string[],
+      };
+      flattening.push(entry);
+      if (initialBaseSize === 0) continue;
+      const book = liveAdapter.getBookEvidence(market.symbol);
+      const side = initialBaseSize > 0 ? "sell" as const : "buy" as const;
+      const limitPrice = side === "buy" ? book.bestAsk * 1.005 : book.bestBid * 0.995;
+      let chunks: number[];
+      try {
+        chunks = planPerplShutdownChunks({
+          positionBaseSize: initialBaseSize,
+          limitPrice,
+          maxOrderSize: market.riskLimits.maxOrderSize,
+          maxNotionalUsd: market.riskLimits.maxOrderNotionalUsd,
+          sizeDecimals: market.symbol === "BTCUSD" ? 5 : 3,
+        });
+      } catch (error) {
+        entry.failures.push(String(error));
+        continue;
+      }
+      for (const size of chunks) {
+        entry.attemptedChunks.push(size);
+        try {
+          const placed = await liveAdapter.placeOrder({
+            market: market.symbol,
+            side,
+            type: "immediateOrCancel",
+            size,
+            price: limitPrice,
+            isReduceOnly: true,
+            clientOrderId: (++shutdownActionId).toString(10),
+          });
+          if (!placed.success) {
+            entry.failures.push(placed.message ?? "reduce-only IOC was rejected");
+            break;
+          }
+          entry.confirmedChunks.push(size);
+        } catch (error) {
+          entry.failures.push(String(error));
+          break;
+        }
+      }
+    }
     snapshotPublisher.stop();
     await new Promise<void>((done) => dashboardServer.close(() => done()));
     executionTransport.close();
@@ -280,6 +339,7 @@ async function main(): Promise<void> {
     const finalAccount = finalAdapter.getAccountEvidence();
     const reconciled =
       result.successful &&
+      flattening.every((entry) => entry.failures.length === 0) &&
       finalOrders.length === 0 &&
       finalPositions.every((position) => position.baseSize === 0) &&
       Number(finalAccount.lockedBalance) === 0;
@@ -291,6 +351,7 @@ async function main(): Promise<void> {
           mode: "perpl-live",
           reason,
           cleanup: result.cleanup,
+          flattening,
           execution: "perpl-one-click-api",
           openOrders: finalOrders,
           positions: finalPositions,

@@ -40,22 +40,20 @@ export class PerplCanaryExecutor implements ControllerExecutor {
       perpetualId,
       actionId: input.clientActionId,
       side: input.side,
-      orderType: "postOnly",
+      orderType: input.immediateOrCancel ? "immediateOrCancel" : "postOnly",
       price: String(input.price),
       size: String(input.size),
       reduceOnly: input.reduceOnly,
       leverage: String(input.leverage ?? 1),
     };
     const outcome = await this.send(intent);
-    if (outcome.event === "confirmed")
-      this.placementActions.set(outcome.exchangeOrderId, input.clientActionId);
+    if (outcome.event === "confirmed") this.placementActions.set(outcome.exchangeOrderId, input.clientActionId);
     return this.map(outcome);
   }
 
   async cancel(input: Parameters<ControllerExecutor["cancel"]>[0]): Promise<CanaryExecutionResult> {
     const placementActionId = this.placementActions.get(input.exchangeOrderId);
-    if (!placementActionId)
-      return { state: "ambiguous", reason: "placement identity is unavailable" };
+    if (!placementActionId) return { state: "ambiguous", reason: "placement identity is unavailable" };
     const id = this.id();
     const intent: PerplExecutionIntent = {
       version: 1,
@@ -93,7 +91,5 @@ export class PerplCanaryExecutor implements ControllerExecutor {
     throw new Error(`Unlisted Perpl canary market ${market}`);
   }
 
-  private id(): string {
-    return `perpl-exec-${this.nextId++}`;
-  }
+  private id(): string { return `perpl-exec-${this.nextId++}`; }
 }

@@ -13,7 +13,8 @@ export interface PerplCanaryExecutor {
     side: "buy" | "sell";
     price: number;
     size: number;
-    postOnly: true;
+    postOnly: boolean;
+    immediateOrCancel?: boolean;
     reduceOnly: boolean;
     clientActionId: string;
     leverage?: number;

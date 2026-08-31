@@ -5,11 +5,16 @@ import {
   assertPerplLiveCapacity,
   consumePerplLiveArmFile,
   estimatePerplRestingNotional,
+  planPerplShutdownChunks,
   requirePerplLiveCliFlag,
 } from "../../src/engine/PerplLiveStartup.js";
 import { loadMarketsConfig } from "../../src/config/loadConfig.js";
 
 describe("Perpl Live startup gates", () => {
+  it("splits shutdown inventory into bounded exact reduce-only chunks", () => {
+    expect(planPerplShutdownChunks({ positionBaseSize: -0.008, limitPrice: 2460, maxOrderSize: 0.005, maxNotionalUsd: 15, sizeDecimals: 3 })).toEqual([0.005, 0.003]);
+    expect(planPerplShutdownChunks({ positionBaseSize: 0.00018, limitPrice: 78_000, maxOrderSize: 0.0002, maxNotionalUsd: 15, sizeDecimals: 5 })).toEqual([0.00018]);
+  });
   it("consumes a valid arm file exactly once", () => {
     const directory = join("/tmp", `perpl-live-arm-${process.pid}-${Date.now()}`);
     const path = join(directory, "ARMED");
