@@ -121,6 +121,9 @@ function venueMode(exchangeId: string): Pick<DashboardAccountStatus, "venue" | "
   if (exchangeId === "perpl-paper") {
     return { venue: "Perpl", mode: "PAPER", label: "Perpl PAPER" };
   }
+  if (exchangeId === "perpl-onchain-mainnet-live") {
+    return { venue: "Perpl", mode: "LIVE", label: "Perpl LIVE" };
+  }
   return { venue: "Unknown", mode: "UNKNOWN", label: exchangeId };
 }
 

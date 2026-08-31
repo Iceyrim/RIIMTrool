@@ -133,6 +133,21 @@ describe("buildDashboardStatus", () => {
     expect(status.markets.filter((market) => market.market === "BTCUSD").map((market) => market.exchangeId)).toEqual(["fake", "perpl-paper"]);
   });
 
+  it("labels the Perpl mainnet adapter as LIVE", async () => {
+    const perpl = new FakeExchangeAdapter();
+    Object.defineProperty(perpl, "exchangeId", { value: "perpl-onchain-mainnet-live" });
+    perpl.marketPrices.set("BTCUSD", { market: "BTCUSD", mark: 60_000, index: 60_000 });
+    const market = await buildMarket("BTCUSD", perpl);
+    const status = buildDashboardStatus([market]);
+
+    expect(status.accounts[0]).toMatchObject({
+      exchangeId: "perpl-onchain-mainnet-live",
+      venue: "Perpl",
+      mode: "LIVE",
+      label: "Perpl LIVE",
+    });
+  });
+
   it("surfaces reconciliation anomalies and a degraded status without touching the exchange", async () => {
     const market = await buildMarket("BTCUSD", adapter);
     adapter.openOrders.push({
