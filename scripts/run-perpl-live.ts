@@ -14,7 +14,6 @@ import { loadMarketsConfig } from "../src/config/loadConfig.js";
 import { toEngineMarketConfig } from "../src/config/toEngineMarketConfig.js";
 import { buildDashboardStatus, type DashboardMarket } from "../src/dashboard/DashboardService.js";
 import { DashboardHistoryStore } from "../src/dashboard/DashboardHistoryStore.js";
-import { createDashboardServer } from "../src/dashboard/server.js";
 import {
   DASHBOARD_SNAPSHOT_DIRECTORY,
   DashboardSnapshotPublisher,
@@ -258,8 +257,6 @@ async function main(): Promise<void> {
     adapter: liveAdapter,
     telemetry,
   }));
-  const dashboardPort = Number(process.env.PERPL_DASHBOARD_PORT ?? "4310");
-  const dashboardServer = createDashboardServer(dashboardMarkets, { port: dashboardPort });
   const snapshotPublisher = new DashboardSnapshotPublisher(
     DASHBOARD_SNAPSHOT_DIRECTORY,
     "perpl",
@@ -381,7 +378,6 @@ async function main(): Promise<void> {
       }
     }
     snapshotPublisher.stop();
-    await new Promise<void>((done) => dashboardServer.close(() => done()));
     executionTransport.close();
     await readonly.disconnect();
     const finalBridge = new PerplRustClient(
@@ -429,7 +425,7 @@ async function main(): Promise<void> {
   console.log(
     `\n[PERPL LIVE] Starting continuous live run: ${enabled.map((m) => m.symbol).join(", ")}`,
   );
-  console.log(`[PERPL LIVE] Dashboard: http://127.0.0.1:${dashboardPort}`);
+  console.log(`[PERPL LIVE] Dashboard: https://riimtool.tail097a61.ts.net/ (Perpl LIVE)`);
   console.log(
     `[PERPL LIVE] Press Ctrl-C for mandatory managed-order cleanup and final reconciliation.`,
   );
