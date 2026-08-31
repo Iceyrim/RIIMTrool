@@ -234,8 +234,8 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
     const price = quantizePerplLimitPrice(intent.price, this.scales[market].priceDecimals, intent.side);
     const encodedPrice = scaled(String(price), this.scales[market].priceDecimals, "Perpl API price");
     const encodedSize = scaled(intent.size, this.scales[market].sizeDecimals, "Perpl API size");
-    if (price * (encodedSize / 10 ** this.scales[market].sizeDecimals) > 15)
-      throw new ExchangeAdapterError("Perpl API quantized order exceeds the $15 maximum notional");
+    if (price * (encodedSize / 10 ** this.scales[market].sizeDecimals) > 30)
+      throw new ExchangeAdapterError("Perpl API quantized order exceeds the $30 maximum notional");
     return {
       ...common,
       t: intent.reduceOnly ? (intent.side === "sell" ? 3 : 4) : intent.side === "buy" ? 1 : 2,
