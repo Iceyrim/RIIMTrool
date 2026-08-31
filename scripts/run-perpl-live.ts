@@ -1,12 +1,11 @@
 /** Continuous Perpl mainnet market maker with the same operator lifecycle as scripts/run-live.ts. */
-import { existsSync, mkdirSync, rmSync } from "node:fs";
-import { spawn, type ChildProcess } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { PerplCanaryExecutor } from "../src/adapters/perpl/onchain/PerplCanaryExecutor.js";
+import { PerplApiExecutionTransport } from "../src/adapters/perpl/PerplApiExecutionTransport.js";
 import { PerplOnchainAdapter } from "../src/adapters/perpl/onchain/PerplOnchainAdapter.js";
-import { PerplOperatorSocketTransport } from "../src/adapters/perpl/onchain/PerplOperatorSocketTransport.js";
 import { PerplRustClient } from "../src/adapters/perpl/onchain/PerplRustClient.js";
 import { createAlertBusFromEnv } from "../src/alerting/createAlertBusFromEnv.js";
 import { loadMarketsConfig } from "../src/config/loadConfig.js";
@@ -33,31 +32,10 @@ import { PaperRunner, type PaperRunnerMarket } from "../src/paperRunner/PaperRun
 
 const RPC = "https://rpc.monad.xyz";
 const ACCOUNT_ID = 5071;
-const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
-
 function requiredEnv(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`Missing required env var ${name}`);
   return value;
-}
-
-async function pendingNonce(address: string): Promise<number> {
-  const response = await fetch(RPC, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      method: "eth_getTransactionCount",
-      params: [address, "pending"],
-      id: 1,
-    }),
-  });
-  const payload = (await response.json()) as { result?: string; error?: unknown };
-  if (!response.ok || !payload.result)
-    throw new Error(`pending nonce unavailable: ${JSON.stringify(payload.error)}`);
-  const nonce = Number(BigInt(payload.result));
-  if (!Number.isSafeInteger(nonce)) throw new Error("pending nonce is invalid");
-  return nonce;
 }
 
 async function confirm(phrase: string): Promise<void> {
@@ -70,16 +48,6 @@ async function confirm(phrase: string): Promise<void> {
   } finally {
     rl.close();
   }
-}
-
-async function waitForSocket(path: string, worker: ChildProcess): Promise<void> {
-  for (let elapsed = 0; elapsed < 180_000; elapsed += 100) {
-    if (existsSync(path)) return;
-    if (worker.exitCode !== null)
-      throw new Error(`Perpl execution worker exited before readiness (${worker.exitCode})`);
-    await sleep(100);
-  }
-  throw new Error("Perpl execution worker socket readiness timed out");
 }
 
 async function main(): Promise<void> {
@@ -95,8 +63,6 @@ async function main(): Promise<void> {
   mkdirSync(stateRoot, { recursive: true });
   if (!preflightOnly) consumePerplLiveArmFile(join(stateRoot, "ARMED"));
 
-  const signer = requiredEnv("PERPL_SIGNER_ADDRESS");
-  if (!/^0x[0-9a-fA-F]{40}$/.test(signer)) throw new Error("PERPL_SIGNER_ADDRESS is invalid");
   const configPath =
     process.env.PERPL_MARKETS_CONFIG_PATH ?? resolve("config/markets.perpl-live.yaml");
   const intervalMs = Number(process.env.PERPL_LIVE_CYCLE_INTERVAL_MS ?? "5000");
@@ -120,7 +86,6 @@ async function main(): Promise<void> {
     accountIds: [ACCOUNT_ID],
   });
   await readonly.connect();
-  const nonce = await pendingNonce(signer);
   const account = readonly.getAccountEvidence();
   const positions = enabled.flatMap((market) => readonly.getPositions(market.symbol));
   const orders = enabled.flatMap((market) => readonly.getOpenOrders(market.symbol));
@@ -158,7 +123,7 @@ async function main(): Promise<void> {
   console.log(`Markets: ${enabled.map((m) => m.symbol).join(", ")}`);
   console.log(`Balances: ${JSON.stringify(readonly.getBalances())}`);
   console.log(`Account: ${JSON.stringify(account)}`);
-  console.log(`Pending nonce: ${nonce}`);
+  console.log("Execution: Perpl trade-scoped One-Click API (no wallet signer; no per-order MON gas)");
   console.log(`Positions: ${JSON.stringify(positions)}`);
   console.log(`Open orders: ${JSON.stringify(orders)}`);
   console.log(`Configured resting quotes: ${configuredOpenOrders}/${workerOpenOrderCap}`);
@@ -185,36 +150,13 @@ async function main(): Promise<void> {
   if (blockers.length) throw new Error("Perpl Live preflight is blocked");
 
   await confirm(`CONFIRM LIVE PERPL ${enabled.map((m) => m.symbol).join(",")}`);
-  const signerKeyFile = requiredEnv("PERPL_SIGNER_KEY_FILE");
-
-  const socketPath = "/tmp/perpl-live.sock";
-  if (existsSync(socketPath)) throw new Error(`execution socket already exists: ${socketPath}`);
-  const worker = spawn(
-    resolve("rust/perpl-bridge/target/release/gated-execution-worker"),
-    [
-      "--gate=mainnet",
-      "--i-accept-mainnet-risk=yes",
-      "--execution-mode=live-session",
-      `--signer=${signer}`,
-      `--signer-key-file=${signerKeyFile}`,
-      `--journal-path=${join(stateRoot, "rust-worker.json")}`,
-      `--socket-path=${socketPath}`,
-      `--chain-nonce=${nonce}`,
-      "--gas-limit=1300000",
-      "--max-snapshot-lag-blocks=2",
-      `--max-open-orders=${workerOpenOrderCap}`,
-    ],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
-  let workerOutput = "";
-  worker.stdout?.on("data", (chunk) => {
-    workerOutput += String(chunk);
+  // API credentials are deliberately opened only after the human confirmation.
+  const transport = new PerplApiExecutionTransport({
+    apiKey: requiredEnv("PERPL_API_KEY"),
+    apiKeySecret: requiredEnv("PERPL_API_KEY_SECRET"),
+    accountId: ACCOUNT_ID,
   });
-  worker.stderr?.on("data", (chunk) => {
-    workerOutput += String(chunk);
-  });
-  await waitForSocket(socketPath, worker);
-  const transport = new PerplOperatorSocketTransport(socketPath, 180_000);
+  await transport.connect();
   const executor = new PerplCanaryExecutor(transport);
   let runner: PaperRunner | undefined;
   let shuttingDown = false;
@@ -304,10 +246,6 @@ async function main(): Promise<void> {
     await new Promise<void>((done) => dashboardServer.close(() => done()));
     transport.close();
     await readonly.disconnect();
-    await Promise.race([
-      new Promise<void>((done) => worker.once("exit", () => done())),
-      sleep(10_000),
-    ]);
     const finalBridge = new PerplRustClient(
       resolve("rust/perpl-bridge/target/release/riim-perpl-bridge"),
     );
@@ -333,12 +271,11 @@ async function main(): Promise<void> {
           mode: "perpl-live",
           reason,
           cleanup: result.cleanup,
-          pendingNonce: await pendingNonce(signer),
+          execution: "perpl-one-click-api",
           openOrders: finalOrders,
           positions: finalPositions,
           lockedBalance: finalAccount.lockedBalance,
           finalStatus: reconciled ? "completed-flat" : "manual-review-required",
-          workerOutput: workerOutput.trim(),
         },
         null,
         2,
