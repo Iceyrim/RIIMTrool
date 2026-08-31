@@ -4,7 +4,8 @@ export const PERPL_BRIDGE_PROTOCOL_VERSION = 1 as const;
 export const PERPL_MAINNET_CHAIN_ID = 143 as const;
 export const PERPL_MAINNET_EXCHANGE = "0x34b6552d57a35a1d042ccae1951bd1c370112a6f" as const;
 export const PERPL_MAINNET_RPC = "https://rpc.monad.xyz" as const;
-export const PERPL_MAINNET_ACCOUNT_ID = 5071 as const;
+export const PERPL_MAINNET_ACCOUNT_ID = 5198 as const;
+export const PERPL_MAINNET_WALLET_ADDRESS = "0x002235afe265a3ab5bd78ea81a5be7f1ea0668c1" as const;
 
 export interface BridgeMarketConfig {
   symbol: string;

@@ -61,7 +61,7 @@ export class PerplCanaryExecutor implements ControllerExecutor {
       action: "cancel",
       chainId: 143,
       exchange: PERPL_MAINNET_EXCHANGE,
-      accountId: 5071,
+      accountId: 5198,
       market: input.market as "BTCUSD" | "ETHUSD",
       perpetualId: this.perpetualId(input.market),
       actionId: input.clientActionId,

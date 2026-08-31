@@ -12,7 +12,7 @@ class FakeSocket {
     this.sent.push(frame);
     if (frame.mt === 29) queueMicrotask(() => this.message({
       mt: 19, sn: 10, at: {}, addr: "0xa89bC210BaB1156113571F2a9193c5282efBF78a", n: 1, fl: 0,
-      as: [{ in: 1, id: 5071, fr: false, fw: true, ft: 0, lfr: 100, b: "18.34", lb: "0" }],
+      as: [{ in: 1, id: 5198, fr: false, fw: true, ft: 0, lfr: 100, b: "18.34", lb: "0" }],
     }));
     if (frame.mt === 29) queueMicrotask(() => this.message({ mt: 23, at: {}, d: [] }));
   }
@@ -27,7 +27,7 @@ class FakeSocket {
 
 const intent: PerplPlaceIntent = {
   version: 1, id: "x", action: "place", chainId: 143, exchange: PERPL_MAINNET_EXCHANGE,
-  accountId: 5071, market: "BTCUSD", perpetualId: 1, actionId: "123", side: "buy",
+  accountId: 5198, market: "BTCUSD", perpetualId: 1, actionId: "123", side: "buy",
   orderType: "postOnly", price: "78000", size: "0.00018", reduceOnly: false, leverage: "15",
 };
 
@@ -52,35 +52,35 @@ describe("PerplApiExecutionTransport", () => {
     expect(socket.sent[0]).toMatchObject({ mt: 29, chain_id: 143, api_key: "opaque-token" });
     expect(transport.getConnectionEvidence()).toEqual({
       chainId: 143,
-      accountId: 5071,
+      accountId: 5198,
       walletAddress: "0xa89bC210BaB1156113571F2a9193c5282efBF78a",
       lastForwardedRequestId: 100,
     });
     const outcomePromise = transport.request(intent);
     await Promise.resolve();
     const order = socket.sent[1]!;
-    expect(order).toMatchObject({ mt: 22, rq: 101, mkt: 1, acc: 5071, t: 1, p: 780000, s: 18, fl: 1, lv: 1500, lb: 0 });
+    expect(order).toMatchObject({ mt: 22, rq: 101, mkt: 1, acc: 5198, t: 1, p: 780000, s: 18, fl: 1, lv: 1500, lb: 0 });
     socket.message({ mt: 3, sid: 100, sn: 11, cid: order.sn, status: { code: 0, error: "" } });
     let settled = false;
     void outcomePromise.then(() => { settled = true; });
     await Promise.resolve();
     expect(settled).toBe(false);
     socket.message({ mt: 24, at: {}, d: [{
-      at: {}, c: {}, rq: 101, mkt: 1, acc: 5071, oid: 6_603_226_349_594, scid: 44, st: 2, sr: 35,
+      at: {}, c: {}, rq: 101, mkt: 1, acc: 5198, oid: 6_603_226_349_594, scid: 44, st: 2, sr: 35,
       t: 1, p: 780000, os: 18, fp: 0, fs: 0, f: "0", fl: 1, mm: 0, lv: 1500,
     }] });
     await expect(outcomePromise).resolves.toEqual({ version: 1, id: "x", event: "confirmed", actionId: "123", exchangeOrderId: "44" });
 
     const cancellation = transport.request({
       version: 1, id: "cancel", action: "cancel", chainId: 143,
-      exchange: PERPL_MAINNET_EXCHANGE, accountId: 5071, market: "BTCUSD",
+      exchange: PERPL_MAINNET_EXCHANGE, accountId: 5198, market: "BTCUSD",
       perpetualId: 1, actionId: "124", exchangeOrderId: "44", placementActionId: "123",
     });
     await Promise.resolve();
     const cancelFrame = socket.sent[2]!;
     expect(cancelFrame).toMatchObject({ mt: 22, oid: 6_603_226_349_594, t: 5 });
     socket.message({ mt: 24, at: {}, d: [{
-      at: {}, c: {}, rq: 102, mkt: 1, acc: 5071, oid: 6_603_226_349_594, scid: 44,
+      at: {}, c: {}, rq: 102, mkt: 1, acc: 5198, oid: 6_603_226_349_594, scid: 44,
       st: 5, sr: 28, t: 5, p: 0, os: 0, fp: 0, fs: 0, f: "0", fl: 0, mm: 0, lv: 0,
     }] });
     await expect(cancellation).resolves.toEqual({
@@ -94,10 +94,10 @@ describe("PerplApiExecutionTransport", () => {
     const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "44".repeat(32), socketFactory: () => socket });
     const connecting = transport.connect(); socket.open(); await connecting;
     socket.message({ mt: 23, at: {}, d: [{
-      at: {}, c: {}, rq: 99, mkt: 20, acc: 5071, oid: 6_603_226_611_742, scid: 47,
+      at: {}, c: {}, rq: 99, mkt: 20, acc: 5198, oid: 6_603_226_611_742, scid: 47,
       st: 2, sr: 35, t: 2, p: 245551, os: 4, fp: 0, fs: 0, f: "0", fl: 1, mm: 0, lv: 1200,
     }] });
-    void transport.request({ version: 1, id: "cancel", action: "cancel", chainId: 143, exchange: PERPL_MAINNET_EXCHANGE, accountId: 5071, market: "ETHUSD", perpetualId: 20, actionId: "200", exchangeOrderId: "47", placementActionId: "199" });
+    void transport.request({ version: 1, id: "cancel", action: "cancel", chainId: 143, exchange: PERPL_MAINNET_EXCHANGE, accountId: 5198, market: "ETHUSD", perpetualId: 20, actionId: "200", exchangeOrderId: "47", placementActionId: "199" });
     await Promise.resolve();
     expect(socket.sent[1]).toMatchObject({ oid: 6_603_226_611_742, mkt: 20, t: 5 });
     transport.close();
@@ -108,7 +108,7 @@ describe("PerplApiExecutionTransport", () => {
     const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "66".repeat(32), socketFactory: () => socket });
     const connecting = transport.connect(); socket.open(); await connecting;
     socket.message({ mt: 24, at: {}, d: [{
-      at: { t: 1_788_180_000_000 }, c: {}, rq: 101, mkt: 20, acc: 5071,
+      at: { t: 1_788_180_000_000 }, c: {}, rq: 101, mkt: 20, acc: 5198,
       oid: 6_603_226_611_742, scid: 47, st: 2, sr: 35, t: 2, p: 245551,
       os: 4, fp: 0, fs: 0, f: "0", fl: 1, mm: 0, lv: 1200,
     }] });
@@ -116,11 +116,11 @@ describe("PerplApiExecutionTransport", () => {
       exchangeOrderId: "47", side: "sell", price: 2455.51, size: 0.004,
     })]);
     socket.message({ mt: 25, at: {}, d: [{
-      at: { t: 1_788_180_001_000, l: 7 }, mkt: 20, acc: 5071,
+      at: { t: 1_788_180_001_000, l: 7 }, mkt: 20, acc: 5198,
       oid: 6_603_226_611_742, t: 2, l: 1, p: 245551, s: 4, f: "0",
     }] });
     socket.message({ mt: 24, at: {}, d: [{
-      at: {}, c: {}, rq: 101, mkt: 20, acc: 5071, oid: 6_603_226_611_742,
+      at: {}, c: {}, rq: 101, mkt: 20, acc: 5198, oid: 6_603_226_611_742,
       scid: 47, st: 4, sr: 0, t: 2, p: 245551, os: 4, fp: 245551, fs: 4,
       f: "0", fl: 1, mm: 0, lv: 1200,
     }] });
@@ -135,7 +135,7 @@ describe("PerplApiExecutionTransport", () => {
     const socket = new FakeSocket();
     const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "55".repeat(32), socketFactory: () => socket });
     const connecting = transport.connect(); socket.open(); await connecting;
-    await expect(transport.request({ version: 1, id: "cancel", action: "cancel", chainId: 143, exchange: PERPL_MAINNET_EXCHANGE, accountId: 5071, market: "BTCUSD", perpetualId: 1, actionId: "201", exchangeOrderId: "44", placementActionId: "200" })).rejects.toThrow(/no verified One-Click order identity/);
+    await expect(transport.request({ version: 1, id: "cancel", action: "cancel", chainId: 143, exchange: PERPL_MAINNET_EXCHANGE, accountId: 5198, market: "BTCUSD", perpetualId: 1, actionId: "201", exchangeOrderId: "44", placementActionId: "200" })).rejects.toThrow(/no verified One-Click order identity/);
     expect(socket.sent).toHaveLength(1);
     transport.close();
   });
@@ -168,7 +168,7 @@ describe("PerplApiExecutionTransport", () => {
     const sent = socket.sent[1]!;
     socket.message({ mt: 3, sid: 100, sn: 11, cid: sent.sn, status: { code: 0, error: "" } });
     socket.message({ mt: 24, at: {}, d: [{
-      at: {}, c: {}, rq: 101, mkt: 1, acc: 5071, oid: 0, scid: 0, st: 7, sr: 36,
+      at: {}, c: {}, rq: 101, mkt: 1, acc: 5198, oid: 0, scid: 0, st: 7, sr: 36,
       fr: 1, t: 1, p: 780000, os: 18, fp: 0, fs: 0, f: "0", fl: 1, mm: 0, lv: 1500,
     }] });
     await expect(outcome).resolves.toMatchObject({ event: "rejected", reason: "order failed" });

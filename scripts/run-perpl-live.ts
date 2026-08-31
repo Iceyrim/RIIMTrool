@@ -8,6 +8,7 @@ import { PerplApiExecutionTransport } from "../src/adapters/perpl/PerplApiExecut
 import { loadPerplApiCredentials } from "../src/adapters/perpl/PerplApiCredentials.js";
 import { PerplOnchainAdapter } from "../src/adapters/perpl/onchain/PerplOnchainAdapter.js";
 import { PerplRustClient } from "../src/adapters/perpl/onchain/PerplRustClient.js";
+import { PERPL_MAINNET_WALLET_ADDRESS } from "../src/adapters/perpl/onchain/protocol.js";
 import { createAlertBusFromEnv } from "../src/alerting/createAlertBusFromEnv.js";
 import { loadMarketsConfig } from "../src/config/loadConfig.js";
 import { toEngineMarketConfig } from "../src/config/toEngineMarketConfig.js";
@@ -33,7 +34,7 @@ import { PerplSessionEquityGuard } from "../src/engine/PerplSessionEquityGuard.j
 import { PaperRunner, type PaperRunnerMarket } from "../src/paperRunner/PaperRunner.js";
 
 const RPC = "https://rpc.monad.xyz";
-const ACCOUNT_ID = 5071;
+const ACCOUNT_ID = 5198;
 async function confirm(phrase: string): Promise<void> {
   if (!process.stdin.isTTY)
     throw new Error("Perpl Live requires a human at an interactive terminal");
@@ -58,6 +59,8 @@ async function main(): Promise<void> {
   const stateRoot = resolve("state/perpl-live");
   mkdirSync(stateRoot, { recursive: true });
   if (!preflightOnly) consumePerplLiveArmFile(join(stateRoot, "ARMED"));
+  const accountStateRoot = join(stateRoot, String(ACCOUNT_ID));
+  mkdirSync(accountStateRoot, { recursive: true });
 
   const configPath =
     process.env.PERPL_MARKETS_CONFIG_PATH ?? resolve("config/markets.perpl-live.yaml");
@@ -125,6 +128,10 @@ async function main(): Promise<void> {
     });
     await transport.connect();
     apiEvidence = transport.getConnectionEvidence();
+    if (apiEvidence.accountId !== ACCOUNT_ID)
+      throw new Error(`authenticated Perpl account ${apiEvidence.accountId} does not match pinned account ${ACCOUNT_ID}`);
+    if (apiEvidence.walletAddress.toLowerCase() !== PERPL_MAINNET_WALLET_ADDRESS)
+      throw new Error("authenticated Perpl wallet does not match the pinned production wallet");
   } catch (error) {
     transport?.close();
     transport = undefined;
@@ -196,7 +203,7 @@ async function main(): Promise<void> {
     executionTransport,
   );
   const equityGuard = new PerplSessionEquityGuard(
-    join(stateRoot, "equity.json"),
+    join(accountStateRoot, "equity.json"),
     config.accountRisk.sessionLossCapUsd,
     10_000,
     Date.now,
@@ -208,7 +215,10 @@ async function main(): Promise<void> {
   const pnlSource = new PerplEquityPnlSource(liveAdapter, equityGuard, requestShutdown);
   pnlSource.arm();
   const alertBus = createAlertBusFromEnv("PERPL LIVE");
-  const history = new DashboardHistoryStore(resolve("state/dashboard"), "perpl-live");
+  const history = new DashboardHistoryStore(
+    resolve("state/dashboard"),
+    `perpl-live-${ACCOUNT_ID}`,
+  );
   const telemetry = new DashboardTelemetry(
     liveAdapter,
     true,
@@ -226,8 +236,8 @@ async function main(): Promise<void> {
   const markets: PaperRunnerMarket[] = enabled.map((market) => ({
     market: market.symbol,
     engine: new MarketEngine(liveAdapter, toEngineMarketConfig(market), {
-      stateFilePath: join(stateRoot, `orders-${market.symbol}.json`),
-      tradeLogFilePath: join(stateRoot, `trades-${market.symbol}.jsonl`),
+      stateFilePath: join(accountStateRoot, `orders-${market.symbol}.json`),
+      tradeLogFilePath: join(accountStateRoot, `trades-${market.symbol}.jsonl`),
       onFillRecorded: (entry) => {
         telemetry.recordFill(entry);
         alertBus?.emit({
@@ -260,7 +270,7 @@ async function main(): Promise<void> {
     intervalMs,
     runnerLabel: "PerplLiveRunner",
     logFilePath: join(
-      stateRoot,
+      accountStateRoot,
       "logs",
       `run-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`,
     ),

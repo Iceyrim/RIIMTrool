@@ -18,7 +18,7 @@ use crate::protocol::{
 };
 
 pub const MAINNET_RPC_URL: &str = "https://rpc.monad.xyz";
-pub const MAINNET_ACCOUNT_ID: u32 = 5071;
+pub const MAINNET_ACCOUNT_ID: u32 = 5198;
 
 pub type SharedExchange = Arc<RwLock<state::Exchange>>;
 

@@ -20,7 +20,7 @@ class FakeBridge implements PerplBridgeTransport {
       chainId: 143,
       exchange: PERPL_MAINNET_EXCHANGE,
       snapshot: {
-        accountId: 5071,
+        accountId: 5198,
         account: {
           balance: "18.341694",
           lockedBalance: "0",
@@ -109,7 +109,7 @@ describe("PerplOnchainAdapter", () => {
         new PerplOnchainAdapter(new FakeBridge(), {
           rpcUrl: "https://rpc.monad.xyz",
           markets: [{ symbol: "ETHUSD", perpetualId: 20 }],
-          accountIds: [5071],
+          accountIds: [5198],
         }),
     ).not.toThrow();
   });
@@ -120,7 +120,7 @@ describe("PerplOnchainAdapter", () => {
       {
         rpcUrl: "https://rpc.monad.xyz",
         markets: [{ symbol: "BTCUSD", perpetualId: 1 }],
-        accountIds: [5071],
+        accountIds: [5198],
       },
       () => 1000,
     );
@@ -182,7 +182,7 @@ describe("PerplOnchainAdapter", () => {
         new PerplOnchainAdapter(new FakeBridge(), {
           rpcUrl: "http://remote.invalid",
           markets: [{ symbol: "BTCUSD", perpetualId: 1 }],
-          accountIds: [5071],
+          accountIds: [5198],
         }),
     ).toThrow(/approved mainnet RPC/);
     expect(
@@ -190,7 +190,7 @@ describe("PerplOnchainAdapter", () => {
         new PerplOnchainAdapter(new FakeBridge(), {
           rpcUrl: "https://testnet-rpc.monad.xyz",
           markets: [{ symbol: "BTCUSD", perpetualId: 16 }],
-          accountIds: [5071],
+          accountIds: [5198],
         }),
     ).toThrow(/approved mainnet RPC/);
     expect(
@@ -215,7 +215,7 @@ describe("PerplOnchainAdapter", () => {
     const adapter = new PerplOnchainAdapter(bridge, {
       rpcUrl: "https://rpc.monad.xyz",
       markets: [{ symbol: "BTCUSD", perpetualId: 1 }],
-      accountIds: [5071],
+      accountIds: [5198],
     }, () => 1000);
     await adapter.connect();
     let resolved = false;

@@ -96,7 +96,7 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
   private connectionEvidence?: PerplApiConnectionEvidence;
 
   constructor(options: PerplApiExecutionOptions) {
-    this.accountId = options.accountId ?? 5071;
+    this.accountId = options.accountId ?? 5198;
     this.chainId = options.chainId ?? 143;
     this.wsUrl = options.wsUrl ?? "wss://app.perpl.xyz/ws/v1/trading";
     this.timeoutMs = options.timeoutMs ?? 45_000;

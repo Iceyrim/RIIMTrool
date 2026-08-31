@@ -18,7 +18,7 @@ describe("Perpl on-chain mappers", () => {
       }),
     ).toMatchObject({ remainingSize: 0.008, isReduceOnly: true, state: "partiallyFilled" });
     const snapshot = {
-      accountId: 5071,
+      accountId: 5198,
       account: {
         balance: "1",
         lockedBalance: "0",
@@ -46,7 +46,7 @@ describe("Perpl on-chain mappers", () => {
 
   it("accepts the proven mainnet ETH perpetual id", () => {
     const snapshot = {
-      accountId: 5071,
+      accountId: 5198,
       account: {
         balance: "1",
         lockedBalance: "0",

@@ -28,7 +28,7 @@ describe("PerplCanaryExecutor", () => {
       market: "BTCUSD", exchangeOrderId: "47", clientActionId: "cancel-1",
     })).resolves.toEqual({ state: "confirmed", exchangeOrderId: "47" });
     expect(transport.requests).toMatchObject([
-      { action: "place", chainId: 143, accountId: 5071, perpetualId: 1, orderType: "postOnly", leverage: "15" },
+      { action: "place", chainId: 143, accountId: 5198, perpetualId: 1, orderType: "postOnly", leverage: "15" },
       { action: "cancel", exchangeOrderId: "47", placementActionId: "place-1" },
     ]);
   });
@@ -42,7 +42,7 @@ describe("PerplCanaryExecutor", () => {
   it("rejects secret fields, excess notional, and wrong identities", () => {
     const base = {
       version: 1, id: "x", action: "place", chainId: 143,
-      exchange: "0x34b6552d57a35a1d042ccae1951bd1c370112a6f", accountId: 5071,
+      exchange: "0x34b6552d57a35a1d042ccae1951bd1c370112a6f", accountId: 5198,
       market: "BTCUSD", perpetualId: 1, actionId: "place-1", side: "buy",
       orderType: "postOnly", price: "77000", size: "0.00018", reduceOnly: false, leverage: "1",
     } as const;
