@@ -6,6 +6,7 @@ import type {
 } from "../adapters/ExchangeAdapter.js";
 import type { PerplCanaryExecutor } from "../adapters/perpl/onchain/PerplCanaryExecutor.js";
 import { quantizePerplLimitPrice } from "../adapters/perpl/PerplApiExecutionTransport.js";
+import type { PerplApiLiveOrderSource } from "../adapters/perpl/PerplApiExecutionTransport.js";
 import type { PerplOnchainAdapter, PerplPositionSafetyEvidence } from "../adapters/perpl/onchain/PerplOnchainAdapter.js";
 import type { BridgeAccountEvidence } from "../adapters/perpl/onchain/protocol.js";
 import type { PerplEquityEvidence } from "./PerplSessionEquityGuard.js";
@@ -27,6 +28,7 @@ export class PerplLiveAdapter implements ExchangeAdapter {
     private readonly onAmbiguous: (reason: string) => void = () => undefined,
     private readonly alreadyConnected = false,
     private readonly leverageByMarket: Readonly<Record<string, number>> = {},
+    private readonly liveOrderSource?: PerplApiLiveOrderSource,
   ) {}
 
   connect(): Promise<void> { return this.alreadyConnected ? Promise.resolve() : this.readonlyAdapter.connect(); }
@@ -37,7 +39,9 @@ export class PerplLiveAdapter implements ExchangeAdapter {
     await this.readonlyAdapter.waitForSnapshotAfter(before);
   }
   getPositions(market?: string): NormalizedPosition[] { return this.readonlyAdapter.getPositions(market); }
-  getOpenOrders(market?: string): NormalizedOrder[] { return this.readonlyAdapter.getOpenOrders(market); }
+  getOpenOrders(market?: string): NormalizedOrder[] {
+    return this.liveOrderSource?.getOpenOrders(market) ?? this.readonlyAdapter.getOpenOrders(market);
+  }
   getBalances(): NormalizedBalance[] { return this.readonlyAdapter.getBalances(); }
 
   getMarginStatus(): NormalizedMarginStatus {
@@ -78,7 +82,9 @@ export class PerplLiveAdapter implements ExchangeAdapter {
     return { success: result.state === "confirmed", exchangeOrderId };
   }
 
-  getOrderFills(id: string, market: string): Promise<NormalizedFill[]> { return this.readonlyAdapter.getOrderFills(id, market); }
+  getOrderFills(id: string, market: string): Promise<NormalizedFill[]> {
+    return this.liveOrderSource?.getOrderFills(id, market) ?? this.readonlyAdapter.getOrderFills(id, market);
+  }
   getMarketPrice(market: string): Promise<MarketPrice> { return this.readonlyAdapter.getMarketPrice(market); }
   getAccountVolume(params: { market?: string; since: string; until: string }): Promise<AccountVolume[]> { return this.readonlyAdapter.getAccountVolume(params); }
   getAccountEvidence(): BridgeAccountEvidence { return this.readonlyAdapter.getAccountEvidence(); }

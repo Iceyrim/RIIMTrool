@@ -188,6 +188,7 @@ async function main(): Promise<void> {
     requestShutdown,
     true,
     Object.fromEntries(enabled.map((market) => [market.symbol, market.leverage ?? 1])),
+    executionTransport,
   );
   const equityGuard = new PerplSessionEquityGuard(
     join(stateRoot, "equity.json"),

@@ -3,6 +3,7 @@ import { ExchangeAdapterError } from "../AdapterError.js";
 import { PerplSigner } from "./PerplSigner.js";
 import { mapAuthenticatedFrame } from "./authMappers.js";
 import type { PerplOrder, PerplOrderRequest } from "./authTypes.js";
+import type { NormalizedFill, NormalizedOrder } from "../ExchangeAdapter.js";
 import type { PerplExecutionTransport } from "./onchain/PerplCanaryExecutor.js";
 import type { PerplExecutionIntent, PerplExecutionOutcome } from "./onchain/executionProtocol.js";
 import { PerplTradingProtocol, type PerplResolution } from "./tradingProtocol.js";
@@ -39,6 +40,11 @@ export interface PerplApiConnectionEvidence {
   accountId: number;
   walletAddress: string;
   lastForwardedRequestId: number;
+}
+
+export interface PerplApiLiveOrderSource {
+  getOpenOrders(market?: string): NormalizedOrder[];
+  getOrderFills(exchangeOrderId: string, market: string): Promise<NormalizedFill[]>;
 }
 
 const OPEN = 1;
@@ -83,6 +89,9 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
   /** The engine/on-chain bridge identifies orders by scid, while One-Click cancellation requests
    * require the API-facing oid. Keep the identities paired instead of conflating them. */
   private readonly apiOrderIdByContractId = new Map<string, number>();
+  private readonly openOrdersByContractId = new Map<string, NormalizedOrder>();
+  private readonly fillsByApiOrderId = new Map<number, NormalizedFill[]>();
+  private ordersSnapshotReady = false;
   private connectionEvidence?: PerplApiConnectionEvidence;
 
   constructor(options: PerplApiExecutionOptions) {
@@ -127,12 +136,11 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
               walletAddress: frame.addr,
               lastForwardedRequestId: account.lfr,
             };
-            this.ready = true;
-            clearTimeout(timer);
-            resolve();
+            this.tryBecomeReady(timer, resolve);
             return;
           }
           this.ingest(raw);
+          this.tryBecomeReady(timer, resolve);
         } catch (error) {
           clearTimeout(timer);
           reject(error);
@@ -187,11 +195,28 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
     return { ...this.connectionEvidence };
   }
 
+  getOpenOrders(market?: string): NormalizedOrder[] {
+    if (!this.ready || !this.ordersSnapshotReady)
+      throw new ExchangeAdapterError("Perpl API open-order snapshot is unavailable");
+    return [...this.openOrdersByContractId.values()]
+      .filter((order) => !market || order.market === market)
+      .map((order) => ({ ...order }));
+  }
+
+  async getOrderFills(exchangeOrderId: string, market: string): Promise<NormalizedFill[]> {
+    const apiOrderId = this.apiOrderIdByContractId.get(exchangeOrderId);
+    if (apiOrderId === undefined) return [];
+    return (this.fillsByApiOrderId.get(apiOrderId) ?? [])
+      .filter((fill) => fill.market === market)
+      .map((fill) => ({ ...fill }));
+  }
+
   close(): void {
     this.failAll("Perpl API transport closed before definitive order outcome");
     this.socket?.close();
     this.socket = undefined;
     this.ready = false;
+    this.ordersSnapshotReady = false;
     this.connectionEvidence = undefined;
   }
 
@@ -236,12 +261,17 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
     }
     const frame = mapAuthenticatedFrame(raw);
     if (frame.mt === 21) this.protocol.acceptAccountUpdate(frame.id, frame.lfr);
-    if (frame.mt === 23) for (const order of frame.d) this.rememberOrderIdentity(order);
+    if (frame.mt === 23) {
+      this.openOrdersByContractId.clear();
+      for (const order of frame.d) this.acceptOrderState(order);
+      this.ordersSnapshotReady = true;
+    }
     if (frame.mt === 24) for (const order of frame.d) this.acceptOrder(order);
+    if (frame.mt === 25) for (const fill of frame.d) this.acceptFill(fill);
   }
 
   private acceptOrder(order: PerplOrder): void {
-    this.rememberOrderIdentity(order);
+    this.acceptOrderState(order);
     const resolution = this.protocol.correlateOrder(order);
     if (!resolution) return;
     for (const [sn, pending] of this.pending) {
@@ -259,6 +289,64 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
   private rememberOrderIdentity(order: PerplOrder): void {
     if (order.acc === this.accountId && order.oid > 0 && order.scid > 0)
       this.apiOrderIdByContractId.set(String(order.scid), order.oid);
+  }
+
+  private acceptOrderState(order: PerplOrder): void {
+    this.rememberOrderIdentity(order);
+    if (order.acc !== this.accountId || order.scid <= 0) return;
+    const id = String(order.scid);
+    if (order.st !== 2 && order.st !== 3) {
+      this.openOrdersByContractId.delete(id);
+      return;
+    }
+    const market = order.mkt === 1 ? "BTCUSD" : order.mkt === 20 ? "ETHUSD" : undefined;
+    if (!market || order.p === undefined) return;
+    const scale = this.scales[market];
+    const filledSize = order.fs / 10 ** scale.sizeDecimals;
+    const size = order.os / 10 ** scale.sizeDecimals;
+    const side = order.t === 1 || order.t === 4 ? "buy" : "sell";
+    this.openOrdersByContractId.set(id, {
+      exchangeOrderId: id,
+      market,
+      side,
+      type: "postOnly",
+      price: order.p / 10 ** scale.priceDecimals,
+      size,
+      filledSize,
+      remainingSize: Math.max(0, size - filledSize),
+      isReduceOnly: order.t === 3 || order.t === 4,
+      state: filledSize > 0 ? "partiallyFilled" : "open",
+    });
+  }
+
+  private acceptFill(fill: import("./authTypes.js").PerplFill): void {
+    if (fill.acc !== this.accountId || fill.p === undefined) return;
+    const market = fill.mkt === 1 ? "BTCUSD" : fill.mkt === 20 ? "ETHUSD" : undefined;
+    if (!market) return;
+    const scale = this.scales[market];
+    const rawTime = fill.at.t ?? Date.now();
+    const normalized: NormalizedFill = {
+      exchangeOrderId: "",
+      tradeId: fill.at.txid ?? `${fill.oid}:${fill.at.l ?? rawTime}`,
+      market,
+      side: fill.t === 1 || fill.t === 4 ? "buy" : "sell",
+      price: fill.p / 10 ** scale.priceDecimals,
+      size: fill.s / 10 ** scale.sizeDecimals,
+      timestamp: rawTime < 1_000_000_000_000 ? rawTime * 1_000 : rawTime,
+    };
+    const existing = this.fillsByApiOrderId.get(fill.oid) ?? [];
+    if (!existing.some((item) => item.tradeId === normalized.tradeId)) existing.push(normalized);
+    this.fillsByApiOrderId.set(fill.oid, existing);
+    for (const [contractId, apiOrderId] of this.apiOrderIdByContractId) {
+      if (apiOrderId === fill.oid) for (const item of existing) item.exchangeOrderId = contractId;
+    }
+  }
+
+  private tryBecomeReady(timer: NodeJS.Timeout, resolve: () => void): void {
+    if (!this.connectionEvidence || !this.ordersSnapshotReady || this.ready) return;
+    this.ready = true;
+    clearTimeout(timer);
+    resolve();
   }
 
   private finish(sn: number, resolution: PerplResolution, exchangeOrderId?: string): void {

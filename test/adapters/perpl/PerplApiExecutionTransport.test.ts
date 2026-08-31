@@ -14,6 +14,7 @@ class FakeSocket {
       mt: 19, sn: 10, at: {}, addr: "0xa89bC210BaB1156113571F2a9193c5282efBF78a", n: 1, fl: 0,
       as: [{ in: 1, id: 5071, fr: false, fw: true, ft: 0, lfr: 100, b: "18.34", lb: "0" }],
     }));
+    if (frame.mt === 29) queueMicrotask(() => this.message({ mt: 23, at: {}, d: [] }));
   }
   close(): void { this.emit("close", {}); }
   addEventListener(type: string, listener: (event: any) => void): void {
@@ -99,6 +100,34 @@ describe("PerplApiExecutionTransport", () => {
     void transport.request({ version: 1, id: "cancel", action: "cancel", chainId: 143, exchange: PERPL_MAINNET_EXCHANGE, accountId: 5071, market: "ETHUSD", perpetualId: 20, actionId: "200", exchangeOrderId: "47", placementActionId: "199" });
     await Promise.resolve();
     expect(socket.sent[1]).toMatchObject({ oid: 6_603_226_611_742, mkt: 20, t: 5 });
+    transport.close();
+  });
+
+  it("publishes contract-identified live orders and fills from the authenticated stream", async () => {
+    const socket = new FakeSocket();
+    const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "66".repeat(32), socketFactory: () => socket });
+    const connecting = transport.connect(); socket.open(); await connecting;
+    socket.message({ mt: 24, at: {}, d: [{
+      at: { t: 1_788_180_000_000 }, c: {}, rq: 101, mkt: 20, acc: 5071,
+      oid: 6_603_226_611_742, scid: 47, st: 2, sr: 35, t: 2, p: 245551,
+      os: 4, fp: 0, fs: 0, f: "0", fl: 1, mm: 0, lv: 1200,
+    }] });
+    expect(transport.getOpenOrders("ETHUSD")).toEqual([expect.objectContaining({
+      exchangeOrderId: "47", side: "sell", price: 2455.51, size: 0.004,
+    })]);
+    socket.message({ mt: 25, at: {}, d: [{
+      at: { t: 1_788_180_001_000, l: 7 }, mkt: 20, acc: 5071,
+      oid: 6_603_226_611_742, t: 2, l: 1, p: 245551, s: 4, f: "0",
+    }] });
+    socket.message({ mt: 24, at: {}, d: [{
+      at: {}, c: {}, rq: 101, mkt: 20, acc: 5071, oid: 6_603_226_611_742,
+      scid: 47, st: 4, sr: 0, t: 2, p: 245551, os: 4, fp: 245551, fs: 4,
+      f: "0", fl: 1, mm: 0, lv: 1200,
+    }] });
+    expect(transport.getOpenOrders("ETHUSD")).toEqual([]);
+    await expect(transport.getOrderFills("47", "ETHUSD")).resolves.toEqual([
+      expect.objectContaining({ exchangeOrderId: "47", side: "sell", price: 2455.51, size: 0.004 }),
+    ]);
     transport.close();
   });
 
