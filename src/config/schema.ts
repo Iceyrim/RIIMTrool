@@ -64,9 +64,7 @@ export const marketConfigSchema = z
     quoteRepriceThresholdBps: z.number().positive().default(1),
     quoteMaximumLifetimeMs: z.number().int().nonnegative().default(120_000),
   })
-  .strict(
-    "Unknown market configuration key (sessionLossCapUsd is now accountRisk.sessionLossCapUsd)",
-  )
+  .strict("Unknown market configuration key (sessionLossCapUsd is now accountRisk.sessionLossCapUsd)")
   .refine((m) => m.levelSpacingBps.length === m.quoteLevels, {
     message: "levelSpacingBps length must match quoteLevels",
     path: ["levelSpacingBps"],
@@ -94,6 +92,10 @@ export const marketConfigSchema = z
 
 export const accountRiskSchema = z.object({
   sessionLossCapUsd: z.number().positive(),
+  dailyLossCapUsd: z.number().positive().optional(),
+  weeklyLossCapUsd: z.number().positive().optional(),
+  dailyVolumeTargetUsd: z.number().positive().optional(),
+  weeklyVolumeTargetUsd: z.number().positive().optional(),
 });
 
 export const marketsConfigSchema = z

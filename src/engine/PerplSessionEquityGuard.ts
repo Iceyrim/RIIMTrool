@@ -19,11 +19,17 @@ export interface PerplEquityStatus {
   sessionChange?: number;
   blockNumber?: string;
   haltReason?: string;
+  dailyChange?: number;
+  weeklyChange?: number;
 }
+
+interface EquityWindow { key: string; baselineEquity: number; currentEquity: number }
 
 interface Journal extends PerplEquityStatus {
   version: 1;
   lastEvidenceKey?: string;
+  daily?: EquityWindow;
+  weekly?: EquityWindow;
 }
 
 export class PerplSessionEquityGuard {
@@ -33,6 +39,7 @@ export class PerplSessionEquityGuard {
     private readonly maxSessionLoss: number,
     private readonly maxEvidenceAgeMs = 10_000,
     private readonly now = Date.now,
+    private readonly windowLimits: { dailyLossCapUsd?: number; weeklyLossCapUsd?: number } = {},
   ) {
     if (!(maxSessionLoss > 0) || !(maxEvidenceAgeMs > 0)) throw new Error("invalid Perpl equity guard limits");
     this.journal = this.load();
@@ -40,13 +47,14 @@ export class PerplSessionEquityGuard {
   }
 
   status(): PerplEquityStatus {
-    const { version: _, lastEvidenceKey: __, ...status } = this.journal;
+    const { version: _, lastEvidenceKey: __, daily: ___, weekly: ____, ...status } = this.journal;
     return { ...status };
   }
 
   arm(evidence: PerplEquityEvidence): PerplEquityStatus {
     if (this.journal.state !== "idle") throw new Error("equity guard must be idle before arming");
     const equity = this.validateEvidence(evidence);
+    const windows = this.windows(equity);
     this.persist({
       version: 1,
       state: "active",
@@ -56,6 +64,9 @@ export class PerplSessionEquityGuard {
       sessionChange: 0,
       blockNumber: evidence.blockNumber,
       lastEvidenceKey: this.key(evidence),
+      ...windows,
+      dailyChange: equity - windows.daily.baselineEquity,
+      weeklyChange: equity - windows.weekly.baselineEquity,
     });
     return this.status();
   }
@@ -78,6 +89,13 @@ export class PerplSessionEquityGuard {
     const baseline = this.journal.baselineEquity!;
     const change = equity - baseline;
     if (change <= -this.maxSessionLoss) return this.halted("Perpl session equity loss limit reached");
+    const windows = this.windows(equity);
+    const dailyChange = equity - windows.daily.baselineEquity;
+    const weeklyChange = equity - windows.weekly.baselineEquity;
+    if (this.windowLimits.dailyLossCapUsd && dailyChange <= -this.windowLimits.dailyLossCapUsd)
+      return this.halted("Perpl daily equity loss limit reached");
+    if (this.windowLimits.weeklyLossCapUsd && weeklyChange <= -this.windowLimits.weeklyLossCapUsd)
+      return this.halted("Perpl weekly equity loss limit reached");
     this.persist({
       ...this.journal,
       healthy: true,
@@ -85,13 +103,16 @@ export class PerplSessionEquityGuard {
       sessionChange: change,
       blockNumber: evidence.blockNumber,
       lastEvidenceKey: this.key(evidence),
+      ...windows,
+      dailyChange,
+      weeklyChange,
     });
     return this.status();
   }
 
   manualReset(phrase: string): PerplEquityStatus {
     if (phrase !== "RESET HALTED PERPL EQUITY SESSION") throw new Error("exact manual reset phrase required");
-    this.persist({ version: 1, state: "idle", healthy: false });
+    this.persist({ version: 1, state: "idle", healthy: false, daily: this.journal.daily, weekly: this.journal.weekly });
     return this.status();
   }
 
@@ -126,6 +147,21 @@ export class PerplSessionEquityGuard {
       evidence.unrealizedPnl,
       evidence.frozen,
     ].join("|");
+  }
+
+  private windows(equity: number): { daily: EquityWindow; weekly: EquityWindow } {
+    const instant = new Date(this.now());
+    const dailyKey = instant.toISOString().slice(0, 10);
+    const day = instant.getUTCDay() || 7;
+    instant.setUTCDate(instant.getUTCDate() - day + 1);
+    const weeklyKey = instant.toISOString().slice(0, 10);
+    const daily = this.journal.daily?.key === dailyKey
+      ? { ...this.journal.daily, currentEquity: equity }
+      : { key: dailyKey, baselineEquity: equity, currentEquity: equity };
+    const weekly = this.journal.weekly?.key === weeklyKey
+      ? { ...this.journal.weekly, currentEquity: equity }
+      : { key: weeklyKey, baselineEquity: equity, currentEquity: equity };
+    return { daily, weekly };
   }
 
   private halted(reason: string): PerplEquityStatus {

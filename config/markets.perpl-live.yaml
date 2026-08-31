@@ -1,18 +1,22 @@
 accountRisk:
-  sessionLossCapUsd: 3
+  sessionLossCapUsd: 1.5
+  dailyLossCapUsd: 1.5
+  weeklyLossCapUsd: 5
+  dailyVolumeTargetUsd: 10000
+  weeklyVolumeTargetUsd: 100000
 markets:
   - symbol: BTCUSD
     exchange: perpl
     exchangeSymbol: BTC
     enabled: true
     leverage: 15
-    orderSize: { min: 0.00018, max: 0.00018 }
+    orderSize: { min: 0.00030, max: 0.00030 }
     spreadBps: { normal: 5, min: 4, max: 7.5 }
     exitSpreadBps: 2.5
-    quoteLevels: 1
-    levelSpacingBps: [2]
-    inventoryReductionThresholdBase: 0.00036
-    riskLimits: { maxLongPosition: 0.001, maxShortPosition: 0.001, maxOrderSize: 0.0002, maxOrderNotionalUsd: 15, maxOpenOrders: 3 }
+    quoteLevels: 5
+    levelSpacingBps: [2, 3, 4, 7, 10]
+    inventoryReductionThresholdBase: 0.00060
+    riskLimits: { maxLongPosition: 0.0015, maxShortPosition: 0.0015, maxOrderSize: 0.00030, maxOrderNotionalUsd: 30, maxOpenOrders: 12 }
     quoteMinimumLifetimeMs: 30000
     quoteRepriceThresholdBps: 1
     quoteMaximumLifetimeMs: 120000
@@ -21,13 +25,13 @@ markets:
     exchangeSymbol: ETH
     enabled: true
     leverage: 12
-    orderSize: { min: 0.004, max: 0.004 }
+    orderSize: { min: 0.009, max: 0.009 }
     spreadBps: { normal: 5, min: 4, max: 7.5 }
     exitSpreadBps: 2.5
-    quoteLevels: 1
-    levelSpacingBps: [2]
-    inventoryReductionThresholdBase: 0.008
-    riskLimits: { maxLongPosition: 0.025, maxShortPosition: 0.025, maxOrderSize: 0.005, maxOrderNotionalUsd: 15, maxOpenOrders: 3 }
+    quoteLevels: 5
+    levelSpacingBps: [2, 3, 4, 7, 10]
+    inventoryReductionThresholdBase: 0.018
+    riskLimits: { maxLongPosition: 0.045, maxShortPosition: 0.045, maxOrderSize: 0.009, maxOrderNotionalUsd: 30, maxOpenOrders: 12 }
     quoteMinimumLifetimeMs: 30000
     quoteRepriceThresholdBps: 1
     quoteMaximumLifetimeMs: 120000

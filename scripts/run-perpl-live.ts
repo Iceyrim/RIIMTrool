@@ -145,6 +145,10 @@ async function main(): Promise<void> {
   );
   console.log(`Estimated initial collateral: $${estimatedRestingNotional.toFixed(2)}`);
   console.log(`Session equity-loss cap: $${config.accountRisk.sessionLossCapUsd}`);
+  console.log(`Daily equity-loss cap: $${config.accountRisk.dailyLossCapUsd ?? "not configured"}`);
+  console.log(`Weekly equity-loss cap: $${config.accountRisk.weeklyLossCapUsd ?? "not configured"}`);
+  console.log(`Daily confirmed-fill volume target: $${config.accountRisk.dailyVolumeTargetUsd ?? "not configured"}`);
+  console.log(`Weekly confirmed-fill volume target: $${config.accountRisk.weeklyVolumeTargetUsd ?? "not configured"}`);
   console.log(`Fill coverage begins at block: ${readonly.getFillCoverageStartBlock()}`);
   for (const market of enabled)
     console.log(
@@ -194,6 +198,12 @@ async function main(): Promise<void> {
   const equityGuard = new PerplSessionEquityGuard(
     join(stateRoot, "equity.json"),
     config.accountRisk.sessionLossCapUsd,
+    10_000,
+    Date.now,
+    {
+      dailyLossCapUsd: config.accountRisk.dailyLossCapUsd,
+      weeklyLossCapUsd: config.accountRisk.weeklyLossCapUsd,
+    },
   );
   const pnlSource = new PerplEquityPnlSource(liveAdapter, equityGuard, requestShutdown);
   pnlSource.arm();

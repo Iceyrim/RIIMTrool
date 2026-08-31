@@ -64,6 +64,27 @@ describe("PerplSessionEquityGuard", () => {
     });
   });
 
+  it("persists daily and weekly loss windows across manual session resets", () => {
+    const path = journalPath();
+    const subject = new PerplSessionEquityGuard(path, 10, 10_000, () => NOW, {
+      dailyLossCapUsd: 1.5,
+      weeklyLossCapUsd: 5,
+    });
+    subject.arm(evidence({ balance: "18" }));
+    expect(subject.observe(evidence({ balance: "17", blockNumber: "101" }))).toMatchObject({
+      state: "active",
+      dailyChange: -1,
+      weeklyChange: -1,
+    });
+    subject.manualReset("RESET HALTED PERPL EQUITY SESSION");
+    subject.arm(evidence({ balance: "17", blockNumber: "102" }));
+    expect(subject.observe(evidence({ balance: "16.5", blockNumber: "103" }))).toMatchObject({
+      state: "halted",
+      haltReason: "Perpl daily equity loss limit reached",
+      dailyChange: -1,
+    });
+  });
+
   it.each([
     ["frozen", { frozen: true }, "Perpl account is frozen"],
     ["stale", { observedAt: NOW - 10_001 }, "equity evidence is stale or invalid"],
