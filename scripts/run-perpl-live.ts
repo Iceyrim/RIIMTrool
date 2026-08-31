@@ -271,54 +271,93 @@ async function main(): Promise<void> {
       failures: string[];
     }> = [];
     let shutdownActionId = BigInt(Date.now()) * 1_000n;
-    for (const market of enabled) {
-      const initialBaseSize = liveAdapter.getPositions(market.symbol)[0]?.baseSize ?? 0;
-      const entry = {
-        market: market.symbol,
-        initialBaseSize,
-        attemptedChunks: [] as number[],
-        confirmedChunks: [] as number[],
-        failures: [] as string[],
-      };
-      flattening.push(entry);
-      if (initialBaseSize === 0) continue;
-      const book = liveAdapter.getBookEvidence(market.symbol);
-      const side = initialBaseSize > 0 ? "sell" as const : "buy" as const;
-      const limitPrice = side === "buy" ? book.bestAsk * 1.005 : book.bestBid * 0.995;
-      let chunks: number[];
-      try {
-        chunks = planPerplShutdownChunks({
-          positionBaseSize: initialBaseSize,
-          limitPrice,
-          maxOrderSize: market.riskLimits.maxOrderSize,
-          maxNotionalUsd: market.riskLimits.maxOrderNotionalUsd,
-          sizeDecimals: market.symbol === "BTCUSD" ? 5 : 3,
-        });
-      } catch (error) {
-        entry.failures.push(String(error));
-        continue;
-      }
-      for (const size of chunks) {
-        entry.attemptedChunks.push(size);
+    const cleanupBridge = new PerplRustClient(
+      resolve("rust/perpl-bridge/target/release/riim-perpl-bridge"),
+    );
+    const cleanupReadonly = new PerplOnchainAdapter(cleanupBridge, {
+      rpcUrl: RPC,
+      markets: mappings,
+      accountIds: [ACCOUNT_ID],
+    });
+    try {
+      await cleanupReadonly.connect();
+      const cleanupAdapter = new PerplLiveAdapter(
+        cleanupReadonly,
+        executor,
+        requestShutdown,
+        true,
+        Object.fromEntries(enabled.map((market) => [market.symbol, market.leverage ?? 1])),
+        executionTransport,
+      );
+      for (const market of enabled) {
+        const initialBaseSize = cleanupAdapter.getPositions(market.symbol)[0]?.baseSize ?? 0;
+        const entry = {
+          market: market.symbol,
+          initialBaseSize,
+          attemptedChunks: [] as number[],
+          confirmedChunks: [] as number[],
+          failures: [] as string[],
+        };
+        flattening.push(entry);
+        if (initialBaseSize === 0) continue;
+        const book = cleanupAdapter.getBookEvidence(market.symbol);
+        const side = initialBaseSize > 0 ? "sell" as const : "buy" as const;
+        const limitPrice = side === "buy" ? book.bestAsk * 1.005 : book.bestBid * 0.995;
+        let chunks: number[];
         try {
-          const placed = await liveAdapter.placeOrder({
-            market: market.symbol,
-            side,
-            type: "immediateOrCancel",
-            size,
-            price: limitPrice,
-            isReduceOnly: true,
-            clientOrderId: (++shutdownActionId).toString(10),
+          chunks = planPerplShutdownChunks({
+            positionBaseSize: initialBaseSize,
+            limitPrice,
+            maxOrderSize: market.riskLimits.maxOrderSize,
+            maxNotionalUsd: market.riskLimits.maxOrderNotionalUsd,
+            sizeDecimals: market.symbol === "BTCUSD" ? 5 : 3,
           });
-          if (!placed.success) {
-            entry.failures.push(placed.message ?? "reduce-only IOC was rejected");
-            break;
-          }
-          entry.confirmedChunks.push(size);
         } catch (error) {
           entry.failures.push(String(error));
-          break;
+          continue;
         }
+        for (const size of chunks) {
+          entry.attemptedChunks.push(size);
+          try {
+            const placed = await cleanupAdapter.placeOrder({
+              market: market.symbol,
+              side,
+              type: "immediateOrCancel",
+              size,
+              price: limitPrice,
+              isReduceOnly: true,
+              clientOrderId: (++shutdownActionId).toString(10),
+            });
+            if (!placed.success) {
+              entry.failures.push(placed.message ?? "reduce-only IOC was rejected");
+              break;
+            }
+            entry.confirmedChunks.push(size);
+          } catch (error) {
+            entry.failures.push(String(error));
+            break;
+          }
+        }
+      }
+    } catch (error) {
+      flattening.push({
+        market: "ALL",
+        initialBaseSize: Number.NaN,
+        attemptedChunks: [],
+        confirmedChunks: [],
+        failures: [`fresh shutdown snapshot failed: ${String(error)}`],
+      });
+    } finally {
+      try {
+        await cleanupReadonly.disconnect();
+      } catch (error) {
+        flattening.push({
+          market: "ALL",
+          initialBaseSize: Number.NaN,
+          attemptedChunks: [],
+          confirmedChunks: [],
+          failures: [`shutdown snapshot disconnect failed: ${String(error)}`],
+        });
       }
     }
     snapshotPublisher.stop();
