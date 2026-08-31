@@ -65,10 +65,49 @@ describe("PerplApiExecutionTransport", () => {
     await Promise.resolve();
     expect(settled).toBe(false);
     socket.message({ mt: 24, at: {}, d: [{
-      at: {}, c: {}, rq: 101, mkt: 1, acc: 5071, oid: 44, scid: 44, st: 2, sr: 35,
+      at: {}, c: {}, rq: 101, mkt: 1, acc: 5071, oid: 6_603_226_349_594, scid: 44, st: 2, sr: 35,
       t: 1, p: 780000, os: 18, fp: 0, fs: 0, f: "0", fl: 1, mm: 0, lv: 1500,
     }] });
     await expect(outcomePromise).resolves.toEqual({ version: 1, id: "x", event: "confirmed", actionId: "123", exchangeOrderId: "44" });
+
+    const cancellation = transport.request({
+      version: 1, id: "cancel", action: "cancel", chainId: 143,
+      exchange: PERPL_MAINNET_EXCHANGE, accountId: 5071, market: "BTCUSD",
+      perpetualId: 1, actionId: "124", exchangeOrderId: "44", placementActionId: "123",
+    });
+    await Promise.resolve();
+    const cancelFrame = socket.sent[2]!;
+    expect(cancelFrame).toMatchObject({ mt: 22, oid: 6_603_226_349_594, t: 5 });
+    socket.message({ mt: 24, at: {}, d: [{
+      at: {}, c: {}, rq: 102, mkt: 1, acc: 5071, oid: 6_603_226_349_594, scid: 44,
+      st: 5, sr: 28, t: 5, p: 0, os: 0, fp: 0, fs: 0, f: "0", fl: 0, mm: 0, lv: 0,
+    }] });
+    await expect(cancellation).resolves.toEqual({
+      version: 1, id: "cancel", event: "confirmed", actionId: "124", exchangeOrderId: "44",
+    });
+    transport.close();
+  });
+
+  it("restores API-to-contract order identity from the authenticated order snapshot", async () => {
+    const socket = new FakeSocket();
+    const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "44".repeat(32), socketFactory: () => socket });
+    const connecting = transport.connect(); socket.open(); await connecting;
+    socket.message({ mt: 23, at: {}, d: [{
+      at: {}, c: {}, rq: 99, mkt: 20, acc: 5071, oid: 6_603_226_611_742, scid: 47,
+      st: 2, sr: 35, t: 2, p: 245551, os: 4, fp: 0, fs: 0, f: "0", fl: 1, mm: 0, lv: 1200,
+    }] });
+    void transport.request({ version: 1, id: "cancel", action: "cancel", chainId: 143, exchange: PERPL_MAINNET_EXCHANGE, accountId: 5071, market: "ETHUSD", perpetualId: 20, actionId: "200", exchangeOrderId: "47", placementActionId: "199" });
+    await Promise.resolve();
+    expect(socket.sent[1]).toMatchObject({ oid: 6_603_226_611_742, mkt: 20, t: 5 });
+    transport.close();
+  });
+
+  it("refuses to guess an API cancellation identity from a contract order ID", async () => {
+    const socket = new FakeSocket();
+    const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "55".repeat(32), socketFactory: () => socket });
+    const connecting = transport.connect(); socket.open(); await connecting;
+    await expect(transport.request({ version: 1, id: "cancel", action: "cancel", chainId: 143, exchange: PERPL_MAINNET_EXCHANGE, accountId: 5071, market: "BTCUSD", perpetualId: 1, actionId: "201", exchangeOrderId: "44", placementActionId: "200" })).rejects.toThrow(/no verified One-Click order identity/);
+    expect(socket.sent).toHaveLength(1);
     transport.close();
   });
 

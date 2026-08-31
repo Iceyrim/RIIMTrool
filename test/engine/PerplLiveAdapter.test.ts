@@ -11,7 +11,7 @@ function readonly(evidence: PerplEquityEvidence) {
     connect: vi.fn(async () => undefined), disconnect: vi.fn(async () => undefined), refreshAccountState: vi.fn(async () => undefined),
     getPositions: vi.fn(() => []), getOpenOrders: vi.fn(() => []), getBalances: vi.fn(() => [{ token: "AUSD", amount: 20 }]),
     getAccountEvidence: vi.fn(() => ({ balance: evidence.balance, lockedBalance: evidence.lockedBalance, availableBalance: evidence.balance, unrealizedPnl: evidence.unrealizedPnl, positionDeposit: evidence.positionDeposit, maintenanceRequirement: "0", frozen: evidence.frozen })),
-    getSessionEquityEvidence: vi.fn(() => evidence), getPositionSafetyEvidence: vi.fn(() => []), getBookEvidence: vi.fn(() => ({ bestBid: 99, bestAsk: 101 })), getFillCoverageStartBlock: vi.fn(() => "1"),
+    getSessionEquityEvidence: vi.fn(() => evidence), waitForSnapshotAfter: vi.fn(async () => undefined), getPositionSafetyEvidence: vi.fn(() => []), getBookEvidence: vi.fn(() => ({ bestBid: 99, bestAsk: 101 })), getFillCoverageStartBlock: vi.fn(() => "1"),
     getOrderFills: vi.fn(async () => []), getMarketPrice: vi.fn(async () => ({ market: "BTCUSD", mark: 100 })), getAccountVolume: vi.fn(async () => []),
   } as unknown as PerplOnchainAdapter;
 }
@@ -25,6 +25,14 @@ describe("PerplLiveAdapter", () => {
     expect(placed.success && placed.order.exchangeOrderId).toBe("42");
     expect(executor.place).toHaveBeenCalledWith(expect.objectContaining({ leverage: 15 }));
     expect((await adapter.cancelOrder("42", "BTCUSD")).success).toBe(true);
+  });
+
+  it("waits for state from a newer block before reconciliation", async () => {
+    const evidence: PerplEquityEvidence = { balance: "20", lockedBalance: "0", positionDeposit: "0", unrealizedPnl: "0", frozen: false, blockNumber: "100", observedAt: Date.now() };
+    const source = readonly(evidence);
+    await new PerplLiveAdapter(source, {} as PerplCanaryExecutor).refreshAccountState();
+    expect(source.refreshAccountState).toHaveBeenCalledOnce();
+    expect(source.waitForSnapshotAfter).toHaveBeenCalledWith("100");
   });
 
   it("permanently signals an ambiguous execution outcome", async () => {

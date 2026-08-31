@@ -8,6 +8,10 @@ import type {
 import { PERPL_MAINNET_EXCHANGE } from "../../../../src/adapters/perpl/onchain/protocol.js";
 
 class FakeBridge implements PerplBridgeTransport {
+  private listener?: (message: BridgeResponse) => void;
+  onEvent(listener: (message: BridgeResponse) => void): void {
+    this.listener = listener;
+  }
   async request(message: BridgeRequest): Promise<BridgeResponse> {
     return {
       version: 1,
@@ -91,6 +95,11 @@ class FakeBridge implements PerplBridgeTransport {
     };
   }
   async close(): Promise<void> {}
+  async emitBlock(blockNumber: string): Promise<void> {
+    const response = await this.request({ id: "event" } as BridgeRequest);
+    if (response.event !== "ready") throw new Error("fake snapshot unavailable");
+    this.listener?.({ ...response, event: "state", snapshot: { ...response.snapshot, blockNumber } });
+  }
 }
 
 describe("PerplOnchainAdapter", () => {
@@ -199,5 +208,22 @@ describe("PerplOnchainAdapter", () => {
           accountIds: [7],
         }),
     ).toThrow(/account/);
+  });
+
+  it("waits for a strictly newer snapshot before live cleanup trusts exchange state", async () => {
+    const bridge = new FakeBridge();
+    const adapter = new PerplOnchainAdapter(bridge, {
+      rpcUrl: "https://rpc.monad.xyz",
+      markets: [{ symbol: "BTCUSD", perpetualId: 1 }],
+      accountIds: [5071],
+    }, () => 1000);
+    await adapter.connect();
+    let resolved = false;
+    const waiting = adapter.waitForSnapshotAfter("12", 1_000).then(() => { resolved = true; });
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+    await bridge.emitBlock("13");
+    await waiting;
+    expect(resolved).toBe(true);
   });
 });

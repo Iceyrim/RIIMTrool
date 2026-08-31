@@ -80,6 +80,9 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
   private connecting?: Promise<void>;
   private ready = false;
   private pending = new Map<number, PendingRequest>();
+  /** The engine/on-chain bridge identifies orders by scid, while One-Click cancellation requests
+   * require the API-facing oid. Keep the identities paired instead of conflating them. */
+  private readonly apiOrderIdByContractId = new Map<string, number>();
   private connectionEvidence?: PerplApiConnectionEvidence;
 
   constructor(options: PerplApiExecutionOptions) {
@@ -155,11 +158,18 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
     await this.connect();
     if (!this.socket || this.socket.readyState !== OPEN || !this.ready)
       throw new ExchangeAdapterError("Perpl API trading websocket is not ready");
+    const apiOrderId = intent.action === "cancel"
+      ? this.apiOrderIdByContractId.get(intent.exchangeOrderId)
+      : undefined;
+    if (intent.action === "cancel" && apiOrderId === undefined)
+      throw new ExchangeAdapterError(
+        `Perpl API has no verified One-Click order identity for contract order ${intent.exchangeOrderId}`,
+      );
     const identity = this.protocol.begin(this.accountId, intent.action, {
-      orderId: intent.action === "cancel" ? Number(intent.exchangeOrderId) : undefined,
+      orderId: apiOrderId,
       lb: 0,
     });
-    const request = this.frame(intent, identity.sn, identity.rq);
+    const request = this.frame(intent, identity.sn, identity.rq, apiOrderId);
     return new Promise<PerplExecutionOutcome>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(identity.sn);
@@ -185,12 +195,13 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
     this.connectionEvidence = undefined;
   }
 
-  private frame(intent: PerplExecutionIntent, sn: number, rq: number): PerplOrderRequest {
+  private frame(intent: PerplExecutionIntent, sn: number, rq: number, apiOrderId?: number): PerplOrderRequest {
     const market = intent.market;
     const common = { mt: 22 as const, sn, rq, mkt: intent.perpetualId, acc: intent.accountId, lb: 0 };
     if (intent.action === "cancel") {
-      const oid = Number(intent.exchangeOrderId);
-      if (!Number.isSafeInteger(oid) || oid <= 0) throw new ExchangeAdapterError("Perpl API cancellation order ID is invalid");
+      if (apiOrderId === undefined || !Number.isSafeInteger(apiOrderId) || apiOrderId <= 0)
+        throw new ExchangeAdapterError("Perpl API cancellation order ID is invalid");
+      const oid = apiOrderId;
       return { ...common, oid, t: 5, s: 0, fl: 0, lv: 0 };
     }
     const price = quantizePerplLimitPrice(intent.price, this.scales[market].priceDecimals, intent.side);
@@ -225,17 +236,29 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
     }
     const frame = mapAuthenticatedFrame(raw);
     if (frame.mt === 21) this.protocol.acceptAccountUpdate(frame.id, frame.lfr);
+    if (frame.mt === 23) for (const order of frame.d) this.rememberOrderIdentity(order);
     if (frame.mt === 24) for (const order of frame.d) this.acceptOrder(order);
   }
 
   private acceptOrder(order: PerplOrder): void {
+    this.rememberOrderIdentity(order);
     const resolution = this.protocol.correlateOrder(order);
     if (!resolution) return;
     for (const [sn, pending] of this.pending) {
       if (pending.intent.accountId === order.acc) {
-        if (pending.rq === order.rq) this.finish(sn, resolution, String(order.oid));
+        if (pending.rq === order.rq) {
+          const exchangeOrderId = pending.intent.action === "cancel"
+            ? pending.intent.exchangeOrderId
+            : order.scid > 0 ? String(order.scid) : undefined;
+          this.finish(sn, resolution, exchangeOrderId);
+        }
       }
     }
+  }
+
+  private rememberOrderIdentity(order: PerplOrder): void {
+    if (order.acc === this.accountId && order.oid > 0 && order.scid > 0)
+      this.apiOrderIdByContractId.set(String(order.scid), order.oid);
   }
 
   private finish(sn: number, resolution: PerplResolution, exchangeOrderId?: string): void {

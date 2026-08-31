@@ -31,7 +31,11 @@ export class PerplLiveAdapter implements ExchangeAdapter {
 
   connect(): Promise<void> { return this.alreadyConnected ? Promise.resolve() : this.readonlyAdapter.connect(); }
   disconnect(): Promise<void> { return this.readonlyAdapter.disconnect(); }
-  refreshAccountState(): Promise<void> { return this.readonlyAdapter.refreshAccountState(); }
+  async refreshAccountState(): Promise<void> {
+    const before = this.readonlyAdapter.getSessionEquityEvidence().blockNumber;
+    await this.readonlyAdapter.refreshAccountState();
+    await this.readonlyAdapter.waitForSnapshotAfter(before);
+  }
   getPositions(market?: string): NormalizedPosition[] { return this.readonlyAdapter.getPositions(market); }
   getOpenOrders(market?: string): NormalizedOrder[] { return this.readonlyAdapter.getOpenOrders(market); }
   getBalances(): NormalizedBalance[] { return this.readonlyAdapter.getBalances(); }

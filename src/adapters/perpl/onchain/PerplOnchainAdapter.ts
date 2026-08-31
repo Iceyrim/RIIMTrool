@@ -47,6 +47,12 @@ export class PerplOnchainAdapter implements ExchangeAdapter {
   private block?: bigint;
   private connected = false;
   private nextId = 1;
+  private readonly snapshotWaiters = new Set<{
+    after: bigint;
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timer: NodeJS.Timeout;
+  }>();
 
   constructor(
     private readonly bridge: PerplBridgeTransport,
@@ -92,10 +98,40 @@ export class PerplOnchainAdapter implements ExchangeAdapter {
   async disconnect(): Promise<void> {
     this.connected = false;
     this.snapshot = undefined;
+    for (const waiter of this.snapshotWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new ExchangeAdapterError("Perpl adapter disconnected while awaiting fresh state"));
+    }
+    this.snapshotWaiters.clear();
     await this.bridge.close();
   }
   async refreshAccountState(): Promise<void> {
     this.requireSnapshot();
+  }
+
+  /** Waits for exchange state from a strictly newer block. Used after live mutations so cleanup
+   * can never treat a pre-transaction cached snapshot as proof that an order is gone. */
+  waitForSnapshotAfter(blockNumber: string, timeoutMs = 15_000): Promise<void> {
+    if (!/^\d+$/.test(blockNumber) || timeoutMs < 100 || timeoutMs > 60_000)
+      return Promise.reject(new ExchangeAdapterError("Perpl fresh-snapshot request is invalid"));
+    const after = BigInt(blockNumber);
+    if ((this.block ?? 0n) > after) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const waiter = {
+        after,
+        resolve: () => {
+          clearTimeout(waiter.timer);
+          this.snapshotWaiters.delete(waiter);
+          resolve();
+        },
+        reject,
+        timer: setTimeout(() => {
+          this.snapshotWaiters.delete(waiter);
+          reject(new ExchangeAdapterError("Timed out awaiting a newer Perpl on-chain snapshot"));
+        }, timeoutMs),
+      };
+      this.snapshotWaiters.add(waiter);
+    });
   }
   getPositions(market?: string): NormalizedPosition[] {
     return this.requireSnapshot()
@@ -207,6 +243,9 @@ export class PerplOnchainAdapter implements ExchangeAdapter {
       throw new ExchangeAdapterError("Perpl bridge snapshot account does not match configuration");
     this.block = validateSnapshot(snapshot, this.block);
     this.snapshot = snapshot;
+    for (const waiter of this.snapshotWaiters) {
+      if (this.block > waiter.after) waiter.resolve();
+    }
   }
   private requireSnapshot(): BridgeSnapshot {
     if (!this.connected && !this.snapshot)
