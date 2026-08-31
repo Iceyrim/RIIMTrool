@@ -33,6 +33,6 @@ describe("Perpl Live startup gates", () => {
 
   it("loads the production config and estimates both sides of every level", () => {
     const config = loadMarketsConfig(join(process.cwd(), "config/markets.perpl-live.yaml"));
-    expect(estimatePerplRestingNotional(config.markets, new Map([["BTCUSD", 75_000], ["ETHUSD", 2_500]]))).toBeCloseTo(6.93, 2);
+    expect(estimatePerplRestingNotional(config.markets, new Map([["BTCUSD", 75_000], ["ETHUSD", 2_500]]))).toBeCloseTo(3.47, 2);
   });
 });

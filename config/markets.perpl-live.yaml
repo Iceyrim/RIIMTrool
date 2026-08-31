@@ -9,17 +9,10 @@ markets:
     orderSize: { min: 0.00018, max: 0.00018 }
     spreadBps: { normal: 5, min: 4, max: 7.5 }
     exitSpreadBps: 2.5
-    quoteLevels: 2
-    levelSpacingBps: [2, 4]
+    quoteLevels: 1
+    levelSpacingBps: [2]
     inventoryReductionThresholdBase: 0.00036
-    riskLimits:
-      {
-        maxLongPosition: 0.001,
-        maxShortPosition: 0.001,
-        maxOrderSize: 0.0002,
-        maxOrderNotionalUsd: 20,
-        maxOpenOrders: 5,
-      }
+    riskLimits: { maxLongPosition: 0.001, maxShortPosition: 0.001, maxOrderSize: 0.0002, maxOrderNotionalUsd: 15, maxOpenOrders: 3 }
     quoteMinimumLifetimeMs: 30000
     quoteRepriceThresholdBps: 1
     quoteMaximumLifetimeMs: 120000
@@ -31,17 +24,10 @@ markets:
     orderSize: { min: 0.004, max: 0.004 }
     spreadBps: { normal: 5, min: 4, max: 7.5 }
     exitSpreadBps: 2.5
-    quoteLevels: 2
-    levelSpacingBps: [2, 4]
+    quoteLevels: 1
+    levelSpacingBps: [2]
     inventoryReductionThresholdBase: 0.008
-    riskLimits:
-      {
-        maxLongPosition: 0.025,
-        maxShortPosition: 0.025,
-        maxOrderSize: 0.005,
-        maxOrderNotionalUsd: 20,
-        maxOpenOrders: 5,
-      }
+    riskLimits: { maxLongPosition: 0.025, maxShortPosition: 0.025, maxOrderSize: 0.005, maxOrderNotionalUsd: 15, maxOpenOrders: 3 }
     quoteMinimumLifetimeMs: 30000
     quoteRepriceThresholdBps: 1
     quoteMaximumLifetimeMs: 120000
