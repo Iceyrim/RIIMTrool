@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, join } from "node:path";
-import type { DashboardStatus } from "./DashboardService.js";
+import type { DashboardAccountStatus, DashboardStatus } from "./DashboardService.js";
 
 export type SnapshotLifecycle = "running" | "stopped";
 
@@ -55,6 +55,10 @@ export class DashboardSnapshotPublisher {
   private readonly startedAt: number;
   private readonly filePath: string;
   private timer?: ReturnType<typeof setInterval>;
+  private readonly lastGoodAccountMetrics = new Map<string, {
+    balances?: DashboardAccountStatus["balances"];
+    margin?: DashboardAccountStatus["margin"];
+  }>();
 
   constructor(
     private readonly directory: string,
@@ -89,7 +93,7 @@ export class DashboardSnapshotPublisher {
         lifecycle,
         startedAt: this.startedAt,
         publishedAt: now,
-        status: this.readStatus(),
+        status: this.statusForLifecycle(lifecycle),
       };
       const temporary = `${this.filePath}.${process.pid}.tmp`;
       writeFileSync(temporary, JSON.stringify(snapshot), { encoding: "utf8", mode: SNAPSHOT_FILE_MODE });
@@ -99,6 +103,36 @@ export class DashboardSnapshotPublisher {
     } catch (error) {
       console.error(`[DashboardSnapshot] publication failed: ${String(error)}`);
     }
+  }
+
+  private statusForLifecycle(lifecycle: SnapshotLifecycle): DashboardStatus {
+    const status = this.readStatus();
+    for (const account of status.accounts) {
+      const cached = this.lastGoodAccountMetrics.get(account.exchangeId) ?? {};
+      if (account.balances.available) cached.balances = account.balances;
+      if (account.margin.available) cached.margin = account.margin;
+      this.lastGoodAccountMetrics.set(account.exchangeId, cached);
+    }
+    if (lifecycle !== "stopped") return status;
+    return {
+      ...status,
+      accounts: status.accounts.map((account) => {
+        const cached = this.lastGoodAccountMetrics.get(account.exchangeId);
+        const balances = account.balances.available ? account.balances : cached?.balances ?? account.balances;
+        const margin = account.margin.available ? account.margin : cached?.margin ?? account.margin;
+        const restoredMargin = !account.margin.available && margin.available;
+        const healthDetails = restoredMargin
+          ? account.healthDetails.filter((detail) => detail !== "Margin unavailable")
+          : account.healthDetails;
+        return {
+          ...account,
+          balances,
+          margin,
+          healthDetails,
+          healthy: healthDetails.length === 0,
+        };
+      }),
+    };
   }
 
   private prune(): void {

@@ -39,6 +39,33 @@ describe("dashboard snapshot sidecar", () => {
     expect(result.snapshotConflicts).toEqual([]);
   });
 
+  it("retains the last fresh account balance and margin in a stopped snapshot", () => {
+    const directory = mkdtempSync(join(tmpdir(), "dashboard-snapshot-"));
+    let fresh = true;
+    const readStatus = (): DashboardStatus => ({
+      ...status("perpl"),
+      accounts: [{
+        exchangeId: "perpl-onchain-mainnet-live", venue: "Perpl", mode: "LIVE", label: "Perpl LIVE",
+        balances: fresh ? { available: true as const, value: [{ token: "AUSD", amount: 52 }] } : { available: false as const, value: null, sourceNeeded: "stale" },
+        margin: fresh ? { available: true as const, value: { accountValue: 52, maintenanceMarginFraction: 0, initialMarginFraction: 0, isAtBankruptcyRisk: false } } : { available: false as const, value: null, sourceNeeded: "stale" },
+        healthy: fresh, healthDetails: fresh ? [] : ["Margin unavailable"],
+        uptimeMs: { available: true as const, value: 1 }, sessionRealizedPnlUsd: 0,
+        sessionLossCapUsd: 1.5, pnlAvailable: true,
+        volumes: Object.fromEntries(["24h", "7d", "30d", "allTime"].map((key) => [key, { available: false as const, value: null, sourceNeeded: "test" }])) as never,
+        history: { available: false as const, value: null, sourceNeeded: "test" },
+        alertHealth: { available: false as const, value: null, sourceNeeded: "test" },
+      }],
+    });
+    const publisher = new DashboardSnapshotPublisher(directory, "perpl", readStatus, { sessionId: "one", startedAt: 10 });
+    publisher.publish("running", 20);
+    fresh = false;
+    publisher.stop();
+    const saved = JSON.parse(readFileSync(join(directory, "perpl--one.json"), "utf8")) as DashboardSessionSnapshot;
+    expect(saved.status.accounts[0]?.balances).toEqual({ available: true, value: [{ token: "AUSD", amount: 52 }] });
+    expect(saved.status.accounts[0]?.margin.available).toBe(true);
+    expect(saved.status.accounts[0]?.healthDetails).toEqual([]);
+  });
+
   it("keeps two simultaneously fresh running sessions visible as a conflict", () => {
     const result = aggregateDashboardSnapshots([snapshot("a", "running", 100, 200), snapshot("b", "running", 150, 200)], 201);
     expect(result.snapshotSources).toEqual([]);
