@@ -24,6 +24,7 @@ import { PerplEquityPnlSource } from "../src/engine/PerplEquityPnlSource.js";
 import { PerplLiveAdapter } from "../src/engine/PerplLiveAdapter.js";
 import {
   assertPerplLiveCapacity,
+  assertPerplShutdownCapacity,
   consumePerplLiveArmFile,
   estimatePerplRestingNotional,
   planPerplShutdownChunks,
@@ -118,6 +119,24 @@ async function main(): Promise<void> {
   } catch (error) {
     blockers.push(error instanceof Error ? error.message : String(error));
   }
+  for (const market of enabled) {
+    try {
+      const mark = marks.get(market.symbol);
+      if (!mark) throw new Error(`fresh mark unavailable for ${market.symbol}`);
+      assertPerplShutdownCapacity({
+        maxLongPosition: market.riskLimits.maxLongPosition,
+        maxShortPosition: market.riskLimits.maxShortPosition,
+        limitPrice: mark * 1.005,
+        maxOrderSize: market.riskLimits.maxOrderSize,
+        maxNotionalUsd: market.riskLimits.maxOrderNotionalUsd,
+        sizeDecimals: market.symbol === "BTCUSD" ? 5 : 3,
+      });
+    } catch (error) {
+      blockers.push(
+        `${market.symbol} shutdown capacity is unsafe: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
   try {
     const credentials = loadPerplApiCredentials();
     transport = new PerplApiExecutionTransport({
@@ -131,6 +150,9 @@ async function main(): Promise<void> {
       throw new Error(`authenticated Perpl account ${apiEvidence.accountId} does not match pinned account ${ACCOUNT_ID}`);
     if (apiEvidence.walletAddress.toLowerCase() !== PERPL_MAINNET_WALLET_ADDRESS)
       throw new Error("authenticated Perpl wallet does not match the pinned production wallet");
+    const apiPositions = enabled.flatMap((market) => transport!.getPositions(market.symbol));
+    if (apiPositions.some((position) => position.baseSize !== 0))
+      throw new Error("authenticated One-Click startup position evidence is not flat");
   } catch (error) {
     transport?.close();
     transport = undefined;
@@ -350,10 +372,19 @@ async function main(): Promise<void> {
               break;
             }
             entry.confirmedChunks.push(size);
+            await executionTransport.waitForPositionSettled(market.symbol);
           } catch (error) {
             entry.failures.push(String(error));
             break;
           }
+        }
+        try {
+          await executionTransport.waitForPositionSettled(market.symbol);
+          const remainingBaseSize = executionTransport.getPositions(market.symbol)[0]?.baseSize ?? 0;
+          if (remainingBaseSize !== 0)
+            entry.failures.push(`authoritative position remains ${remainingBaseSize} after shutdown flattening`);
+        } catch (error) {
+          entry.failures.push(`final authoritative position verification failed: ${String(error)}`);
         }
       }
     } catch (error) {
@@ -378,7 +409,6 @@ async function main(): Promise<void> {
       }
     }
     snapshotPublisher.stop();
-    executionTransport.close();
     await readonly.disconnect();
     const finalBridge = new PerplRustClient(
       resolve("rust/perpl-bridge/target/release/riim-perpl-bridge"),
@@ -389,8 +419,8 @@ async function main(): Promise<void> {
       accountIds: [ACCOUNT_ID],
     });
     await finalAdapter.connect();
-    const finalOrders = enabled.flatMap((market) => finalAdapter.getOpenOrders(market.symbol));
-    const finalPositions = enabled.flatMap((market) => finalAdapter.getPositions(market.symbol));
+    const finalOrders = enabled.flatMap((market) => executionTransport.getOpenOrders(market.symbol));
+    const finalPositions = enabled.flatMap((market) => executionTransport.getPositions(market.symbol));
     const finalAccount = finalAdapter.getAccountEvidence();
     const reconciled =
       result.successful &&
@@ -399,6 +429,7 @@ async function main(): Promise<void> {
       finalPositions.every((position) => position.baseSize === 0) &&
       Number(finalAccount.lockedBalance) === 0;
     await finalAdapter.disconnect();
+    executionTransport.close();
     if (reconciled) equityGuard.manualReset("RESET HALTED PERPL EQUITY SESSION");
     console.log(
       JSON.stringify(

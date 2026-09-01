@@ -56,7 +56,7 @@ export function planPerplShutdownChunks(input: {
   maxActions?: number;
 }): number[] {
   const { positionBaseSize, limitPrice, maxOrderSize, maxNotionalUsd, sizeDecimals } = input;
-  const maxActions = input.maxActions ?? 10;
+  const maxActions = input.maxActions ?? 100;
   if (
     ![positionBaseSize, limitPrice, maxOrderSize, maxNotionalUsd].every(Number.isFinite) ||
     limitPrice <= 0 || maxOrderSize <= 0 || maxNotionalUsd <= 0 ||
@@ -77,4 +77,17 @@ export function planPerplShutdownChunks(input: {
   if (remainingUnits > 0)
     throw new Error("Perpl shutdown position exceeds bounded flattening action capacity");
   return chunks;
+}
+
+export function assertPerplShutdownCapacity(input: {
+  maxLongPosition: number;
+  maxShortPosition: number;
+  limitPrice: number;
+  maxOrderSize: number;
+  maxNotionalUsd: number;
+  sizeDecimals: number;
+  maxActions?: number;
+}): void {
+  for (const positionBaseSize of [input.maxLongPosition, -input.maxShortPosition])
+    planPerplShutdownChunks({ ...input, positionBaseSize });
 }

@@ -523,6 +523,29 @@ describe("MarketEngine", () => {
     expect(reduceOnlyOrder?.side).toBe("sell"); // long position -> exit by selling
   });
 
+  it("uses an immediate-or-cancel reduce-only exit when authoritative exposure exceeds its limit", async () => {
+    adapter.positions.push({
+      market: MARKET,
+      baseSize: -0.144,
+      markPrice: 60_000,
+      unrealizedPnl: 0,
+      openOrderCount: 0,
+    });
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+    await engine.start();
+
+    const summary = await engine.runCycle();
+
+    expect(summary.reductionMode).toBe(true);
+    expect(summary.reduceOnlyAction).toBe("placed");
+    expect(adapter.placeOrderCalls[0]).toMatchObject({
+      side: "buy",
+      type: "immediateOrCancel",
+      isReduceOnly: true,
+      size: 0.0025,
+    });
+  });
+
   it("documents residual policy: inventory at the threshold remains open and normal quoting continues", async () => {
     adapter.positions.push({
       market: MARKET,

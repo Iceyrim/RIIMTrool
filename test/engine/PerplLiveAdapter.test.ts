@@ -41,20 +41,41 @@ describe("PerplLiveAdapter", () => {
     const api = {
       connect: vi.fn(async () => undefined),
       getOpenOrders: vi.fn(() => [{ exchangeOrderId: "47", market: "ETHUSD", side: "sell" as const, price: 2455.51, size: 0.004, filledSize: 0, remainingSize: 0.004, isReduceOnly: false, state: "open" as const }]),
+      getPositions: vi.fn(() => [{ market: "ETHUSD", baseSize: -0.144, markPrice: 2455.51, unrealizedPnl: 0, openOrderCount: 1 }]),
+      getPositionEvidence: vi.fn(() => ({ position: { market: "ETHUSD", baseSize: -0.144, markPrice: 2455.51, unrealizedPnl: 0, openOrderCount: 1 }, blockNumber: 101 })),
+      waitForPositionSettled: vi.fn(async () => undefined),
       getOrderFills: vi.fn(async () => [{ exchangeOrderId: "47", market: "ETHUSD", side: "sell" as const, price: 2455.51, size: 0.004, timestamp: 1 }]),
+      getAccountVolume: vi.fn(async () => [{ market: "ETHUSD", since: "s", until: "u", baseVolume: 0.004, quoteVolume: 9.82204 }]),
     };
     const adapter = new PerplLiveAdapter(source, {} as PerplCanaryExecutor, undefined, false, {}, api);
     expect(adapter.getOpenOrders("ETHUSD")[0]?.exchangeOrderId).toBe("47");
+    expect(adapter.getPositions("ETHUSD")[0]?.baseSize).toBe(-0.144);
     expect((await adapter.getOrderFills("47", "ETHUSD"))[0]?.size).toBe(0.004);
+    expect((await adapter.getAccountVolume({ since: "s", until: "u" }))[0]?.quoteVolume).toBe(9.82204);
     expect(source.getOpenOrders).not.toHaveBeenCalled();
+    expect(source.getAccountVolume).not.toHaveBeenCalled();
   });
 
   it("refreshes an expired One-Click stream before startup reconciliation", async () => {
     const evidence: PerplEquityEvidence = { balance: "20", lockedBalance: "0", positionDeposit: "0", unrealizedPnl: "0", frozen: false, blockNumber: "100", observedAt: Date.now() };
     const source = readonly(evidence);
-    const api = { connect: vi.fn(async () => undefined), getOpenOrders: vi.fn(() => []), getOrderFills: vi.fn(async () => []) };
+    const api = { connect: vi.fn(async () => undefined), getOpenOrders: vi.fn(() => []), getPositions: vi.fn(() => []), getPositionEvidence: vi.fn(() => ({ blockNumber: 101 })), waitForPositionSettled: vi.fn(async () => undefined), getOrderFills: vi.fn(async () => []), getAccountVolume: vi.fn(async () => []) };
     await new PerplLiveAdapter(source, {} as PerplCanaryExecutor, undefined, false, {}, api).refreshAccountState();
     expect(api.connect).toHaveBeenCalledOnce();
+  });
+
+  it("halts when caught-up on-chain and One-Click position evidence disagree", async () => {
+    const evidence: PerplEquityEvidence = { balance: "20", lockedBalance: "0", positionDeposit: "0", unrealizedPnl: "0", frozen: false, blockNumber: "101", observedAt: Date.now() };
+    const source = readonly(evidence);
+    const halt = vi.fn();
+    const api = {
+      connect: vi.fn(async () => undefined), getOpenOrders: vi.fn(() => []),
+      getPositions: vi.fn(() => [{ market: "ETHUSD", baseSize: -0.144, markPrice: 2465, unrealizedPnl: 0, openOrderCount: 0 }]),
+      getPositionEvidence: vi.fn((market: string) => market === "ETHUSD" ? ({ position: { market: "ETHUSD", baseSize: -0.144, markPrice: 2465, unrealizedPnl: 0, openOrderCount: 0 }, blockNumber: 100 }) : ({ blockNumber: 100 })),
+      waitForPositionSettled: vi.fn(async () => undefined), getOrderFills: vi.fn(async () => []), getAccountVolume: vi.fn(async () => []),
+    };
+    await expect(new PerplLiveAdapter(source, {} as PerplCanaryExecutor, halt, false, {}, api).refreshAccountState()).rejects.toThrow(/disagrees/);
+    expect(halt).toHaveBeenCalledOnce();
   });
 
   it("permanently signals an ambiguous execution outcome", async () => {

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   assertPerplLiveCapacity,
+  assertPerplShutdownCapacity,
   consumePerplLiveArmFile,
   estimatePerplRestingNotional,
   planPerplShutdownChunks,
@@ -14,6 +15,18 @@ describe("Perpl Live startup gates", () => {
   it("splits shutdown inventory into bounded exact reduce-only chunks", () => {
     expect(planPerplShutdownChunks({ positionBaseSize: -0.008, limitPrice: 2460, maxOrderSize: 0.005, maxNotionalUsd: 15, sizeDecimals: 3 })).toEqual([0.005, 0.003]);
     expect(planPerplShutdownChunks({ positionBaseSize: 0.00018, limitPrice: 78_000, maxOrderSize: 0.0002, maxNotionalUsd: 15, sizeDecimals: 5 })).toEqual([0.00018]);
+    expect(planPerplShutdownChunks({ positionBaseSize: -0.144, limitPrice: 2465, maxOrderSize: 0.009, maxNotionalUsd: 30, sizeDecimals: 3 })).toHaveLength(16);
+  });
+
+  it("rejects configurations whose maximum position cannot be flattened within the action bound", () => {
+    expect(() => assertPerplShutdownCapacity({
+      limitPrice: 2465, maxLongPosition: 0.045, maxShortPosition: 0.045,
+      maxOrderSize: 0.009, maxNotionalUsd: 30, sizeDecimals: 3, maxActions: 4,
+    })).toThrow(/bounded flattening action capacity/);
+    expect(() => assertPerplShutdownCapacity({
+      limitPrice: 2465, maxLongPosition: 0.045, maxShortPosition: 0.045,
+      maxOrderSize: 0.009, maxNotionalUsd: 30, sizeDecimals: 3,
+    })).not.toThrow();
   });
   it("consumes a valid arm file exactly once", () => {
     const directory = join("/tmp", `perpl-live-arm-${process.pid}-${Date.now()}`);

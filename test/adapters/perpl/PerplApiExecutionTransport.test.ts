@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { PerplApiExecutionTransport, quantizePerplLimitPrice } from "../../../src/adapters/perpl/PerplApiExecutionTransport.js";
 import type { PerplPlaceIntent } from "../../../src/adapters/perpl/onchain/executionProtocol.js";
 import { PERPL_MAINNET_EXCHANGE } from "../../../src/adapters/perpl/onchain/protocol.js";
@@ -15,6 +15,7 @@ class FakeSocket {
       as: [{ in: 1, id: 5198, fr: false, fw: true, ft: 0, lfr: 100, b: "18.34", lb: "0" }],
     }));
     if (frame.mt === 29) queueMicrotask(() => this.message({ mt: 23, at: {}, d: [] }));
+    if (frame.mt === 29) queueMicrotask(() => this.message({ mt: 26, at: { b: 100 }, d: [] }));
   }
   close(): void { this.emit("close", {}); }
   addEventListener(type: string, listener: (event: any) => void): void {
@@ -129,6 +130,74 @@ describe("PerplApiExecutionTransport", () => {
       expect.objectContaining({ exchangeOrderId: "47", side: "sell", price: 2455.51, size: 0.004 }),
     ]);
     transport.close();
+  });
+
+  it("blocks on a fill until authoritative position evidence catches up", async () => {
+    const socket = new FakeSocket();
+    const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "77".repeat(32), socketFactory: () => socket });
+    const connecting = transport.connect(); socket.open(); await connecting;
+    expect(transport.getPositions("ETHUSD")).toEqual([]);
+    socket.message({ mt: 25, at: {}, d: [{
+      at: { b: 101, t: 1_788_180_001_000, l: 7 }, mkt: 20, acc: 5198,
+      oid: 10, t: 2, l: 1, p: 246500, s: 9, f: "0",
+    }] });
+    expect(() => transport.getPositions("ETHUSD")).toThrow(/has not caught up/);
+    socket.message({ mt: 27, at: {}, d: [{
+      at: { b: 102 }, mkt: 20, acc: 5198, pid: 1, rq: 1, oid: 10,
+      st: 1, sr: 21, sd: 2, c: "0", ep: 246500, s: 144, fee: "0",
+      efs: 0, lv: 1200, xfs: 0, ots: {},
+    }] });
+    expect(transport.getPositions("ETHUSD")).toEqual([
+      expect.objectContaining({ market: "ETHUSD", baseSize: -0.144, markPrice: 2465 }),
+    ]);
+    socket.message({ mt: 27, at: {}, d: [{
+      at: { b: 103 }, mkt: 20, acc: 5198, pid: 1, rq: 2, oid: 11,
+      st: 2, sr: 21, sd: 2, c: "0", ep: 246500, s: 0, fee: "0",
+      efs: 0, lv: 1200, xfs: 0, ots: {},
+    }] });
+    expect(transport.getPositions("ETHUSD")).toEqual([]);
+    transport.close();
+  });
+
+  it("paginates authenticated fill history once and aggregates dashboard volume windows", async () => {
+    const requests: Array<{ url: string; headers: unknown }> = [];
+    const firstTimestamp = Date.parse("2026-08-30T12:00:00Z");
+    const secondTimestamp = Date.parse("2026-08-31T12:00:00Z");
+    const fetchFn = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requests.push({ url, headers: init?.headers });
+      const pageTwo = url.includes("page=next");
+      return new Response(JSON.stringify(pageTwo ? {
+        d: [{ at: { t: firstTimestamp, txid: "0x1", l: 1 }, mkt: 20, acc: 5198, oid: 10, t: 2, l: 1, p: 250000, s: 4, f: "0" }],
+        np: "",
+      } : {
+        d: [
+          { at: { t: secondTimestamp, txid: "0x2", l: 2 }, mkt: 1, acc: 5198, oid: 11, t: 1, l: 1, p: 800000, s: 30, f: "0" },
+          { at: { t: secondTimestamp, txid: "0x2", l: 2 }, mkt: 1, acc: 5198, oid: 11, t: 1, l: 1, p: 800000, s: 30, f: "0" },
+          { at: { t: secondTimestamp, txid: "0x3", l: 3 }, mkt: 1, acc: 9999, oid: 12, t: 1, l: 1, p: 800000, s: 30, f: "0" },
+        ],
+        np: "next",
+      }), { status: 200 });
+    });
+    const transport = new PerplApiExecutionTransport({
+      apiKey: "token", apiKeySecret: "88".repeat(32), fetchFn: fetchFn as typeof fetch,
+    });
+    const [day, week] = await Promise.all([
+      transport.getAccountVolume({ since: "2026-08-31T00:00:00Z", until: "2026-09-01T00:00:00Z" }),
+      transport.getAccountVolume({ since: "2026-08-25T00:00:00Z", until: "2026-09-01T00:00:00Z" }),
+    ]);
+    expect(day).toEqual([expect.objectContaining({ market: "BTCUSD", since: "2026-08-31T00:00:00Z", until: "2026-09-01T00:00:00Z", baseVolume: 0.0003 })]);
+    expect(day[0]?.quoteVolume).toBeCloseTo(24);
+    expect(week).toEqual(expect.arrayContaining([
+      expect.objectContaining({ market: "BTCUSD" }),
+      expect.objectContaining({ market: "ETHUSD", baseVolume: 0.004 }),
+    ]));
+    expect(week.find((row) => row.market === "BTCUSD")?.quoteVolume).toBeCloseTo(24);
+    expect(week.find((row) => row.market === "ETHUSD")?.quoteVolume).toBeCloseTo(10);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(requests[0]?.url).toContain("/v1/trading/fills?count=100");
+    expect(requests[1]?.url).toContain("page=next");
+    expect(requests[0]?.headers).toMatchObject({ "X-API-Key": "token" });
   });
 
   it("refuses to guess an API cancellation identity from a contract order ID", async () => {

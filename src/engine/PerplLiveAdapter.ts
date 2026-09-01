@@ -38,8 +38,35 @@ export class PerplLiveAdapter implements ExchangeAdapter {
     const before = this.readonlyAdapter.getSessionEquityEvidence().blockNumber;
     await this.readonlyAdapter.refreshAccountState();
     await this.readonlyAdapter.waitForSnapshotAfter(before);
+    if (this.liveOrderSource) {
+      const onchainBlock = Number(this.readonlyAdapter.getSessionEquityEvidence().blockNumber);
+      for (const market of ["BTCUSD", "ETHUSD"]) {
+        const live = this.liveOrderSource.getPositionEvidence(market);
+        if (live.blockNumber === undefined || onchainBlock < live.blockNumber) continue;
+        const liveSize = live.position?.baseSize ?? 0;
+        const onchainSize = this.readonlyAdapter.getPositions(market)[0]?.baseSize ?? 0;
+        const tolerance = market === "BTCUSD" ? 0.00001 : 0.001;
+        if (Math.abs(liveSize - onchainSize) >= tolerance) {
+          const reason = `Perpl ${market} One-Click position ${liveSize} disagrees with caught-up on-chain position ${onchainSize}`;
+          this.onAmbiguous(reason);
+          throw new Error(reason);
+        }
+      }
+    }
   }
-  getPositions(market?: string): NormalizedPosition[] { return this.readonlyAdapter.getPositions(market); }
+  getPositions(market?: string): NormalizedPosition[] {
+    if (!this.liveOrderSource) return this.readonlyAdapter.getPositions(market);
+    const live = this.liveOrderSource.getPositions(market);
+    return live.map((position) => {
+      const onchain = this.readonlyAdapter.getPositions(position.market)[0];
+      return {
+        ...position,
+        markPrice: onchain?.markPrice ?? position.markPrice,
+        unrealizedPnl: onchain?.unrealizedPnl ?? position.unrealizedPnl,
+        openOrderCount: this.liveOrderSource!.getOpenOrders(position.market).length,
+      };
+    });
+  }
   getOpenOrders(market?: string): NormalizedOrder[] {
     return this.liveOrderSource?.getOpenOrders(market) ?? this.readonlyAdapter.getOpenOrders(market);
   }
@@ -95,7 +122,9 @@ export class PerplLiveAdapter implements ExchangeAdapter {
     return this.liveOrderSource?.getOrderFills(id, market) ?? this.readonlyAdapter.getOrderFills(id, market);
   }
   getMarketPrice(market: string): Promise<MarketPrice> { return this.readonlyAdapter.getMarketPrice(market); }
-  getAccountVolume(params: { market?: string; since: string; until: string }): Promise<AccountVolume[]> { return this.readonlyAdapter.getAccountVolume(params); }
+  getAccountVolume(params: { market?: string; since: string; until: string }): Promise<AccountVolume[]> {
+    return this.liveOrderSource?.getAccountVolume(params) ?? this.readonlyAdapter.getAccountVolume(params);
+  }
   getAccountEvidence(): BridgeAccountEvidence { return this.readonlyAdapter.getAccountEvidence(); }
   getSessionEquityEvidence(): PerplEquityEvidence { return this.readonlyAdapter.getSessionEquityEvidence(); }
   getPositionSafetyEvidence(market?: string): PerplPositionSafetyEvidence[] { return this.readonlyAdapter.getPositionSafetyEvidence(market); }

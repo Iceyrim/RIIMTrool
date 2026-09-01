@@ -126,6 +126,7 @@ export class MarketEngine {
   private quiescing = false;
   private quoteLadderReferencePrice?: number;
   private lastCycleSummary?: CycleSummary;
+  private reduceOnlyPlacementFailures = 0;
 
   constructor(
     private readonly adapter: ExchangeAdapter,
@@ -598,6 +599,10 @@ export class MarketEngine {
     return currentBaseSize > 0 ? markPrice + offset : markPrice - offset;
   }
 
+  private computeEmergencyExitPrice(currentBaseSize: number, markPrice: number): number {
+    return currentBaseSize > 0 ? markPrice * 0.995 : markPrice * 1.005;
+  }
+
   private async manageReduceOnlyExit(
     currentBaseSize: number,
     progressiveOpenOrderCount: number,
@@ -638,24 +643,32 @@ export class MarketEngine {
     }
 
     const marketPrice = await this.adapter.getMarketPrice(this.config.symbol);
-    const exitPrice = this.computeExitPrice(currentBaseSize, marketPrice.mark);
+    const positionLimit = currentBaseSize > 0
+      ? this.config.riskLimits.maxLongPosition
+      : this.config.riskLimits.maxShortPosition;
+    const emergency = Math.abs(currentBaseSize) > positionLimit || this.reduceOnlyPlacementFailures >= 3;
+    const exitPrice = emergency
+      ? this.computeEmergencyExitPrice(currentBaseSize, marketPrice.mark)
+      : this.computeExitPrice(currentBaseSize, marketPrice.mark);
     const side: OrderSide = currentBaseSize > 0 ? "sell" : "buy";
     const size = Math.min(Math.abs(currentBaseSize), this.config.riskLimits.maxOrderSize);
 
     if (this.quiescing) return { action: "none", state: "blocked", details: { cause: "engine quiescing" } };
     const result = await this.lifecycle.placeReduceOnlyExit({
       side,
-      type: "postOnly",
+      type: emergency ? "immediateOrCancel" : "postOnly",
       size,
       price: exitPrice,
     });
     if (!result.success) {
+      this.reduceOnlyPlacementFailures++;
       return {
         action: result.message?.includes("already open") ? "skipped_duplicate" : "none",
         state: result.order?.state === "UNKNOWN" ? "unresolved" : "placement_failed",
         details: { size, price: exitPrice, orderId: result.order?.exchangeOrderId ?? undefined, cause: result.message },
       };
     }
+    this.reduceOnlyPlacementFailures = 0;
     return { action: "placed", state: "placed", details: { size, price: exitPrice, orderId: result.order?.exchangeOrderId ?? undefined, ageMs: 0 }, placedOrder: { side, size } };
   }
 
