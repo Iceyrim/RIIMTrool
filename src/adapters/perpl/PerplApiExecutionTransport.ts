@@ -49,7 +49,7 @@ export interface PerplApiLiveOrderSource {
   getOpenOrders(market?: string): NormalizedOrder[];
   getPositions(market?: string): NormalizedPosition[];
   getPositionEvidence(market: string): { position?: NormalizedPosition; blockNumber?: number };
-  waitForPositionSettled(market: string, timeoutMs?: number): Promise<void>;
+  waitForPositionSettled(market: string, timeoutMs?: number, previousBaseSize?: number): Promise<void>;
   getOrderFills(exchangeOrderId: string, market: string): Promise<NormalizedFill[]>;
   getAccountVolume(params: { market?: string; since: string; until: string }): Promise<AccountVolume[]>;
 }
@@ -262,18 +262,26 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
     };
   }
 
-  async waitForPositionSettled(market: string, timeoutMs = 10_000): Promise<void> {
+  async waitForPositionSettled(market: string, timeoutMs = 10_000, previousBaseSize?: number): Promise<void> {
     const requested = market === "BTCUSD" || market === "ETHUSD" ? market : undefined;
-    if (!requested || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000)
+    if (
+      !requested || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000 ||
+      (previousBaseSize !== undefined && !Number.isFinite(previousBaseSize))
+    )
       throw new ExchangeAdapterError("Perpl position-settlement wait is invalid");
     const deadline = Date.now() + timeoutMs;
-    while (this.unsettledPositionMarkets.has(requested)) {
+    while (true) {
+      if (!this.positionsSnapshotReady)
+        throw new ExchangeAdapterError("Perpl API position snapshot is unavailable");
+      const currentBaseSize = this.positionsByMarket.get(requested)?.baseSize ?? 0;
+      if (
+        !this.unsettledPositionMarkets.has(requested) &&
+        (previousBaseSize === undefined || currentBaseSize !== previousBaseSize)
+      ) return;
       if (Date.now() >= deadline)
         throw new ExchangeAdapterError(`Timed out awaiting authoritative Perpl ${requested} position evidence`);
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    if (!this.positionsSnapshotReady)
-      throw new ExchangeAdapterError("Perpl API position snapshot is unavailable");
   }
 
   async getOrderFills(exchangeOrderId: string, market: string): Promise<NormalizedFill[]> {

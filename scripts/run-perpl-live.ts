@@ -358,6 +358,7 @@ async function main(): Promise<void> {
         for (const size of chunks) {
           entry.attemptedChunks.push(size);
           try {
+            const previousBaseSize = executionTransport.getPositions(market.symbol)[0]?.baseSize ?? 0;
             const placed = await cleanupAdapter.placeOrder({
               market: market.symbol,
               side,
@@ -372,7 +373,7 @@ async function main(): Promise<void> {
               break;
             }
             entry.confirmedChunks.push(size);
-            await executionTransport.waitForPositionSettled(market.symbol);
+            await executionTransport.waitForPositionSettled(market.symbol, 10_000, previousBaseSize);
           } catch (error) {
             entry.failures.push(String(error));
             break;

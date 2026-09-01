@@ -150,11 +150,13 @@ describe("PerplApiExecutionTransport", () => {
     expect(transport.getPositions("ETHUSD")).toEqual([
       expect.objectContaining({ market: "ETHUSD", baseSize: -0.144, markPrice: 2465 }),
     ]);
+    const settled = transport.waitForPositionSettled("ETHUSD", 1_000, -0.144);
     socket.message({ mt: 27, at: {}, d: [{
       at: { b: 103 }, mkt: 20, acc: 5198, pid: 1, rq: 2, oid: 11,
       st: 2, sr: 21, sd: 2, c: "0", ep: 246500, s: 0, fee: "0",
       efs: 0, lv: 1200, xfs: 0, ots: {},
     }] });
+    await expect(settled).resolves.toBeUndefined();
     expect(transport.getPositions("ETHUSD")).toEqual([]);
     transport.close();
   });
