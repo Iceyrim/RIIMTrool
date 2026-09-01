@@ -436,7 +436,10 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
       return;
     }
     if (raw.mt === 100) {
-      this.protocol.acceptHeartbeat(Number(raw.sn));
+      // Perpl may emit a heartbeat immediately after the socket opens, before the
+      // authenticated wallet snapshot. It is not session evidence and must not make
+      // an otherwise valid authentication attempt fail closed.
+      if (this.connectionEvidence) this.protocol.acceptHeartbeat(Number(raw.sn));
       return;
     }
     const frame = mapAuthenticatedFrame(raw);

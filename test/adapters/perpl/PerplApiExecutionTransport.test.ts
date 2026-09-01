@@ -39,6 +39,20 @@ describe("PerplApiExecutionTransport", () => {
     expect(quantizePerplLimitPrice(2_453.5678, 2, "buy")).toBe(2_453.56);
     expect(quantizePerplLimitPrice(2_453.5601, 2, "sell")).toBe(2_453.57);
   });
+  it("ignores a harmless heartbeat that arrives before the authenticated wallet snapshot", async () => {
+    const socket = new FakeSocket();
+    const transport = new PerplApiExecutionTransport({
+      apiKey: "opaque-token",
+      apiKeySecret: "10".repeat(32),
+      socketFactory: () => socket,
+    });
+    const connecting = transport.connect();
+    socket.open();
+    socket.message({ mt: 100, sn: 1 });
+    await expect(connecting).resolves.toBeUndefined();
+    expect(transport.getConnectionEvidence().accountId).toBe(5198);
+    transport.close();
+  });
   it("signs in first, allocates rq from account lfr, and waits for a definitive order update", async () => {
     const socket = new FakeSocket();
     const transport = new PerplApiExecutionTransport({
