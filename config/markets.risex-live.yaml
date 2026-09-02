@@ -1,0 +1,35 @@
+accountRisk:
+  sessionLossCapUsd: 1.5
+  dailyLossCapUsd: 1.5
+  weeklyLossCapUsd: 5
+markets:
+  - symbol: BTCUSD
+    exchange: risex
+    exchangeSymbol: BTC/USDC
+    enabled: true
+    leverage: 20
+    orderSize: { min: 0.00018, max: 0.00018 }
+    spreadBps: { normal: 5, min: 4, max: 7.5 }
+    exitSpreadBps: 2.5
+    quoteLevels: 2
+    levelSpacingBps: [2, 4]
+    inventoryReductionThresholdBase: 0.00036
+    riskLimits: { maxLongPosition: 0.00072, maxShortPosition: 0.00072, maxOrderSize: 0.00018, maxOrderNotionalUsd: 15, maxOpenOrders: 6 }
+    quoteMinimumLifetimeMs: 30000
+    quoteRepriceThresholdBps: 1
+    quoteMaximumLifetimeMs: 120000
+  - symbol: ETHUSD
+    exchange: risex
+    exchangeSymbol: ETH/USDC
+    enabled: true
+    leverage: 20
+    orderSize: { min: 0.004, max: 0.004 }
+    spreadBps: { normal: 5, min: 4, max: 7.5 }
+    exitSpreadBps: 2.5
+    quoteLevels: 2
+    levelSpacingBps: [2, 4]
+    inventoryReductionThresholdBase: 0.008
+    riskLimits: { maxLongPosition: 0.016, maxShortPosition: 0.016, maxOrderSize: 0.004, maxOrderNotionalUsd: 15, maxOpenOrders: 6 }
+    quoteMinimumLifetimeMs: 30000
+    quoteRepriceThresholdBps: 1
+    quoteMaximumLifetimeMs: 120000
