@@ -9,7 +9,14 @@ import type { RiseXPermitContext, RiseXPermitSigner } from "./RiseXPermitSigner.
 interface Envelope<T> { data: T }
 interface NonceStateRaw { nonce_anchor: string; current_bitmap_index: number }
 interface DomainRaw { name: string; version: string; chain_id: string | number; verifying_contract: string }
-interface SystemConfigRaw { router?: string; contracts?: { router?: string }; universal_router?: string }
+interface SystemConfigRaw {
+  router?: string;
+  contracts?: { router?: string };
+  addresses?: { router?: string };
+  universal_router?: string;
+  is_maintenance_mode?: boolean;
+  maintenance_message?: string;
+}
 interface DecodeRaw { tx_hash: string; success: boolean; error?: { name?: string; message?: string } }
 
 export interface RiseXPermitExecutionConfig {
@@ -55,7 +62,9 @@ export class RiseXPermitExecutionTransport {
       this.request<DomainRaw>("GET", "/v1/auth/eip712-domain"),
       this.request<SystemConfigRaw>("GET", "/v1/system/config"),
     ]);
-    const router = system.router ?? system.contracts?.router ?? system.universal_router;
+    if (system.is_maintenance_mode)
+      throw new ExchangeAdapterError(`RISEx is in maintenance mode${system.maintenance_message ? `: ${system.maintenance_message}` : ""}`);
+    const router = system.router ?? system.contracts?.router ?? system.addresses?.router ?? system.universal_router;
     if (!router || !/^0x[0-9a-fA-F]{40}$/.test(router))
       throw new ExchangeAdapterError("RISEx system config did not provide a valid router address");
     this.domain = domain;

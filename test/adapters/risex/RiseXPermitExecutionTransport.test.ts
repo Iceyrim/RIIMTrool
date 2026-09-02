@@ -51,6 +51,18 @@ describe("RISEx permit execution transport", () => {
     expect(body.price_ticks).toBe(600000);
   });
 
+  it("accepts the captured mainnet addresses.router shape and rejects maintenance mode", async () => {
+    const mainnet = vi.fn()
+      .mockResolvedValueOnce(response({ name: "RISEx Auth", version: "1", chain_id: "4153", verifying_contract: "0x0d919daa3f12ae715744eb648c00066c5dbd66f0" }))
+      .mockResolvedValueOnce(response({ addresses: { router: "0xaadde0cea454f2bcb26f46ed54c5709b7bb34a7e" }, is_maintenance_mode: false })) as unknown as typeof fetch;
+    await expect(transport(mainnet).connect()).resolves.toBeUndefined();
+
+    const maintenance = vi.fn()
+      .mockResolvedValueOnce(response({ name: "RISEx Auth", version: "1", chain_id: "4153", verifying_contract: "0x0d919daa3f12ae715744eb648c00066c5dbd66f0" }))
+      .mockResolvedValueOnce(response({ addresses: { router: "0xaadde0cea454f2bcb26f46ed54c5709b7bb34a7e" }, is_maintenance_mode: true, maintenance_message: "scheduled" })) as unknown as typeof fetch;
+    await expect(transport(maintenance).connect()).rejects.toThrow(/maintenance mode: scheduled/);
+  });
+
   it("requires authoritative resting identity and signs exact cancellation", async () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(response({ name: "RISEx Auth", version: "1", chain_id: 1, verifying_contract: "0x0000000000000000000000000000000000000001" }))
