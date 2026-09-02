@@ -74,15 +74,22 @@ export class RiseXSessionAdapter implements ExchangeAdapter {
       exchangeOrderId: order.order_id,
       restingOrderId: order.resting_order_id,
     })));
-    this.positions = portfolio.positions.map((position) => {
-      const market = this.registry.symbolFor(Number(position.market_id));
-      return {
+    this.positions = portfolio.positions.flatMap((position) => {
+      const marketId = Number(position.market_id);
+      const market = this.registry.symbolForIfConfigured(marketId);
+      if (!market) {
+        const baseSize = decimal(position.size);
+        if (baseSize !== 0)
+          throw new ExchangeAdapterError(`RISEx account has non-zero exposure ${baseSize} on unconfigured marketId ${marketId}`);
+        return [];
+      }
+      return [{
         market,
         baseSize: decimal(position.size),
         markPrice: decimal(position.mark_price),
         unrealizedPnl: decimal(position.unrealized_pnl),
         openOrderCount: this.orders!.filter((order) => order.market === market).length,
-      };
+      }];
     });
     const summary = portfolio.summary;
     this.balance = decimal(summary.usdc_balance);

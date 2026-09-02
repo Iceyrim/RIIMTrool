@@ -35,4 +35,16 @@ describe("RISEx session adapter", () => {
     await expect(adapter.placeOrder({ market: "BTCUSD", side: "buy", type: "postOnly", price: 59_000, size: 0.001, isReduceOnly: false })).resolves.toMatchObject({ success: false, reason: "REJECTED" });
     await expect(adapter.cancelOrder("x", "BTCUSD")).rejects.toThrow(/not armed/);
   });
+
+  it("ignores flat unconfigured portfolio rows but rejects hidden exposure", async () => {
+    const position = (size: string) => ({ market_id: "9", market_name: "OTHER", size, side: 0, margin_mode: 0, avg_entry_price: "1", mark_price: "1", index_price: "1", leverage: "1", unrealized_pnl: "0", liquidation_price: "0", initial_margin_requirement: "0", maintenance_margin_requirement: "0" });
+    const open = { orders: [], market_id: "0", account, total_orders: "0" };
+    const flatFetch = vi.fn().mockResolvedValueOnce(envelope({ account, summary, positions: [position("0")] })).mockResolvedValueOnce(envelope(open)) as unknown as typeof fetch;
+    const flat = new RiseXSessionAdapter(marketData(), undefined, { baseUrl: "https://offline.invalid", account, markets: [{ symbol: "BTCUSD", exchangeSymbol: "BTC/USDC" }], fetchImpl: flatFetch });
+    await expect(flat.connect()).resolves.toBeUndefined();
+    expect(flat.getPositions()).toEqual([]);
+    const exposedFetch = vi.fn().mockResolvedValueOnce(envelope({ account, summary, positions: [position("2")] })).mockResolvedValueOnce(envelope(open)) as unknown as typeof fetch;
+    const exposed = new RiseXSessionAdapter(marketData(), undefined, { baseUrl: "https://offline.invalid", account, markets: [{ symbol: "BTCUSD", exchangeSymbol: "BTC/USDC" }], fetchImpl: exposedFetch });
+    await expect(exposed.connect()).rejects.toThrow(/non-zero exposure 2 on unconfigured marketId 9/);
+  });
 });

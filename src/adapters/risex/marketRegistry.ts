@@ -74,6 +74,12 @@ export class RiseXMarketRegistry {
     return symbol;
   }
 
+  /** Used only when an account-wide snapshot legitimately contains inactive/flat markets that
+   * are outside this runner's configured scope. */
+  symbolForIfConfigured(marketId: number): string | undefined {
+    return this.marketIdToSymbol.get(marketId);
+  }
+
   stepConfigFor(symbol: string): RiseXStepConfig {
     const stepConfig = this.stepConfigBySymbol.get(symbol);
     if (!stepConfig) {
