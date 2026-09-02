@@ -102,4 +102,18 @@ describe("RISEx permit execution transport", () => {
     expect(result).toMatchObject({ success: false, reason: "UNRESOLVED_NOT_CONFIRMED" });
     expect(vi.mocked(fetchImpl)).toHaveBeenCalledTimes(4);
   });
+
+  it("classifies a structured HTTP 400 before submission as rejected without retrying", async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(response({ name: "RISEx Auth", version: "1", chain_id: 1, verifying_contract: "0x0000000000000000000000000000000000000001" }))
+      .mockResolvedValueOnce(response({ router: "0x0000000000000000000000000000000000000003" }))
+      .mockResolvedValueOnce(response({ nonce_anchor: "1", current_bitmap_index: 0 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: "INVALID_ARGUMENT", message: "invalid permit", permit: "must-not-leak" }), { status: 400 })) as unknown as typeof fetch;
+    const client = transport(fetchImpl);
+    await client.connect();
+    const result = await client.placeOrder({ market: "BTCUSD", side: "buy", type: "postOnly", price: 60_000, size: 0.001, isReduceOnly: false });
+    expect(result).toMatchObject({ success: false, reason: "REJECTED", message: "RISEx returned HTTP 400: INVALID_ARGUMENT: invalid permit" });
+    expect(JSON.stringify(result)).not.toContain("must-not-leak");
+    expect(vi.mocked(fetchImpl)).toHaveBeenCalledTimes(4);
+  });
 });

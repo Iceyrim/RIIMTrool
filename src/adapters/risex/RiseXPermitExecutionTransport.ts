@@ -19,6 +19,28 @@ interface SystemConfigRaw {
 }
 interface DecodeRaw { tx_hash: string; success: boolean; error?: { name?: string; message?: string } }
 
+export class RiseXHttpError extends ExchangeAdapterError {
+  constructor(readonly status: number, readonly responseDetail?: string) {
+    super(`RISEx returned HTTP ${status}${responseDetail ? `: ${responseDetail}` : ""}`);
+    this.name = "RiseXHttpError";
+  }
+}
+
+function safeResponseDetail(text: string): string | undefined {
+  if (!text) return undefined;
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    const source = parsed.error && typeof parsed.error === "object"
+      ? parsed.error as Record<string, unknown>
+      : parsed;
+    const code = typeof source.code === "string" || typeof source.code === "number" ? String(source.code) : undefined;
+    const message = typeof source.message === "string" ? source.message : undefined;
+    return [code, message].filter(Boolean).join(": ").slice(0, 300) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface RiseXPermitExecutionConfig {
   baseUrl: string;
   account: string;
@@ -120,6 +142,8 @@ export class RiseXPermitExecutionTransport {
       try {
         placed = await this.request("POST", "/v1/orders/place", body);
       } catch (error) {
+        if (error instanceof RiseXHttpError && error.status >= 400 && error.status < 500)
+          return { success: false, reason: "REJECTED", message: error.message, raw: { status: error.status } };
         return { success: false, reason: "UNRESOLVED_NOT_CONFIRMED", message: String(error), raw: error };
       }
       let decoded: DecodeRaw;
@@ -207,7 +231,10 @@ export class RiseXPermitExecutionTransport {
         method, headers: body === undefined ? undefined : { "content-type": "application/json" },
         body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal,
       });
-      if (!response.ok) throw new ExchangeAdapterError(`RISEx returned HTTP ${response.status} for ${method} ${path}`);
+      if (!response.ok) {
+        const detail = safeResponseDetail(await response.text().catch(() => ""));
+        throw new RiseXHttpError(response.status, detail);
+      }
       const parsed = await response.json() as T | Envelope<T>;
       return parsed && typeof parsed === "object" && "data" in parsed ? (parsed as Envelope<T>).data : parsed as T;
     } catch (error) {
