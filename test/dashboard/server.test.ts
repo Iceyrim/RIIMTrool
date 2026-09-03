@@ -23,6 +23,7 @@ describe("dashboard static safety", () => {
     expect(source).toContain('"risex-live":"risex-session-live"');
     expect(source).toContain('<option value="perpl-live">Perpl LIVE</option>');
     expect(source).toContain('"perpl-live":"perpl-onchain-mainnet-live"');
+    expect(source).toContain('"perpl-live":"perpl"');
     expect(source).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
   });
 

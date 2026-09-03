@@ -52,7 +52,7 @@
       const age=ms=>{const s=Math.max(0,Math.floor(ms/1000));return s<60?`${s}s`:s<3600?`${Math.floor(s/60)}m`:`${Math.floor(s/3600)}h`};
       const venue=a=>a?`${a.venue} ${a.mode}`:"Unavailable";
       const selectedAccount=status=>status.accounts.find(a=>a.exchangeId===({"n1-live":"n1","risex-live":"risex-session-live","perpl-live":"perpl-onchain-mainnet-live"}[$("dex").value]));
-      const selectedSource=status=>status.snapshotSources?.find(s=>s.exchangeId===({"n1-live":"n1","risex-live":"risex-live","perpl-live":"perpl-live"}[$("dex").value]));
+      const selectedSource=status=>status.snapshotSources?.find(s=>s.exchangeId===({"n1-live":"n1","risex-live":"risex-live","perpl-live":"perpl"}[$("dex").value]));
       const selectedMarkets=status=>{const a=selectedAccount(status);return a?status.markets.filter(m=>m.exchangeId===a.exchangeId):[]};
       function reason(metric,fallback){return metric&&!metric.available?metric.sourceNeeded:fallback}
       function metric(parent,label,value,detail,className=""){const box=node("article","card metric-card");box.append(node("span","label",label),node("strong",`value ${className}`,value));if(detail)box.append(node("span","reason",detail));parent.append(box)}
