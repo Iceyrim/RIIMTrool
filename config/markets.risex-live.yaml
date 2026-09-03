@@ -1,20 +1,29 @@
 accountRisk:
-  sessionLossCapUsd: 1.5
-  dailyLossCapUsd: 1.5
+  sessionLossCapUsd: 2
+  dailyLossCapUsd: 2
   weeklyLossCapUsd: 5
+  dailyVolumeTargetUsd: 10000
+  weeklyVolumeTargetUsd: 100000
 markets:
   - symbol: BTCUSD
     exchange: risex
     exchangeSymbol: BTC/USDC
     enabled: true
-    leverage: 20
-    orderSize: { min: 0.00018, max: 0.00018 }
+    leverage: 25
+    orderSize: { min: 0.00032, max: 0.00050 }
     spreadBps: { normal: 5, min: 4, max: 7.5 }
     exitSpreadBps: 2.5
-    quoteLevels: 2
-    levelSpacingBps: [2, 4]
-    inventoryReductionThresholdBase: 0.00036
-    riskLimits: { maxLongPosition: 0.00072, maxShortPosition: 0.00072, maxOrderSize: 0.00018, maxOrderNotionalUsd: 15, maxOpenOrders: 6 }
+    quoteLevels: 5
+    levelSpacingBps: [2, 3, 4, 7, 10]
+    inventoryReductionThresholdBase: 0.001
+    riskLimits:
+      {
+        maxLongPosition: 0.0025,
+        maxShortPosition: 0.0025,
+        maxOrderSize: 0.00050,
+        maxOrderNotionalUsd: 40,
+        maxOpenOrders: 12,
+      }
     quoteMinimumLifetimeMs: 30000
     quoteRepriceThresholdBps: 1
     quoteMaximumLifetimeMs: 120000
@@ -22,14 +31,21 @@ markets:
     exchange: risex
     exchangeSymbol: ETH/USDC
     enabled: true
-    leverage: 20
-    orderSize: { min: 0.004, max: 0.004 }
+    leverage: 25
+    orderSize: { min: 0.0104, max: 0.0165 }
     spreadBps: { normal: 5, min: 4, max: 7.5 }
     exitSpreadBps: 2.5
-    quoteLevels: 2
-    levelSpacingBps: [2, 4]
-    inventoryReductionThresholdBase: 0.008
-    riskLimits: { maxLongPosition: 0.016, maxShortPosition: 0.016, maxOrderSize: 0.004, maxOrderNotionalUsd: 15, maxOpenOrders: 6 }
+    quoteLevels: 5
+    levelSpacingBps: [2, 3, 4, 7, 10]
+    inventoryReductionThresholdBase: 0.033
+    riskLimits:
+      {
+        maxLongPosition: 0.0825,
+        maxShortPosition: 0.0825,
+        maxOrderSize: 0.0165,
+        maxOrderNotionalUsd: 40,
+        maxOpenOrders: 12,
+      }
     quoteMinimumLifetimeMs: 30000
     quoteRepriceThresholdBps: 1
     quoteMaximumLifetimeMs: 120000
