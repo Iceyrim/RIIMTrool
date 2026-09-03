@@ -98,7 +98,11 @@ class FakeBridge implements PerplBridgeTransport {
   async emitBlock(blockNumber: string): Promise<void> {
     const response = await this.request({ id: "event" } as BridgeRequest);
     if (response.event !== "ready") throw new Error("fake snapshot unavailable");
-    this.listener?.({ ...response, event: "state", snapshot: { ...response.snapshot, blockNumber } });
+    this.listener?.({
+      ...response,
+      event: "state",
+      snapshot: { ...response.snapshot, blockNumber },
+    });
   }
 }
 
@@ -212,18 +216,40 @@ describe("PerplOnchainAdapter", () => {
 
   it("waits for a strictly newer snapshot before live cleanup trusts exchange state", async () => {
     const bridge = new FakeBridge();
-    const adapter = new PerplOnchainAdapter(bridge, {
-      rpcUrl: "https://rpc.monad.xyz",
-      markets: [{ symbol: "BTCUSD", perpetualId: 1 }],
-      accountIds: [5198],
-    }, () => 1000);
+    const adapter = new PerplOnchainAdapter(
+      bridge,
+      {
+        rpcUrl: "https://rpc.monad.xyz",
+        markets: [{ symbol: "BTCUSD", perpetualId: 1 }],
+        accountIds: [5198],
+      },
+      () => 1000,
+    );
     await adapter.connect();
     let resolved = false;
-    const waiting = adapter.waitForSnapshotAfter("12", 1_000).then(() => { resolved = true; });
+    const waiting = adapter.waitForSnapshotAfter("12", 1_000).then(() => {
+      resolved = true;
+    });
     await Promise.resolve();
     expect(resolved).toBe(false);
     await bridge.emitBlock("13");
     await waiting;
     expect(resolved).toBe(true);
+  });
+
+  it("exposes a stale-tolerant block cursor without exposing stale account state", async () => {
+    const adapter = new PerplOnchainAdapter(
+      new FakeBridge(),
+      {
+        rpcUrl: "https://rpc.monad.xyz",
+        markets: [{ symbol: "BTCUSD", perpetualId: 1 }],
+        accountIds: [5198],
+        staleAfterMs: 100,
+      },
+      () => 2_000,
+    );
+    await adapter.connect();
+    expect(adapter.getLastAcceptedBlockNumber()).toBe("12");
+    expect(() => adapter.getSessionEquityEvidence()).toThrow(/stale/);
   });
 });

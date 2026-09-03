@@ -100,13 +100,23 @@ export class PerplOnchainAdapter implements ExchangeAdapter {
     this.snapshot = undefined;
     for (const waiter of this.snapshotWaiters) {
       clearTimeout(waiter.timer);
-      waiter.reject(new ExchangeAdapterError("Perpl adapter disconnected while awaiting fresh state"));
+      waiter.reject(
+        new ExchangeAdapterError("Perpl adapter disconnected while awaiting fresh state"),
+      );
     }
     this.snapshotWaiters.clear();
     await this.bridge.close();
   }
   async refreshAccountState(): Promise<void> {
     this.requireSnapshot();
+  }
+
+  /** Returns only the cursor of the last accepted snapshot. This deliberately does not assert
+   * freshness: callers use it to wait for a newer snapshot before reading account state. */
+  getLastAcceptedBlockNumber(): string {
+    if (!this.connected || this.block === undefined)
+      throw new ExchangeAdapterError("Perpl on-chain adapter is disconnected");
+    return this.block.toString();
   }
 
   /** Waits for exchange state from a strictly newer block. Used after live mutations so cleanup
