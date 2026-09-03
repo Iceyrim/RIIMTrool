@@ -47,4 +47,28 @@ describe("RISEx session adapter", () => {
     const exposed = new RiseXSessionAdapter(marketData(), undefined, { baseUrl: "https://offline.invalid", account, markets: [{ symbol: "BTCUSD", exchangeSymbol: "BTC/USDC" }], fetchImpl: exposedFetch });
     await expect(exposed.connect()).rejects.toThrow(/non-zero exposure 2 on unconfigured marketId 9/);
   });
+
+  it("fetches bounded volume windows once, isolates all-time failure, and deduplicates fills", async () => {
+    const time = String(BigInt(Date.parse("2026-09-03T00:00:00.000Z")) * 1_000_000n);
+    const trade = { id: "fill-1", market_id: 1, order_id: "order", side: "BUY", price: "100", size: "2", fee: "0", liquidity_indicator: "MAKER", time };
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(envelope({ account, summary, positions: [] }))
+      .mockResolvedValueOnce(envelope({ orders: [], market_id: "0", account, total_orders: "0" }))
+      .mockResolvedValueOnce(envelope({ market_id: 1, wallet_address: account, page: 1, has_next_page: false, trades: [trade, trade] }))
+      .mockResolvedValueOnce(new Response("failed", { status: 503 })) as unknown as typeof fetch;
+    const adapter = new RiseXSessionAdapter(marketData(), undefined, { baseUrl: "https://offline.invalid", account, markets: [{ symbol: "BTCUSD", exchangeSymbol: "BTC/USDC" }], fetchImpl });
+    await adapter.connect();
+    const result = await adapter.getAccountVolumeWindows([
+      { window: "24h", since: "2026-09-02T12:00:00.000Z", until: "2026-09-03T12:00:00.000Z" },
+      { window: "7d", since: "2026-08-27T12:00:00.000Z", until: "2026-09-03T12:00:00.000Z" },
+      { window: "30d", since: "2026-08-04T12:00:00.000Z", until: "2026-09-03T12:00:00.000Z" },
+      { window: "allTime", since: "1970-01-01T00:00:00.000Z", until: "2026-09-03T12:00:00.000Z" },
+    ]);
+    await expect(adapter.getAccountVolume({ since: "1970-01-01T00:00:00.000Z", until: "2026-09-03T12:00:00.000Z" })).rejects.toThrow(/503/);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(result["24h"]?.[0]).toMatchObject({ baseVolume: 2, quoteVolume: 200 });
+    expect(result["7d"]?.[0]).toMatchObject({ quoteVolume: 200 });
+    expect(result["30d"]?.[0]).toMatchObject({ quoteVolume: 200 });
+    expect(result.allTime).toBeUndefined();
+  });
 });

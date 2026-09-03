@@ -52,6 +52,7 @@ class RiseXEquityPnlSource implements RealizedPnlSource {
   constructor(
     private readonly adapter: RiseXSessionAdapter,
     private readonly guard: RiseXSessionEquityGuard,
+    private readonly onHalt: (reason: string) => void = () => undefined,
   ) {}
   arm(): void {
     this.last = this.adapter.getMarginStatus().accountValue;
@@ -62,8 +63,11 @@ class RiseXEquityPnlSource implements RealizedPnlSource {
     if (!Number.isFinite(current) || current < 0)
       throw new Error("RISEx account equity is invalid");
     const status = this.guard.observe(current);
-    if (status.state !== "active" || !status.healthy)
-      throw new Error(status.haltReason ?? "RISEx equity guard halted");
+    if (status.state !== "active" || !status.healthy) {
+      const reason = status.haltReason ?? "RISEx equity guard halted";
+      this.onHalt(reason);
+      throw new Error(reason);
+    }
     const previous = this.last;
     this.last = current;
     return previous === undefined ? 0 : Math.min(0, current - previous);
@@ -199,7 +203,15 @@ async function main(): Promise<void> {
     markets: configured,
   });
   await adapter.connect();
-  const pnlSource = new RiseXEquityPnlSource(adapter, equityGuard);
+  let runner: PaperRunner | undefined;
+  let publisher: DashboardSnapshotPublisher | undefined;
+  let shuttingDown = false;
+  const requestShutdown = (reason: string) => {
+    console.error(`[RISEX LIVE] HALT: ${reason}`);
+    publisher?.halt(reason);
+    if (runner && !shuttingDown) void shutdown(reason);
+  };
+  const pnlSource = new RiseXEquityPnlSource(adapter, equityGuard, requestShutdown);
   pnlSource.arm();
   const alertBus = createAlertBusFromEnv("RISEX LIVE");
   const history = new DashboardHistoryStore(
@@ -245,11 +257,11 @@ async function main(): Promise<void> {
     adapter,
     telemetry,
   }));
-  const publisher = new DashboardSnapshotPublisher(DASHBOARD_SNAPSHOT_DIRECTORY, "risex-live", () =>
+  publisher = new DashboardSnapshotPublisher(DASHBOARD_SNAPSHOT_DIRECTORY, "risex-live", () =>
     buildDashboardStatus(dashboardMarkets),
   );
   publisher.start();
-  const runner = new PaperRunner(markets, {
+  runner = new PaperRunner(markets, {
     intervalMs: Number(process.env.RISEX_LIVE_CYCLE_INTERVAL_MS ?? "5000"),
     runnerLabel: "RiseXLiveRunner",
     logFilePath: join(
@@ -260,12 +272,11 @@ async function main(): Promise<void> {
     alertBus,
     telemetry,
   });
-  let shuttingDown = false;
   const shutdown = async (reason: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`\n[RISEX LIVE] Shutting down: ${reason}`);
-    const result = await runner.shutdown();
+    const result = await runner!.shutdown();
     const flattening: unknown[] = [];
     await adapter.refreshAccountState();
     for (const market of enabled) {
@@ -304,7 +315,7 @@ async function main(): Promise<void> {
       finalOrders.length === 0 &&
       finalPositions.every((position) => position.baseSize === 0) &&
       (flattening as Array<{ failures: string[] }>).every((row) => row.failures.length === 0);
-    publisher.stop();
+    publisher!.stop(reason);
     await adapter.disconnect();
     console.log(
       JSON.stringify(
@@ -331,7 +342,7 @@ async function main(): Promise<void> {
   console.log(
     "[RISEX LIVE] Press Ctrl-C for mandatory cancellation, reduce-only flattening, and final reconciliation.",
   );
-  await runner.start();
+  await runner!.start();
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href)

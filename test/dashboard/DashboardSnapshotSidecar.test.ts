@@ -16,8 +16,9 @@ const status = (exchangeId: string): DashboardStatus => ({
   accountSessionLossCapUsd: 6, accountPnlAvailable: true, accounts: [], markets: [],
   unavailableTelemetry: [exchangeId],
 });
-const snapshot = (sessionId: string, lifecycle: "running" | "stopped", startedAt: number, publishedAt = startedAt): DashboardSessionSnapshot => ({
+const snapshot = (sessionId: string, lifecycle: "running" | "halted" | "stopped", startedAt: number, publishedAt = startedAt, reason?: string): DashboardSessionSnapshot => ({
   version: 1, sessionId, exchangeId: "n1-paper", lifecycle, startedAt, publishedAt,
+  reason,
   status: status(sessionId),
 });
 
@@ -31,6 +32,17 @@ describe("dashboard snapshot sidecar", () => {
     expect(files).toEqual(["n1-paper--one.json"]);
     expect(JSON.parse(readFileSync(join(directory, files[0]!), "utf8"))).toMatchObject({ lifecycle: "stopped", sessionId: "one" });
     expect(statSync(join(directory, files[0]!)).mode & 0o777).toBe(SNAPSHOT_FILE_MODE);
+  });
+
+  it("preserves a halt reason through cleanup and stopped publication", () => {
+    const directory = mkdtempSync(join(tmpdir(), "dashboard-snapshot-"));
+    const publisher = new DashboardSnapshotPublisher(directory, "risex-live", () => status("risex"), { sessionId: "loss", startedAt: 10 });
+    publisher.halt("RISEx daily equity loss limit reached");
+    let saved = JSON.parse(readFileSync(join(directory, "risex-live--loss.json"), "utf8")) as DashboardSessionSnapshot;
+    expect(saved).toMatchObject({ lifecycle: "halted", reason: "RISEx daily equity loss limit reached" });
+    publisher.stop("RISEx daily equity loss limit reached");
+    saved = JSON.parse(readFileSync(join(directory, "risex-live--loss.json"), "utf8")) as DashboardSessionSnapshot;
+    expect(saved).toMatchObject({ lifecycle: "stopped", reason: "RISEx daily equity loss limit reached" });
   });
 
   it("allows a newer running session to supersede a stopped predecessor", () => {

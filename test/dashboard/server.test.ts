@@ -17,7 +17,8 @@ describe("dashboard static safety", () => {
   const source = readFileSync(new URL("../../src/dashboard/dashboard.html", import.meta.url), "utf8");
 
   it("uses only the approved cached venue filters and no unsafe HTML interpolation", () => {
-    expect(source.match(/<option value="(?:n1-live|risex-paper|risex-live|perpl-live)">/g)).toHaveLength(4);
+    expect(source.match(/<option value="(?:n1-live|risex-live|perpl-live)">/g)).toHaveLength(3);
+    expect(source).not.toContain('<option value="risex-paper">');
     expect(source).toContain('<option value="risex-live">RISEx LIVE</option>');
     expect(source).toContain('"risex-live":"risex-session-live"');
     expect(source).toContain('<option value="perpl-live">Perpl LIVE</option>');
@@ -50,6 +51,8 @@ describe("dashboard static safety", () => {
   it("shows live lifecycle and uptime while excluding flat cached positions", () => {
     expect(source).toContain("selectedSource");
     expect(source).toContain('source?.lifecycle==="running"');
+    expect(source).toContain('source?.lifecycle==="halted"?"Halted"');
+    expect(source).toContain("source?.reason");
     expect(source).toContain('metric(am,"Live session"');
     expect(source).toContain("Math.abs(m.position.baseSize)>1e-12");
     expect(source).toContain("Non-flat cached adapter positions");

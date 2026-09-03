@@ -11,20 +11,21 @@ import {
 import { basename, join } from "node:path";
 import type { DashboardAccountStatus, DashboardStatus } from "./DashboardService.js";
 
-export type SnapshotLifecycle = "running" | "stopped";
+export type SnapshotLifecycle = "running" | "halted" | "stopped";
 
 export interface DashboardSessionSnapshot {
   version: 1;
   sessionId: string;
   exchangeId: string;
   lifecycle: SnapshotLifecycle;
+  reason?: string;
   startedAt: number;
   publishedAt: number;
   status: DashboardStatus;
 }
 
 export interface DashboardSidecarStatus extends DashboardStatus {
-  snapshotSources: Array<Pick<DashboardSessionSnapshot, "sessionId" | "exchangeId" | "lifecycle" | "startedAt" | "publishedAt"> & { stale: boolean }>;
+  snapshotSources: Array<Pick<DashboardSessionSnapshot, "sessionId" | "exchangeId" | "lifecycle" | "reason" | "startedAt" | "publishedAt"> & { stale: boolean }>;
   snapshotConflicts: Array<{ exchangeId: string; sessionIds: string[] }>;
 }
 
@@ -43,7 +44,8 @@ function isSnapshot(value: unknown): value is DashboardSessionSnapshot {
   if (!value || typeof value !== "object") return false;
   const row = value as Partial<DashboardSessionSnapshot>;
   return row.version === 1 && typeof row.sessionId === "string" &&
-    typeof row.exchangeId === "string" && (row.lifecycle === "running" || row.lifecycle === "stopped") &&
+    typeof row.exchangeId === "string" && ["running", "halted", "stopped"].includes(row.lifecycle ?? "") &&
+    (row.reason === undefined || typeof row.reason === "string") &&
     typeof row.startedAt === "number" && typeof row.publishedAt === "number" &&
     !!row.status && typeof row.status === "object" && Array.isArray(row.status.accounts) &&
     Array.isArray(row.status.markets);
@@ -77,13 +79,19 @@ export class DashboardSnapshotPublisher {
     this.timer.unref();
   }
 
-  stop(): void {
+  halt(reason: string): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    this.publish("stopped");
+    this.publish("halted", Date.now(), reason);
   }
 
-  publish(lifecycle: SnapshotLifecycle, now = Date.now()): void {
+  stop(reason?: string): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+    this.publish("stopped", Date.now(), reason);
+  }
+
+  publish(lifecycle: SnapshotLifecycle, now = Date.now(), reason?: string): void {
     try {
       mkdirSync(this.directory, { recursive: true, mode: SNAPSHOT_DIRECTORY_MODE });
       const snapshot: DashboardSessionSnapshot = {
@@ -91,6 +99,7 @@ export class DashboardSnapshotPublisher {
         sessionId: this.sessionId,
         exchangeId: this.exchangeId,
         lifecycle,
+        reason,
         startedAt: this.startedAt,
         publishedAt: now,
         status: this.statusForLifecycle(lifecycle),
@@ -210,6 +219,7 @@ export function aggregateDashboardSnapshots(
       sessionId: entry.sessionId,
       exchangeId: entry.exchangeId,
       lifecycle: entry.lifecycle,
+      reason: entry.reason,
       startedAt: entry.startedAt,
       publishedAt: entry.publishedAt,
       stale: entry.lifecycle === "running" && now - entry.publishedAt > SNAPSHOT_FRESH_MS,

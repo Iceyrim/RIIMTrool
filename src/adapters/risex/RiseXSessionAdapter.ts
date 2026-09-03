@@ -12,6 +12,7 @@ import { decimal, nsStringToMs, type RiseXMarketDataSource } from "./RiseXMarket
 import { RiseXMarketRegistry, type ConfiguredRiseXMarket } from "./marketRegistry.js";
 import { fromSteps, fromTicks, mapRiseXOrderType, riseXSideToOrderSide } from "./riseXAuthMappers.js";
 import type { RiseXPermitExecutionTransport } from "./RiseXPermitExecutionTransport.js";
+import type { VolumeWindow } from "../../dashboard/DashboardTelemetry.js";
 
 interface Envelope<T> { data: T }
 
@@ -154,6 +155,50 @@ export class RiseXSessionAdapter implements ExchangeAdapter {
       totals.set(trade.market_id, current);
     }
     return [...totals].map(([id, total]) => ({ market: this.registry.symbolFor(id), marketId: id, since: params.since, until: params.until, baseVolume: total.base, quoteVolume: total.quote }));
+  }
+
+  /** One 30-day scan supplies all bounded windows; all-time is isolated so its failure is local. */
+  async getAccountVolumeWindows(requests: Array<{ window: VolumeWindow; since: string; until: string }>): Promise<Partial<Record<VolumeWindow, AccountVolume[]>>> {
+    const result: Partial<Record<VolumeWindow, AccountVolume[]>> = {};
+    const bounded = requests.filter(({ window }) => window !== "allTime");
+    const earliest = bounded.map(({ since }) => since).sort()[0];
+    const until = requests[0]?.until;
+    if (!until) return result;
+    const boundedRead = earliest ? this.readVolumeTrades(earliest, until) : Promise.resolve([]);
+    const [boundedResult] = await Promise.allSettled([boundedRead]);
+    if (boundedResult.status === "fulfilled")
+      for (const request of bounded)
+        result[request.window] = this.aggregateVolume(boundedResult.value, request.since, request.until);
+    return result;
+  }
+
+  private readVolumeTrades(since: string, until: string) {
+    return this.tradeHistory({
+      start_time: String(BigInt(Date.parse(since)) * 1_000_000n),
+      end_time: String(BigInt(Date.parse(until)) * 1_000_000n),
+    });
+  }
+
+  private aggregateVolume(trades: RiseXAccountTradeHistoryResponseRaw["trades"], since: string, until: string): AccountVolume[] {
+    const start = Date.parse(since);
+    const end = Date.parse(until);
+    const unique = new Map<string, (typeof trades)[number]>();
+    for (const trade of trades) {
+      const timestamp = nsStringToMs(trade.time);
+      if (timestamp >= start && timestamp <= end) unique.set(trade.id, trade);
+    }
+    const totals = new Map<number, { base: number; quote: number }>();
+    for (const trade of unique.values()) {
+      const current = totals.get(trade.market_id) ?? { base: 0, quote: 0 };
+      const size = Math.abs(decimal(trade.size));
+      current.base += size;
+      current.quote += size * decimal(trade.price);
+      totals.set(trade.market_id, current);
+    }
+    return [...totals].flatMap(([id, total]) => {
+      const market = this.registry.symbolForIfConfigured(id);
+      return market ? [{ market, marketId: id, since, until, baseVolume: total.base, quoteVolume: total.quote }] : [];
+    });
   }
 
   private async tradeHistory(query: Record<string, string | number | undefined>) {

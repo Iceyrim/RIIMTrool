@@ -409,7 +409,7 @@ async function main(): Promise<void> {
         });
       }
     }
-    snapshotPublisher.stop();
+    snapshotPublisher.stop(reason);
     await readonly.disconnect();
     const finalBridge = new PerplRustClient(
       resolve("rust/perpl-bridge/target/release/riim-perpl-bridge"),

@@ -19,12 +19,19 @@ describe("RISEx live runner safety contract", () => {
     expect(signer).toBeGreaterThan(confirmation);
   });
   it("installs mandatory cleanup, bounded flattening, and final reconciliation", () => {
-    expect(source).toContain("await runner.shutdown()");
+    expect(source).toContain("await runner!.shutdown()");
     expect(source).toContain("planRiseXFlattenChunks");
     expect(source).toContain('type: "immediateOrCancel"');
     expect(source).toContain("isReduceOnly: true");
     expect(source).toContain('finalStatus: flat ? "completed-flat" : "manual-review-required"');
     expect(source).toContain('process.once("SIGINT"');
     expect(source).toContain('process.once("SIGTERM"');
+  });
+  it("turns an equity halt into immediate runner-owned shutdown", () => {
+    expect(source).toContain("private readonly onHalt");
+    expect(source).toContain("this.onHalt(reason)");
+    expect(source).toContain("publisher?.halt(reason)");
+    expect(source).toContain("void shutdown(reason)");
+    expect(source).toContain("publisher!.stop(reason)");
   });
 });
