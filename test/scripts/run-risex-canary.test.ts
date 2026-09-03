@@ -33,6 +33,12 @@ describe("RISEx one-shot canary", () => {
     await expect(executeRiseXCanary(adapter, plan)).rejects.toThrow(/ambiguous/);
     expect(adapter.placeOrder).toHaveBeenCalledTimes(1);
   });
+  it("reports a confirmed server rejection separately and never retries it", async () => {
+    const adapter = new FakeExchangeAdapter(); adapter.positions = [flat];
+    adapter.placeOrder = vi.fn(async () => ({ success: false as const, reason: "REJECTED" as const, message: "HTTP 400: invalid permit" }));
+    await expect(executeRiseXCanary(adapter, plan)).rejects.toThrow(/placement was rejected: HTTP 400/);
+    expect(adapter.placeOrder).toHaveBeenCalledTimes(1);
+  });
   it("fails when final reconciliation is not flat", async () => {
     const adapter = new FakeExchangeAdapter(); adapter.positions = [flat];
     const order: NormalizedOrder = { exchangeOrderId: "x", market: "BTCUSD", side: "buy", type: "postOnly", price: plan.price, size: plan.size, filledSize: 0, remainingSize: plan.size, isReduceOnly: false, state: "open" };
