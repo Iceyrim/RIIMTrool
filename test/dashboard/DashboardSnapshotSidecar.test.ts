@@ -39,6 +39,17 @@ describe("dashboard snapshot sidecar", () => {
     expect(result.snapshotConflicts).toEqual([]);
   });
 
+  it("prefers the sole fresh runner even when a stopped snapshot has a later start timestamp", () => {
+    const running = snapshot("active", "running", 100, 300);
+    const stopped = snapshot("short-lived", "stopped", 200, 250);
+    const result = aggregateDashboardSnapshots([running, stopped], 301);
+
+    expect(result.snapshotSources).toMatchObject([
+      { sessionId: "active", lifecycle: "running", stale: false },
+    ]);
+    expect(result.unavailableTelemetry).not.toContain("n1-paper: running snapshot is stale.");
+  });
+
   it("retains the last fresh account balance and margin in a stopped snapshot", () => {
     const directory = mkdtempSync(join(tmpdir(), "dashboard-snapshot-"));
     let fresh = true;

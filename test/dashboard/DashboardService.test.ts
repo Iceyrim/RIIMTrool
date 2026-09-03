@@ -148,6 +148,20 @@ describe("buildDashboardStatus", () => {
     });
   });
 
+  it("labels the RISEx session adapter as LIVE", async () => {
+    const risex = new FakeExchangeAdapter();
+    Object.defineProperty(risex, "exchangeId", { value: "risex-session-live" });
+    risex.marketPrices.set("BTCUSD", { market: "BTCUSD", mark: 60_000, index: 60_000 });
+    const market = await buildMarket("BTCUSD", risex);
+
+    expect(buildDashboardStatus([market]).accounts[0]).toMatchObject({
+      exchangeId: "risex-session-live",
+      venue: "RISEx",
+      mode: "LIVE",
+      label: "RISEx LIVE",
+    });
+  });
+
   it("surfaces reconciliation anomalies and a degraded status without touching the exchange", async () => {
     const market = await buildMarket("BTCUSD", adapter);
     adapter.openOrders.push({

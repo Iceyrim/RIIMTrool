@@ -47,6 +47,14 @@ describe("dashboard static safety", () => {
     expect(source).toContain("money(Math.abs(f.size*f.price))");
   });
 
+  it("shows live lifecycle and uptime while excluding flat cached positions", () => {
+    expect(source).toContain("selectedSource");
+    expect(source).toContain('source?.lifecycle==="running"');
+    expect(source).toContain('metric(am,"Live session"');
+    expect(source).toContain("Math.abs(m.position.baseSize)>1e-12");
+    expect(source).toContain("Non-flat cached adapter positions");
+  });
+
   it("owns content in five client-side views while preserving filters and locked settings", () => {
     for (const view of ["dashboard", "positions-orders", "history", "alerts", "settings"]) {
       expect(source).toContain(`data-view-panel="${view}"`);

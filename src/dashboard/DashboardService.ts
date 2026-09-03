@@ -114,7 +114,9 @@ function cachedMetric<T>(read: () => T, source: string): DashboardMetric<T> {
 function venueMode(exchangeId: string): Pick<DashboardAccountStatus, "venue" | "mode" | "label"> {
   if (exchangeId === "n1") return { venue: "N1", mode: "LIVE", label: "N1 LIVE" };
   if (exchangeId === "n1-paper") return { venue: "N1", mode: "PAPER", label: "N1 PAPER" };
-  if (exchangeId === "risex") return { venue: "RISEx", mode: "LIVE", label: "RISEx LIVE" };
+  if (exchangeId === "risex" || exchangeId === "risex-session-live") {
+    return { venue: "RISEx", mode: "LIVE", label: "RISEx LIVE" };
+  }
   if (exchangeId === "risex-paper") {
     return { venue: "RISEx", mode: "PAPER", label: "RISEx PAPER" };
   }

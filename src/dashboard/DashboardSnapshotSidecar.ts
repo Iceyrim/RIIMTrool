@@ -182,7 +182,10 @@ export function aggregateDashboardSnapshots(
       continue;
     }
     const newest = [...group].sort((a, b) => b.startedAt - a.startedAt || b.publishedAt - a.publishedAt)[0];
-    if (freshRunning.length === 1 && freshRunning[0]!.startedAt >= (newest?.startedAt ?? 0)) selected.push(freshRunning[0]!);
+    // A sole fresh publisher is authoritative for the currently running session. A stopped
+    // snapshot may have a later clock-derived startedAt (or may have been written by a short
+    // preflight process), but it must not freeze telemetry from the active runner.
+    if (freshRunning.length === 1) selected.push(freshRunning[0]!);
     else if (newest) selected.push(newest);
   }
 
