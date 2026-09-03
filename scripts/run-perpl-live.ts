@@ -8,7 +8,10 @@ import { PerplApiExecutionTransport } from "../src/adapters/perpl/PerplApiExecut
 import { loadPerplApiCredentials } from "../src/adapters/perpl/PerplApiCredentials.js";
 import { PerplOnchainAdapter } from "../src/adapters/perpl/onchain/PerplOnchainAdapter.js";
 import { PerplRustClient } from "../src/adapters/perpl/onchain/PerplRustClient.js";
-import { PERPL_MAINNET_WALLET_ADDRESS } from "../src/adapters/perpl/onchain/protocol.js";
+import {
+  PERPL_MAINNET_WALLET_ADDRESS,
+  resolvePerplMainnetRpc,
+} from "../src/adapters/perpl/onchain/protocol.js";
 import { createAlertBusFromEnv } from "../src/alerting/createAlertBusFromEnv.js";
 import { loadMarketsConfig } from "../src/config/loadConfig.js";
 import { toEngineMarketConfig } from "../src/config/toEngineMarketConfig.js";
@@ -33,7 +36,7 @@ import {
 import { PerplSessionEquityGuard } from "../src/engine/PerplSessionEquityGuard.js";
 import { PaperRunner, type PaperRunnerMarket } from "../src/paperRunner/PaperRunner.js";
 
-const RPC = "https://rpc.monad.xyz";
+const RPC = resolvePerplMainnetRpc(process.env.PERPL_RPC_URL);
 const ACCOUNT_ID = 5198;
 async function confirm(phrase: string): Promise<void> {
   if (!process.stdin.isTTY)
@@ -147,7 +150,9 @@ async function main(): Promise<void> {
     await transport.connect();
     apiEvidence = transport.getConnectionEvidence();
     if (apiEvidence.accountId !== ACCOUNT_ID)
-      throw new Error(`authenticated Perpl account ${apiEvidence.accountId} does not match pinned account ${ACCOUNT_ID}`);
+      throw new Error(
+        `authenticated Perpl account ${apiEvidence.accountId} does not match pinned account ${ACCOUNT_ID}`,
+      );
     if (apiEvidence.walletAddress.toLowerCase() !== PERPL_MAINNET_WALLET_ADDRESS)
       throw new Error("authenticated Perpl wallet does not match the pinned production wallet");
     const apiPositions = enabled.flatMap((market) => transport!.getPositions(market.symbol));
@@ -156,15 +161,21 @@ async function main(): Promise<void> {
   } catch (error) {
     transport?.close();
     transport = undefined;
-    blockers.push(`Perpl One-Click authentication failed: ${error instanceof Error ? error.message : String(error)}`);
+    blockers.push(
+      `Perpl One-Click authentication failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 
   console.log("\n=== [PERPL LIVE] Pre-flight account snapshot ===");
   console.log(`Markets: ${enabled.map((m) => m.symbol).join(", ")}`);
   console.log(`Balances: ${JSON.stringify(readonly.getBalances())}`);
   console.log(`Account: ${JSON.stringify(account)}`);
-  console.log("Execution: Perpl trade-scoped One-Click API (no wallet signer; no per-order MON gas)");
-  console.log(`One-Click authentication: ${apiEvidence ? JSON.stringify(apiEvidence) : "UNAVAILABLE"}`);
+  console.log(
+    "Execution: Perpl trade-scoped One-Click API (no wallet signer; no per-order MON gas)",
+  );
+  console.log(
+    `One-Click authentication: ${apiEvidence ? JSON.stringify(apiEvidence) : "UNAVAILABLE"}`,
+  );
   console.log(`Positions: ${JSON.stringify(positions)}`);
   console.log(`Open orders: ${JSON.stringify(orders)}`);
   console.log(`Configured resting quotes: ${configuredOpenOrders}/${workerOpenOrderCap}`);
@@ -174,9 +185,15 @@ async function main(): Promise<void> {
   console.log(`Estimated initial collateral: $${estimatedRestingNotional.toFixed(2)}`);
   console.log(`Session equity-loss cap: $${config.accountRisk.sessionLossCapUsd}`);
   console.log(`Daily equity-loss cap: $${config.accountRisk.dailyLossCapUsd ?? "not configured"}`);
-  console.log(`Weekly equity-loss cap: $${config.accountRisk.weeklyLossCapUsd ?? "not configured"}`);
-  console.log(`Daily confirmed-fill volume target: $${config.accountRisk.dailyVolumeTargetUsd ?? "not configured"}`);
-  console.log(`Weekly confirmed-fill volume target: $${config.accountRisk.weeklyVolumeTargetUsd ?? "not configured"}`);
+  console.log(
+    `Weekly equity-loss cap: $${config.accountRisk.weeklyLossCapUsd ?? "not configured"}`,
+  );
+  console.log(
+    `Daily confirmed-fill volume target: $${config.accountRisk.dailyVolumeTargetUsd ?? "not configured"}`,
+  );
+  console.log(
+    `Weekly confirmed-fill volume target: $${config.accountRisk.weeklyVolumeTargetUsd ?? "not configured"}`,
+  );
   console.log(`Fill coverage begins at block: ${readonly.getFillCoverageStartBlock()}`);
   for (const market of enabled)
     console.log(
@@ -206,7 +223,8 @@ async function main(): Promise<void> {
     await readonly.disconnect();
     throw error;
   }
-  if (!transport || !apiEvidence) throw new Error("Perpl One-Click preflight evidence is unavailable");
+  if (!transport || !apiEvidence)
+    throw new Error("Perpl One-Click preflight evidence is unavailable");
   const executionTransport = transport;
   const executor = new PerplCanaryExecutor(executionTransport);
   let runner: PaperRunner | undefined;
@@ -236,10 +254,7 @@ async function main(): Promise<void> {
   const pnlSource = new PerplEquityPnlSource(liveAdapter, equityGuard, requestShutdown);
   pnlSource.arm();
   const alertBus = createAlertBusFromEnv("PERPL LIVE");
-  const history = new DashboardHistoryStore(
-    resolve("state/dashboard"),
-    `perpl-live-${ACCOUNT_ID}`,
-  );
+  const history = new DashboardHistoryStore(resolve("state/dashboard"), `perpl-live-${ACCOUNT_ID}`);
   const telemetry = new DashboardTelemetry(
     liveAdapter,
     true,
@@ -340,7 +355,7 @@ async function main(): Promise<void> {
         flattening.push(entry);
         if (initialBaseSize === 0) continue;
         const book = cleanupAdapter.getBookEvidence(market.symbol);
-        const side = initialBaseSize > 0 ? "sell" as const : "buy" as const;
+        const side = initialBaseSize > 0 ? ("sell" as const) : ("buy" as const);
         const limitPrice = side === "buy" ? book.bestAsk * 1.005 : book.bestBid * 0.995;
         let chunks: number[];
         try {
@@ -358,7 +373,8 @@ async function main(): Promise<void> {
         for (const size of chunks) {
           entry.attemptedChunks.push(size);
           try {
-            const previousBaseSize = executionTransport.getPositions(market.symbol)[0]?.baseSize ?? 0;
+            const previousBaseSize =
+              executionTransport.getPositions(market.symbol)[0]?.baseSize ?? 0;
             const placed = await cleanupAdapter.placeOrder({
               market: market.symbol,
               side,
@@ -373,7 +389,11 @@ async function main(): Promise<void> {
               break;
             }
             entry.confirmedChunks.push(size);
-            await executionTransport.waitForPositionSettled(market.symbol, 10_000, previousBaseSize);
+            await executionTransport.waitForPositionSettled(
+              market.symbol,
+              10_000,
+              previousBaseSize,
+            );
           } catch (error) {
             entry.failures.push(String(error));
             break;
@@ -381,9 +401,12 @@ async function main(): Promise<void> {
         }
         try {
           await executionTransport.waitForPositionSettled(market.symbol);
-          const remainingBaseSize = executionTransport.getPositions(market.symbol)[0]?.baseSize ?? 0;
+          const remainingBaseSize =
+            executionTransport.getPositions(market.symbol)[0]?.baseSize ?? 0;
           if (remainingBaseSize !== 0)
-            entry.failures.push(`authoritative position remains ${remainingBaseSize} after shutdown flattening`);
+            entry.failures.push(
+              `authoritative position remains ${remainingBaseSize} after shutdown flattening`,
+            );
         } catch (error) {
           entry.failures.push(`final authoritative position verification failed: ${String(error)}`);
         }
@@ -420,8 +443,12 @@ async function main(): Promise<void> {
       accountIds: [ACCOUNT_ID],
     });
     await finalAdapter.connect();
-    const finalOrders = enabled.flatMap((market) => executionTransport.getOpenOrders(market.symbol));
-    const finalPositions = enabled.flatMap((market) => executionTransport.getPositions(market.symbol));
+    const finalOrders = enabled.flatMap((market) =>
+      executionTransport.getOpenOrders(market.symbol),
+    );
+    const finalPositions = enabled.flatMap((market) =>
+      executionTransport.getPositions(market.symbol),
+    );
     const finalAccount = finalAdapter.getAccountEvidence();
     const reconciled =
       result.successful &&

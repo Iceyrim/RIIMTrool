@@ -114,6 +114,17 @@ describe("PerplOnchainAdapter", () => {
     ).not.toThrow();
   });
 
+  it("accepts an HTTPS private mainnet RPC while retaining bridge chain attestation", () => {
+    expect(
+      () =>
+        new PerplOnchainAdapter(new FakeBridge(), {
+          rpcUrl: "https://monad-mainnet.example/v2/secret",
+          markets: [{ symbol: "BTCUSD", perpetualId: 1 }],
+          accountIds: [5198],
+        }),
+    ).not.toThrow();
+  });
+
   it("reads pinned mainnet state and rejects every mutation", async () => {
     const adapter = new PerplOnchainAdapter(
       new FakeBridge(),

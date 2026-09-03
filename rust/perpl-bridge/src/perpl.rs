@@ -19,8 +19,25 @@ use crate::protocol::{
 
 pub const MAINNET_RPC_URL: &str = "https://rpc.monad.xyz";
 pub const MAINNET_ACCOUNT_ID: u32 = 5198;
+/// Kept well below provider-specific `eth_call` gas ceilings while remaining efficient.
+pub const SNAPSHOT_ITEMS_PER_BATCH: usize = 100;
 
 pub type SharedExchange = Arc<RwLock<state::Exchange>>;
+
+fn is_approved_mainnet_rpc_url(rpc_url: &str) -> bool {
+    if rpc_url.starts_with("http://127.0.0.1/") {
+        return true;
+    }
+    let Some(authority_and_path) = rpc_url.strip_prefix("https://") else {
+        return false;
+    };
+    let authority = authority_and_path.split('/').next().unwrap_or_default();
+    !authority.is_empty()
+        && !authority.contains('@')
+        && !rpc_url.contains('#')
+        && !authority.to_ascii_lowercase().contains("testnet")
+        && !authority.to_ascii_lowercase().contains("devnet")
+}
 
 pub fn validate_hello(
     network: &str,
@@ -31,7 +48,7 @@ pub fn validate_hello(
     if network != "mainnet" {
         return Err("only the pinned mainnet read-only network is permitted".into());
     }
-    if rpc_url != MAINNET_RPC_URL && !rpc_url.starts_with("http://127.0.0.1/") {
+    if !is_approved_mainnet_rpc_url(rpc_url) {
         return Err("only the approved Monad mainnet RPC (or loopback tests) is permitted".into());
     }
     if account_ids != [MAINNET_ACCOUNT_ID] {

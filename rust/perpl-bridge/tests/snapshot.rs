@@ -1,8 +1,9 @@
-use riim_perpl_bridge::perpl::validate_hello;
+use riim_perpl_bridge::perpl::{SNAPSHOT_ITEMS_PER_BATCH, validate_hello};
 use riim_perpl_bridge::protocol::Market;
 
 #[test]
 fn snapshot_scope_pins_mainnet_account_and_markets() {
+    assert_eq!(SNAPSHOT_ITEMS_PER_BATCH, 100);
     let btc = [Market {
         symbol: "BTCUSD".into(),
         perpetual_id: 1,
@@ -13,7 +14,35 @@ fn snapshot_scope_pins_mainnet_account_and_markets() {
         perpetual_id: 20,
     }];
     assert!(validate_hello("mainnet", "https://rpc.monad.xyz", &eth, &[5198]).is_ok());
+    assert!(
+        validate_hello(
+            "mainnet",
+            "https://monad-mainnet.example/v2/private-token",
+            &btc,
+            &[5198]
+        )
+        .is_ok()
+    );
     assert!(validate_hello("testnet", "https://testnet-rpc.monad.xyz", &btc, &[5198]).is_err());
+    assert!(
+        validate_hello(
+            "mainnet",
+            "https://monad-testnet.example/v2/private-token",
+            &btc,
+            &[5198]
+        )
+        .is_err()
+    );
+    assert!(validate_hello("mainnet", "http://monad.example", &btc, &[5198]).is_err());
+    assert!(
+        validate_hello(
+            "mainnet",
+            "https://user:pass@monad.example/v2/token",
+            &btc,
+            &[5198]
+        )
+        .is_err()
+    );
     assert!(validate_hello("mainnet", "https://rpc.monad.xyz", &btc, &[]).is_err());
     assert!(validate_hello("mainnet", "https://rpc.monad.xyz", &btc, &[7]).is_err());
     let testnet = [Market {

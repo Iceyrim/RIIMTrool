@@ -7,6 +7,26 @@ export const PERPL_MAINNET_RPC = "https://rpc.monad.xyz" as const;
 export const PERPL_MAINNET_ACCOUNT_ID = 5198 as const;
 export const PERPL_MAINNET_WALLET_ADDRESS = "0x002235afe265a3ab5bd78ea81a5be7f1ea0668c1" as const;
 
+export function resolvePerplMainnetRpc(value: string | undefined): string {
+  if (value === undefined || value.trim() === "") return PERPL_MAINNET_RPC;
+  const candidate = value.trim();
+  let url: URL;
+  try {
+    url = new URL(candidate);
+  } catch {
+    throw new ExchangeAdapterError("PERPL_RPC_URL must be a valid HTTPS URL");
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.hash !== "" ||
+    /testnet|devnet/i.test(url.hostname)
+  )
+    throw new ExchangeAdapterError("PERPL_RPC_URL must be an HTTPS Monad mainnet endpoint");
+  return candidate;
+}
+
 export interface BridgeMarketConfig {
   symbol: string;
   perpetualId: number;

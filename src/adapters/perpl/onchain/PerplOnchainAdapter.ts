@@ -19,6 +19,7 @@ import {
   PERPL_BRIDGE_PROTOCOL_VERSION,
   PERPL_MAINNET_ACCOUNT_ID,
   PERPL_MAINNET_RPC,
+  resolvePerplMainnetRpc,
   type BridgeSnapshot,
   type BridgeAccountEvidence,
 } from "./protocol.js";
@@ -60,8 +61,13 @@ export class PerplOnchainAdapter implements ExchangeAdapter {
     private readonly now = Date.now,
   ) {
     const [accountId] = config.accountIds ?? [];
-    if (config.rpcUrl !== PERPL_MAINNET_RPC && !config.rpcUrl.startsWith("http://127.0.0.1/"))
-      throw new ExchangeAdapterError("Perpl adapter accepts only the approved mainnet RPC");
+    if (config.rpcUrl !== PERPL_MAINNET_RPC && !config.rpcUrl.startsWith("http://127.0.0.1/")) {
+      try {
+        resolvePerplMainnetRpc(config.rpcUrl);
+      } catch {
+        throw new ExchangeAdapterError("Perpl adapter accepts only the approved mainnet RPC");
+      }
+    }
     if (
       !config.markets.length ||
       config.markets.some(

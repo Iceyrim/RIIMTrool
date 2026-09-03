@@ -145,6 +145,8 @@ async fn main() {
         SnapshotBuilder::new(&chain, provider.clone())
             .with_perpetuals(markets.iter().map(|market| market.perpetual_id).collect())
             .with_accounts(vec![AccountAddressOrID::ID(account_id)])
+            .with_orders_per_batch(perpl::SNAPSHOT_ITEMS_PER_BATCH)
+            .with_positions_per_batch(perpl::SNAPSHOT_ITEMS_PER_BATCH)
             .build(),
     )
     .await
