@@ -27,7 +27,9 @@ export class PerplEquityPnlSource implements RealizedPnlSource {
     const current = equity(evidence);
     const previous = this.lastEquity;
     this.lastEquity = current;
-    return previous === undefined ? 0 : Math.min(0, current - previous);
+    // Account equity is a signed net measure. Preserve recoveries so ordinary mark-to-market
+    // oscillation cannot accumulate every downward tick into a fictitious realized loss.
+    return previous === undefined ? 0 : current - previous;
   }
 }
 
