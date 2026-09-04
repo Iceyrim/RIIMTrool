@@ -46,7 +46,7 @@ async function confirm(phrase: string): Promise<void> {
   }
 }
 
-class RiseXEquityPnlSource implements RealizedPnlSource {
+export class RiseXEquityPnlSource implements RealizedPnlSource {
   readonly scope = "account" as const;
   private last?: number;
   constructor(
@@ -70,7 +70,9 @@ class RiseXEquityPnlSource implements RealizedPnlSource {
     }
     const previous = this.last;
     this.last = current;
-    return previous === undefined ? 0 : Math.min(0, current - previous);
+    // Account equity is a signed net measure. Preserve recoveries so ordinary mark-to-market
+    // oscillation cannot accumulate every downward tick into a fictitious realized loss.
+    return previous === undefined ? 0 : current - previous;
   }
 }
 
