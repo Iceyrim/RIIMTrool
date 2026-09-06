@@ -13,10 +13,18 @@ describe("RiseXSessionEquityGuard", () => {
     expect(guard.observe(33)).toMatchObject({
       state: "halted",
       healthy: false,
+      currentEquity: 33,
+      sessionChange: -2,
+      dailyChange: -2,
+      weeklyChange: -2,
       haltReason: expect.stringMatching(/daily/),
     });
     expect(new RiseXSessionEquityGuard(path, 10, 2, 5, () => NOW).status()).toMatchObject({
       state: "halted",
+      currentEquity: 33,
+      sessionChange: -2,
+      dailyChange: -2,
+      weeklyChange: -2,
     });
   });
 

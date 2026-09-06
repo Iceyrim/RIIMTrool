@@ -60,6 +60,11 @@ describe("PerplSessionEquityGuard", () => {
     expect(subject.observe(evidence({ balance: "12", blockNumber: "101" }))).toMatchObject({
       state: "halted",
       healthy: false,
+      currentEquity: 12,
+      sessionChange: -6,
+      dailyChange: -6,
+      weeklyChange: -6,
+      blockNumber: "101",
       haltReason: "Perpl session equity loss limit reached",
     });
   });
@@ -80,8 +85,12 @@ describe("PerplSessionEquityGuard", () => {
     subject.arm(evidence({ balance: "17", blockNumber: "102" }));
     expect(subject.observe(evidence({ balance: "16.5", blockNumber: "103" }))).toMatchObject({
       state: "halted",
+      currentEquity: 16.5,
+      sessionChange: -0.5,
+      dailyChange: -1.5,
+      weeklyChange: -1.5,
+      blockNumber: "103",
       haltReason: "Perpl daily equity loss limit reached",
-      dailyChange: -1,
     });
   });
 

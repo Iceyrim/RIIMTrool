@@ -88,15 +88,10 @@ export class PerplSessionEquityGuard {
     }
     const baseline = this.journal.baselineEquity!;
     const change = equity - baseline;
-    if (change <= -this.maxSessionLoss) return this.halted("Perpl session equity loss limit reached");
     const windows = this.windows(equity);
     const dailyChange = equity - windows.daily.baselineEquity;
     const weeklyChange = equity - windows.weekly.baselineEquity;
-    if (this.windowLimits.dailyLossCapUsd && dailyChange <= -this.windowLimits.dailyLossCapUsd)
-      return this.halted("Perpl daily equity loss limit reached");
-    if (this.windowLimits.weeklyLossCapUsd && weeklyChange <= -this.windowLimits.weeklyLossCapUsd)
-      return this.halted("Perpl weekly equity loss limit reached");
-    this.persist({
+    const observedJournal: Journal = {
       ...this.journal,
       healthy: true,
       currentEquity: equity,
@@ -106,7 +101,14 @@ export class PerplSessionEquityGuard {
       ...windows,
       dailyChange,
       weeklyChange,
-    });
+    };
+    if (change <= -this.maxSessionLoss)
+      return this.halted("Perpl session equity loss limit reached", observedJournal);
+    if (this.windowLimits.dailyLossCapUsd && dailyChange <= -this.windowLimits.dailyLossCapUsd)
+      return this.halted("Perpl daily equity loss limit reached", observedJournal);
+    if (this.windowLimits.weeklyLossCapUsd && weeklyChange <= -this.windowLimits.weeklyLossCapUsd)
+      return this.halted("Perpl weekly equity loss limit reached", observedJournal);
+    this.persist(observedJournal);
     return this.status();
   }
 
@@ -164,14 +166,14 @@ export class PerplSessionEquityGuard {
     return { daily, weekly };
   }
 
-  private halted(reason: string): PerplEquityStatus {
-    this.halt(reason);
+  private halted(reason: string, journal = this.journal): PerplEquityStatus {
+    this.halt(reason, journal);
     return this.status();
   }
 
-  private halt(reason: string): void {
+  private halt(reason: string, journal = this.journal): void {
     this.persist({
-      ...this.journal,
+      ...journal,
       version: 1,
       state: "halted",
       healthy: false,

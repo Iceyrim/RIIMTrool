@@ -71,13 +71,7 @@ export class RiseXSessionEquityGuard {
     const windows = this.windows(equity);
     const dailyChange = equity - windows.daily.baselineEquity;
     const weeklyChange = equity - windows.weekly.baselineEquity;
-    if (sessionChange <= -this.sessionLossCapUsd)
-      return this.halted("RISEx session equity loss limit reached");
-    if (dailyChange <= -this.dailyLossCapUsd)
-      return this.halted("RISEx daily equity loss limit reached");
-    if (weeklyChange <= -this.weeklyLossCapUsd)
-      return this.halted("RISEx weekly equity loss limit reached");
-    this.persist({
+    const observedJournal: Journal = {
       ...this.journal,
       healthy: true,
       currentEquity: equity,
@@ -85,7 +79,14 @@ export class RiseXSessionEquityGuard {
       dailyChange,
       weeklyChange,
       ...windows,
-    });
+    };
+    if (sessionChange <= -this.sessionLossCapUsd)
+      return this.halted("RISEx session equity loss limit reached", observedJournal);
+    if (dailyChange <= -this.dailyLossCapUsd)
+      return this.halted("RISEx daily equity loss limit reached", observedJournal);
+    if (weeklyChange <= -this.weeklyLossCapUsd)
+      return this.halted("RISEx weekly equity loss limit reached", observedJournal);
+    this.persist(observedJournal);
     return this.status();
   }
 
@@ -123,13 +124,13 @@ export class RiseXSessionEquityGuard {
     if (!Number.isFinite(equity) || equity < 0) throw new Error("RISEx account equity is invalid");
   }
 
-  private halted(reason: string): RiseXEquityStatus {
-    this.halt(reason);
+  private halted(reason: string, journal = this.journal): RiseXEquityStatus {
+    this.halt(reason, journal);
     return this.status();
   }
-  private halt(reason: string): void {
+  private halt(reason: string, journal = this.journal): void {
     this.persist({
-      ...this.journal,
+      ...journal,
       version: 1,
       state: "halted",
       healthy: false,
