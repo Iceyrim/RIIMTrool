@@ -125,4 +125,13 @@ markets:
     );
     expect(() => loadMarketsConfig(writeTempConfig(legacy))).toThrow(/sessionLossCapUsd/);
   });
+
+  it("loads live configs with session caps disabled and daily/weekly caps configured", () => {
+    for (const file of ["config/markets.perpl-live.yaml", "config/markets.risex-live.yaml"]) {
+      const config = loadMarketsConfig(join(process.cwd(), file));
+      expect(config.accountRisk.sessionLossCapUsd).toBeUndefined();
+      expect(config.accountRisk).toMatchObject({ dailyLossCapUsd: 5, weeklyLossCapUsd: 15 });
+    }
+  });
+
 });

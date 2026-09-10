@@ -28,12 +28,12 @@ export class RiseXSessionEquityGuard {
 
   constructor(
     private readonly filePath: string,
-    private readonly sessionLossCapUsd: number,
-    private readonly dailyLossCapUsd: number,
-    private readonly weeklyLossCapUsd: number,
+    private readonly sessionLossCapUsd: number | undefined,
+    private readonly dailyLossCapUsd: number | undefined,
+    private readonly weeklyLossCapUsd: number | undefined,
     private readonly now = Date.now,
   ) {
-    if (![sessionLossCapUsd, dailyLossCapUsd, weeklyLossCapUsd].every((value) => value > 0))
+    if (![sessionLossCapUsd, dailyLossCapUsd, weeklyLossCapUsd].filter((value) => value !== undefined).every((value) => value > 0))
       throw new Error("invalid RISEx equity guard limits");
     this.journal = this.load();
     if (this.journal.state === "active")
@@ -80,11 +80,11 @@ export class RiseXSessionEquityGuard {
       weeklyChange,
       ...windows,
     };
-    if (sessionChange <= -this.sessionLossCapUsd)
+    if (this.sessionLossCapUsd !== undefined && sessionChange <= -this.sessionLossCapUsd)
       return this.halted("RISEx session equity loss limit reached", observedJournal);
-    if (dailyChange <= -this.dailyLossCapUsd)
+    if (this.dailyLossCapUsd !== undefined && dailyChange <= -this.dailyLossCapUsd)
       return this.halted("RISEx daily equity loss limit reached", observedJournal);
-    if (weeklyChange <= -this.weeklyLossCapUsd)
+    if (this.weeklyLossCapUsd !== undefined && weeklyChange <= -this.weeklyLossCapUsd)
       return this.halted("RISEx weekly equity loss limit reached", observedJournal);
     this.persist(observedJournal);
     return this.status();

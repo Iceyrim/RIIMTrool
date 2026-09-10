@@ -205,7 +205,7 @@ export function aggregateDashboardSnapshots(
     generatedAt: now,
     totalExposureUsd: markets.reduce((sum, market) => sum + (market.position?.notionalUsd ?? 0), 0),
     accountSessionRealizedPnlUsd: first?.sessionRealizedPnlUsd ?? 0,
-    accountSessionLossCapUsd: first?.sessionLossCapUsd ?? 0,
+    accountSessionLossCapUsd: first?.sessionLossCapUsd,
     accountPnlAvailable: first?.pnlAvailable ?? false,
     accounts,
     markets,

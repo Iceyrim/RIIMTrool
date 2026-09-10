@@ -46,4 +46,12 @@ describe("RiseXSessionEquityGuard", () => {
       new RiseXSessionEquityGuard(journalPath(), 2, 2, 5, () => NOW).manualReset("reset"),
     ).toThrow(/exact/);
   });
+
+  it("does not halt on session loss when the session cap is disabled", () => {
+    const subject = new RiseXSessionEquityGuard(journalPath(), undefined, 5, 15, () => NOW);
+    subject.arm(35);
+    expect(subject.observe(31)).toMatchObject({ state: "active", sessionChange: -4, dailyChange: -4 });
+    expect(subject.observe(30)).toMatchObject({ state: "halted", haltReason: "RISEx daily equity loss limit reached" });
+  });
+
 });

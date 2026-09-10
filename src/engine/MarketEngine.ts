@@ -138,7 +138,7 @@ export class MarketEngine {
       sessionLossCapUsd:
         config.accountSessionLossCapUsd ??
         // Compatibility for programmatic test fixtures during the configuration migration.
-        ((config as EngineMarketConfig & { sessionLossCapUsd?: number }).sessionLossCapUsd ?? 6),
+        (config as EngineMarketConfig & { sessionLossCapUsd?: number }).sessionLossCapUsd,
       pnlAvailable: true,
     };
     this.registry = new OrderRegistry(config.symbol, options.stateFilePath);
@@ -384,6 +384,7 @@ export class MarketEngine {
     }
 
     if (
+      this.accountRiskState.sessionLossCapUsd !== undefined &&
       this.accountRiskState.sessionRealizedPnlUsd <=
       -this.accountRiskState.sessionLossCapUsd
     ) {

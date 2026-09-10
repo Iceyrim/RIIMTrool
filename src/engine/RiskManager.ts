@@ -29,7 +29,7 @@ export interface RiskCheckContext {
    * (SPEC.md Section 7, a later build step); until then this is whatever the engine sums from
    * applied fills. */
   sessionRealizedPnlUsd: number;
-  sessionLossCapUsd: number;
+  sessionLossCapUsd?: number;
 }
 
 export interface RiskCheckResult {
@@ -104,7 +104,7 @@ export class RiskManager {
       };
     }
 
-    if (ctx.sessionRealizedPnlUsd <= -ctx.sessionLossCapUsd) {
+    if (ctx.sessionLossCapUsd !== undefined && ctx.sessionRealizedPnlUsd <= -ctx.sessionLossCapUsd) {
       return {
         allowed: false,
         reason: `Account-wide session loss cap of $${ctx.sessionLossCapUsd} reached ($${(-ctx.sessionRealizedPnlUsd).toFixed(2)} realized loss); placement blocked for ${ctx.market}`,

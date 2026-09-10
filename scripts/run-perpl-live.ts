@@ -172,7 +172,7 @@ async function main(): Promise<void> {
     `Leverage: ${enabled.map((market) => `${market.symbol}=${market.leverage ?? 1}x`).join(", ")}`,
   );
   console.log(`Estimated initial collateral: $${estimatedRestingNotional.toFixed(2)}`);
-  console.log(`Session equity-loss cap: $${config.accountRisk.sessionLossCapUsd}`);
+  console.log(`Session equity-loss cap: ${config.accountRisk.sessionLossCapUsd === undefined ? "disabled" : `${config.accountRisk.sessionLossCapUsd}`}`);
   console.log(`Daily equity-loss cap: $${config.accountRisk.dailyLossCapUsd ?? "not configured"}`);
   console.log(`Weekly equity-loss cap: $${config.accountRisk.weeklyLossCapUsd ?? "not configured"}`);
   console.log(`Daily confirmed-fill volume target: $${config.accountRisk.dailyVolumeTargetUsd ?? "not configured"}`);

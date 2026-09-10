@@ -91,7 +91,7 @@ export const marketConfigSchema = z
   });
 
 export const accountRiskSchema = z.object({
-  sessionLossCapUsd: z.number().positive(),
+  sessionLossCapUsd: z.number().positive().optional(),
   dailyLossCapUsd: z.number().positive().optional(),
   weeklyLossCapUsd: z.number().positive().optional(),
   dailyVolumeTargetUsd: z.number().positive().optional(),

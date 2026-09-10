@@ -134,7 +134,7 @@ export class PaperRunner {
     private readonly markets: readonly PaperRunnerMarket[],
     private readonly config: PaperRunnerConfig,
   ) {
-    const cap = markets[0]?.engine.getAccountRiskState().sessionLossCapUsd ?? 6;
+    const cap = markets[0]?.engine.getAccountRiskState().sessionLossCapUsd;
     this.accountRiskState = {
       sessionRealizedPnlUsd: 0,
       sessionLossCapUsd: cap,

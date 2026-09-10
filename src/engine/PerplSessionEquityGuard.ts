@@ -36,12 +36,12 @@ export class PerplSessionEquityGuard {
   private journal: Journal;
   constructor(
     private readonly filePath: string,
-    private readonly maxSessionLoss: number,
+    private readonly maxSessionLoss: number | undefined,
     private readonly maxEvidenceAgeMs = 10_000,
     private readonly now = Date.now,
     private readonly windowLimits: { dailyLossCapUsd?: number; weeklyLossCapUsd?: number } = {},
   ) {
-    if (!(maxSessionLoss > 0) || !(maxEvidenceAgeMs > 0)) throw new Error("invalid Perpl equity guard limits");
+    if ((maxSessionLoss !== undefined && !(maxSessionLoss > 0)) || !(maxEvidenceAgeMs > 0)) throw new Error("invalid Perpl equity guard limits");
     this.journal = this.load();
     if (this.journal.state === "active") this.halt("restart found an unresolved active equity session; manual review required");
   }
@@ -102,7 +102,7 @@ export class PerplSessionEquityGuard {
       dailyChange,
       weeklyChange,
     };
-    if (change <= -this.maxSessionLoss)
+    if (this.maxSessionLoss !== undefined && change <= -this.maxSessionLoss)
       return this.halted("Perpl session equity loss limit reached", observedJournal);
     if (this.windowLimits.dailyLossCapUsd && dailyChange <= -this.windowLimits.dailyLossCapUsd)
       return this.halted("Perpl daily equity loss limit reached", observedJournal);

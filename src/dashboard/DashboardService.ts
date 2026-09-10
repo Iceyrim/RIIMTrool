@@ -81,7 +81,7 @@ export interface DashboardAccountStatus {
   healthDetails: string[];
   uptimeMs: DashboardMetric<number>;
   sessionRealizedPnlUsd: number;
-  sessionLossCapUsd: number;
+  sessionLossCapUsd?: number;
   pnlAvailable: boolean;
   volumes: Record<"24h" | "7d" | "30d" | "allTime", DashboardMetric<VolumeTelemetry>>;
   history: DashboardMetric<{ sessions: SessionSummary[]; points: HistoryPoint[]; status: HistoryStoreStatus }>;
@@ -92,7 +92,7 @@ export interface DashboardStatus {
   generatedAt: number;
   totalExposureUsd: number;
   accountSessionRealizedPnlUsd: number;
-  accountSessionLossCapUsd: number;
+  accountSessionLossCapUsd?: number;
   accountPnlAvailable: boolean;
   accounts: DashboardAccountStatus[];
   markets: MarketStatus[];

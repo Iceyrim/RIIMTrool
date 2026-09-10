@@ -136,4 +136,19 @@ describe("PerplSessionEquityGuard", () => {
       healthy: false,
     });
   });
+
+  it("does not halt on session loss when the session cap is disabled", () => {
+    const subject = new PerplSessionEquityGuard(journalPath(), undefined, 10_000, () => NOW, {
+      dailyLossCapUsd: 5,
+      weeklyLossCapUsd: 15,
+    });
+    subject.arm(evidence({ balance: "18" }));
+    expect(subject.observe(evidence({ balance: "14", blockNumber: "101" }))).toMatchObject({
+      state: "active", sessionChange: -4, dailyChange: -4,
+    });
+    expect(subject.observe(evidence({ balance: "13", blockNumber: "102" }))).toMatchObject({
+      state: "halted", haltReason: "Perpl daily equity loss limit reached",
+    });
+  });
+
 });

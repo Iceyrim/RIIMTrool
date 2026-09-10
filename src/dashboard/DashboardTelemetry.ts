@@ -186,7 +186,7 @@ export class DashboardTelemetry {
     if (boundedResult.status === "fulfilled") {
       for (const { window } of bounded) {
         const rows = boundedResult.value[window];
-        if (rows) this.volumes.set(window, { available: true, value: rows, updatedAt: now, stale: false });
+        if (rows) this.publishVolume(window, rows, now);
         else { failures++; this.applyVolumeFailure(window, "RISEx API did not return this volume window", now); }
       }
     } else {
@@ -195,7 +195,7 @@ export class DashboardTelemetry {
     }
     if (allTime) {
       if (allTimeResult.status === "fulfilled" && allTimeResult.value)
-        this.volumes.set("allTime", { available: true, value: allTimeResult.value, updatedAt: now, stale: false });
+        this.publishVolume("allTime", allTimeResult.value, now);
       else {
         failures++;
         this.applyVolumeFailure("allTime", allTimeResult.status === "rejected" ? String(allTimeResult.reason) : "RISEx API did not return all-time volume", now);
@@ -214,14 +214,43 @@ export class DashboardTelemetry {
 
   private applyVolumeFailure(window: VolumeWindow, message: string, now: number): void {
     const previous = this.volumes.get(window)!;
+    const durable = this.durableVolume(window, now);
+    const durableTotal = this.totalVolume(durable);
+    const previousTotal = this.totalVolume(previous.value);
+    if (durable.length && (window !== "allTime" || !previous.available || durableTotal >= previousTotal)) {
+      this.volumes.set(window, {
+        available: true,
+        value: durable,
+        updatedAt: now,
+        stale: true,
+        error: `Durable confirmed-fill fallback (up to 90 days): ${message}`,
+      });
+      return;
+    }
     if (previous.available) {
       this.volumes.set(window, { ...previous, stale: true, error: message });
       return;
     }
+    this.volumes.set(window, this.unavailable(`${window} volume unavailable: ${message}`, message));
+  }
+
+  private publishVolume(window: VolumeWindow, rows: AccountVolume[], now: number): void {
     const durable = this.durableVolume(window, now);
-    this.volumes.set(window, durable.length
-      ? { available: true, value: durable, updatedAt: now, stale: true, error: `Durable confirmed-fill fallback (up to 90 days): ${message}` }
-      : this.unavailable(`${window} volume unavailable: ${message}`, message));
+    if (!rows.length && durable.length) {
+      this.volumes.set(window, {
+        available: true,
+        value: durable,
+        updatedAt: now,
+        stale: true,
+        error: "Durable confirmed-fill fallback (up to 90 days): RISEx API returned an empty volume window",
+      });
+      return;
+    }
+    this.volumes.set(window, { available: true, value: rows, updatedAt: now, stale: false });
+  }
+
+  private totalVolume(rows: AccountVolume[] | null): number {
+    return rows?.reduce((sum, row) => sum + row.quoteVolume, 0) ?? 0;
   }
 
   private durableVolume(window: VolumeWindow, now: number): AccountVolume[] {

@@ -171,4 +171,10 @@ describe("RiskManager.checkMarginHealth", () => {
     expect(result.allowed).toBe(false);
     expect(result.reason).toMatch(/bankruptcy/);
   });
+
+  it("allows session losses when the session cap is disabled", () => {
+    const rm = new RiskManager(new FakeExchangeAdapter());
+    expect(rm.canPlaceOrder(baseCtx({ sessionRealizedPnlUsd: -100, sessionLossCapUsd: undefined })).allowed).toBe(true);
+  });
+
 });

@@ -74,7 +74,7 @@ export interface EngineMarketConfig {
 
 export interface AccountRiskState {
   sessionRealizedPnlUsd: number;
-  sessionLossCapUsd: number;
+  sessionLossCapUsd?: number;
   pnlAvailable: boolean;
   pnlUnavailableReason?: string;
 }
