@@ -18,6 +18,7 @@ import {
 } from "../src/dashboard/DashboardSnapshotSidecar.js";
 import { DashboardTelemetry } from "../src/dashboard/DashboardTelemetry.js";
 import { MarketEngine } from "../src/engine/MarketEngine.js";
+import { WindowLossCapTracker } from "../src/engine/WindowLossCapTracker.js";
 import {
   assertRiseXPreflight,
   consumeRiseXLiveArmFile,
@@ -31,6 +32,7 @@ import {
   type PaperRunnerMarket,
   type RealizedPnlSource,
 } from "../src/paperRunner/PaperRunner.js";
+import { WindowTrackingRealizedPnlSource } from "../src/paperRunner/WindowTrackingRealizedPnlSource.js";
 
 const BASE_URL = process.env.RISEX_API_BASE_URL ?? "https://api.rise.trade";
 
@@ -124,8 +126,8 @@ async function main(): Promise<void> {
   const equityGuard = new RiseXSessionEquityGuard(
     join(stateRoot, "equity.json"),
     config.accountRisk.sessionLossCapUsd,
-    config.accountRisk.dailyLossCapUsd,
-    config.accountRisk.weeklyLossCapUsd,
+    undefined,
+    undefined,
   );
   const equityStatus = equityGuard.status();
   const blockers: string[] = [];
@@ -213,9 +215,19 @@ async function main(): Promise<void> {
     publisher?.halt(reason);
     if (runner && !shuttingDown) void shutdown(reason);
   };
-  const pnlSource = new RiseXEquityPnlSource(adapter, equityGuard, requestShutdown);
-  pnlSource.arm();
+  const rawPnlSource = new RiseXEquityPnlSource(adapter, equityGuard, requestShutdown);
+  rawPnlSource.arm();
+  const preservedWindowStatus = equityGuard.status();
   const alertBus = createAlertBusFromEnv("RISEX LIVE");
+  const windowLossCapTracker = new WindowLossCapTracker({
+    dailyLossCapUsd: config.accountRisk.dailyLossCapUsd,
+    weeklyLossCapUsd: config.accountRisk.weeklyLossCapUsd,
+    anchorFilePath: join(stateRoot, "pnl-window-anchors.json"),
+    initialDailyRealizedPnlUsd: preservedWindowStatus.dailyChange,
+    initialWeeklyRealizedPnlUsd: preservedWindowStatus.weeklyChange,
+    alertBus,
+  });
+  const pnlSource = new WindowTrackingRealizedPnlSource(rawPnlSource, windowLossCapTracker);
   const history = new DashboardHistoryStore(
     resolve("state/dashboard"),
     `risex-live-${account.toLowerCase()}`,
@@ -239,6 +251,7 @@ async function main(): Promise<void> {
     engine: new MarketEngine(adapter, toEngineMarketConfig(market), {
       stateFilePath: join(stateRoot, `orders-${market.symbol}.json`),
       tradeLogFilePath: join(stateRoot, `trades-${market.symbol}.jsonl`),
+      windowLossCapProvider: windowLossCapTracker,
       onFillRecorded: (entry) => {
         telemetry.recordFill(entry);
         alertBus?.emit({

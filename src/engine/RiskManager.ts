@@ -28,14 +28,19 @@ export interface RiskCheckContext {
    * intentionally simple for now — proper realized-PnL accounting arrives with trade logging
    * (SPEC.md Section 7, a later build step); until then this is whatever the engine sums from
    * applied fills. */
-  sessionRealizedPnlUsd: number;
+  /** Legacy compatibility inputs; intentionally ignored because session caps are disabled. */
+  sessionRealizedPnlUsd?: number;
   sessionLossCapUsd?: number;
+  dailyLossCapped?: boolean;
+  weeklyLossCapped?: boolean;
+  dailyLossCapReason?: string;
+  weeklyLossCapReason?: string;
 }
 
 export interface RiskCheckResult {
   allowed: boolean;
   reason?: string;
-  deniedBy?: "openOrderCapacity" | "orderSize" | "orderNotional" | "aggregateLongExposure" | "aggregateShortExposure" | "sessionLoss" | "reconciliation";
+  deniedBy?: "openOrderCapacity" | "orderSize" | "orderNotional" | "aggregateLongExposure" | "aggregateShortExposure" | "dailyLoss" | "weeklyLoss" | "reconciliation";
 }
 
 /**
@@ -104,12 +109,11 @@ export class RiskManager {
       };
     }
 
-    if (ctx.sessionLossCapUsd !== undefined && ctx.sessionRealizedPnlUsd <= -ctx.sessionLossCapUsd) {
-      return {
-        allowed: false,
-        reason: `Account-wide session loss cap of $${ctx.sessionLossCapUsd} reached ($${(-ctx.sessionRealizedPnlUsd).toFixed(2)} realized loss); placement blocked for ${ctx.market}`,
-        deniedBy: "sessionLoss",
-      };
+    if (ctx.dailyLossCapped) {
+      return { allowed: false, reason: "Daily realized-PnL loss cap reached; new ladder placement blocked until UTC daily rollover", deniedBy: "dailyLoss" };
+    }
+    if (ctx.weeklyLossCapped) {
+      return { allowed: false, reason: "Weekly realized-PnL loss cap reached; new ladder placement blocked until UTC weekly rollover", deniedBy: "weeklyLoss" };
     }
 
     return { allowed: true };

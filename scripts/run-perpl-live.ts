@@ -20,6 +20,7 @@ import {
 } from "../src/dashboard/DashboardSnapshotSidecar.js";
 import { DashboardTelemetry } from "../src/dashboard/DashboardTelemetry.js";
 import { MarketEngine } from "../src/engine/MarketEngine.js";
+import { WindowLossCapTracker } from "../src/engine/WindowLossCapTracker.js";
 import { PerplEquityPnlSource } from "../src/engine/PerplEquityPnlSource.js";
 import { PerplLiveAdapter } from "../src/engine/PerplLiveAdapter.js";
 import {
@@ -32,6 +33,7 @@ import {
 } from "../src/engine/PerplLiveStartup.js";
 import { PerplSessionEquityGuard } from "../src/engine/PerplSessionEquityGuard.js";
 import { PaperRunner, type PaperRunnerMarket } from "../src/paperRunner/PaperRunner.js";
+import { WindowTrackingRealizedPnlSource } from "../src/paperRunner/WindowTrackingRealizedPnlSource.js";
 
 const RPC = "https://rpc.monad.xyz";
 const ACCOUNT_ID = 5198;
@@ -228,14 +230,21 @@ async function main(): Promise<void> {
     config.accountRisk.sessionLossCapUsd,
     10_000,
     Date.now,
-    {
-      dailyLossCapUsd: config.accountRisk.dailyLossCapUsd,
-      weeklyLossCapUsd: config.accountRisk.weeklyLossCapUsd,
-    },
+    {},
   );
-  const pnlSource = new PerplEquityPnlSource(liveAdapter, equityGuard, requestShutdown);
-  pnlSource.arm();
+  const rawPnlSource = new PerplEquityPnlSource(liveAdapter, equityGuard, requestShutdown);
+  rawPnlSource.arm();
+  const preservedWindowStatus = equityGuard.status();
   const alertBus = createAlertBusFromEnv("PERPL LIVE");
+  const windowLossCapTracker = new WindowLossCapTracker({
+    dailyLossCapUsd: config.accountRisk.dailyLossCapUsd,
+    weeklyLossCapUsd: config.accountRisk.weeklyLossCapUsd,
+    anchorFilePath: join(accountStateRoot, "pnl-window-anchors.json"),
+    initialDailyRealizedPnlUsd: preservedWindowStatus.dailyChange,
+    initialWeeklyRealizedPnlUsd: preservedWindowStatus.weeklyChange,
+    alertBus,
+  });
+  const pnlSource = new WindowTrackingRealizedPnlSource(rawPnlSource, windowLossCapTracker);
   const history = new DashboardHistoryStore(
     resolve("state/dashboard"),
     `perpl-live-${ACCOUNT_ID}`,
@@ -259,6 +268,7 @@ async function main(): Promise<void> {
     engine: new MarketEngine(liveAdapter, toEngineMarketConfig(market), {
       stateFilePath: join(accountStateRoot, `orders-${market.symbol}.json`),
       tradeLogFilePath: join(accountStateRoot, `trades-${market.symbol}.jsonl`),
+      windowLossCapProvider: windowLossCapTracker,
       onFillRecorded: (entry) => {
         telemetry.recordFill(entry);
         alertBus?.emit({

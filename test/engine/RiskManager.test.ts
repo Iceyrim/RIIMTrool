@@ -30,8 +30,6 @@ function baseCtx(overrides: Partial<RiskCheckContext> = {}): RiskCheckContext {
     progressiveOpenOrderCount: 0,
     openBuyQuantity: 0,
     openSellQuantity: 0,
-    sessionRealizedPnlUsd: 0,
-    sessionLossCapUsd: 15,
     ...overrides,
   };
 }
@@ -152,11 +150,10 @@ describe("RiskManager.canPlaceOrder", () => {
     expect(rm.canPlaceOrder(baseCtx({ size: 0.001000001, openBuyQuantity: 0.004 })).deniedBy).toBe("aggregateLongExposure");
   });
 
-  it("blocks once the session loss cap is reached", () => {
+  it("blocks new placement while the daily or weekly window is capped", () => {
     const rm = new RiskManager(new FakeExchangeAdapter());
-    const result = rm.canPlaceOrder(baseCtx({ sessionRealizedPnlUsd: -15 }));
-    expect(result.allowed).toBe(false);
-    expect(result.reason).toMatch(/[Ss]ession loss cap/);
+    expect(rm.canPlaceOrder(baseCtx({ dailyLossCapped: true })).deniedBy).toBe("dailyLoss");
+    expect(rm.canPlaceOrder(baseCtx({ weeklyLossCapped: true })).deniedBy).toBe("weeklyLoss");
   });
 });
 
@@ -172,9 +169,9 @@ describe("RiskManager.checkMarginHealth", () => {
     expect(result.reason).toMatch(/bankruptcy/);
   });
 
-  it("allows session losses when the session cap is disabled", () => {
+  it("allows placement when neither calendar window is capped", () => {
     const rm = new RiskManager(new FakeExchangeAdapter());
-    expect(rm.canPlaceOrder(baseCtx({ sessionRealizedPnlUsd: -100, sessionLossCapUsd: undefined })).allowed).toBe(true);
+    expect(rm.canPlaceOrder(baseCtx({ dailyLossCapped: false, weeklyLossCapped: false })).allowed).toBe(true);
   });
 
 });

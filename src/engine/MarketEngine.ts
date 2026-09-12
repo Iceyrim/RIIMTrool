@@ -11,6 +11,10 @@ import { RiskManager } from "./RiskManager.js";
 import { TradeLog, type TradeLogEntry } from "./TradeLog.js";
 import type { AccountRiskState, EngineMarketConfig } from "./types.js";
 
+export interface WindowLossCapProvider {
+  getState(): { dailyCapped: boolean; weeklyCapped: boolean; dailyLossCapReason?: string; weeklyLossCapReason?: string };
+}
+
 export interface CycleSummary {
   market: string;
   reconciliation: ReconciliationResult;
@@ -92,6 +96,7 @@ export interface MarketEngineOptions {
   /** Shared by every engine belonging to one configured account. PaperRunner installs one
    * automatically; live construction may inject it before the runner exists. */
   accountRiskState?: AccountRiskState;
+  windowLossCapProvider?: WindowLossCapProvider;
 }
 
 export interface ManagedOrderCleanupResult {
@@ -119,6 +124,7 @@ export class MarketEngine {
   readonly tradeLog: TradeLog;
 
   private accountRiskState: AccountRiskState;
+  private readonly windowLossCapProvider?: WindowLossCapProvider;
   private started = false;
   // Defaults healthy: PaperRunner only ever calls markSessionPnlUnavailable() after a real
   // drain attempt fails, and startup (run-live.ts) aborts before any cycle runs if the initial
@@ -133,6 +139,7 @@ export class MarketEngine {
     private readonly config: EngineMarketConfig,
     options: MarketEngineOptions,
   ) {
+    this.windowLossCapProvider = options.windowLossCapProvider;
     this.accountRiskState = options.accountRiskState ?? {
       sessionRealizedPnlUsd: 0,
       sessionLossCapUsd:
@@ -784,6 +791,8 @@ export class MarketEngine {
     const riskSkipMessages: string[] = [];
     const MAX_RISK_MESSAGES = 5;
 
+    const windowLossCapState = this.windowLossCapProvider?.getState();
+
     for (const level of ladder) {
       const alreadyCovered = stillResting.some(
         (o) =>
@@ -812,8 +821,10 @@ export class MarketEngine {
         progressiveOpenOrderCount: riskState.progressiveOpenOrderCount,
         openBuyQuantity: riskState.openBuyQuantity,
         openSellQuantity: riskState.openSellQuantity,
-        sessionRealizedPnlUsd: this.accountRiskState.sessionRealizedPnlUsd,
-        sessionLossCapUsd: this.accountRiskState.sessionLossCapUsd,
+        dailyLossCapped: windowLossCapState?.dailyCapped,
+        weeklyLossCapped: windowLossCapState?.weeklyCapped,
+        dailyLossCapReason: windowLossCapState?.dailyLossCapReason,
+        weeklyLossCapReason: windowLossCapState?.weeklyLossCapReason,
       });
       if (!riskCheck.allowed) {
         if (riskCheck.deniedBy === "openOrderCapacity") riskSkippedLevels.openOrderCapacity++;
