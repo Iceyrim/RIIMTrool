@@ -5,7 +5,7 @@ import { mapAuthenticatedFrame } from "./authMappers.js";
 import type { PerplOrder, PerplOrderRequest, PerplPosition } from "./authTypes.js";
 import type { AccountVolume, NormalizedFill, NormalizedOrder, NormalizedPosition } from "../ExchangeAdapter.js";
 import type { PerplExecutionTransport } from "./onchain/PerplCanaryExecutor.js";
-import type { PerplExecutionIntent, PerplExecutionOutcome } from "./onchain/executionProtocol.js";
+import { PERPL_MAX_CANARY_NOTIONAL_USD, type PerplExecutionIntent, type PerplExecutionOutcome } from "./onchain/executionProtocol.js";
 import { PerplTradingProtocol, type PerplResolution } from "./tradingProtocol.js";
 
 interface SocketLike {
@@ -412,8 +412,8 @@ export class PerplApiExecutionTransport implements PerplExecutionTransport {
     const price = quantizePerplLimitPrice(intent.price, this.scales[market].priceDecimals, intent.side);
     const encodedPrice = scaled(String(price), this.scales[market].priceDecimals, "Perpl API price");
     const encodedSize = scaled(intent.size, this.scales[market].sizeDecimals, "Perpl API size");
-    if (price * (encodedSize / 10 ** this.scales[market].sizeDecimals) > 30)
-      throw new ExchangeAdapterError("Perpl API quantized order exceeds the $30 maximum notional");
+    if (price * (encodedSize / 10 ** this.scales[market].sizeDecimals) > PERPL_MAX_CANARY_NOTIONAL_USD)
+      throw new ExchangeAdapterError(`Perpl API quantized order exceeds the $${PERPL_MAX_CANARY_NOTIONAL_USD} maximum notional`);
     return {
       ...common,
       t: intent.reduceOnly ? (intent.side === "sell" ? 3 : 4) : intent.side === "buy" ? 1 : 2,

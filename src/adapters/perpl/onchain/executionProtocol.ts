@@ -6,6 +6,7 @@ import {
 } from "./protocol.js";
 
 export const PERPL_EXECUTION_PROTOCOL_VERSION = 1 as const;
+export const PERPL_MAX_CANARY_NOTIONAL_USD = 40;
 
 interface ExecutionEnvelope {
   version: 1;
@@ -77,7 +78,7 @@ export function validateExecutionIntent(intent: PerplExecutionIntent): void {
       !Number.isFinite(size) ||
       price <= 0 ||
       size <= 0 ||
-      price * size > 30
+      price * size > PERPL_MAX_CANARY_NOTIONAL_USD
     ) throw new ExchangeAdapterError("Perpl placement intent violates canary limits");
   } else if (!intent.exchangeOrderId || !intent.placementActionId || intent.actionId === intent.placementActionId) {
     throw new ExchangeAdapterError("Perpl cancellation identity is invalid");

@@ -39,6 +39,24 @@ describe("PerplApiExecutionTransport", () => {
     expect(quantizePerplLimitPrice(2_453.5678, 2, "buy")).toBe(2_453.56);
     expect(quantizePerplLimitPrice(2_453.5601, 2, "sell")).toBe(2_453.57);
   });
+  it("uses the shared $40 limit after market quantization", async () => {
+    const socket = new FakeSocket();
+    const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "12".repeat(32), socketFactory: () => socket });
+    const connecting = transport.connect(); socket.open(); await connecting;
+    const exact = transport.request({ ...intent, price: "100000", size: "0.00040" });
+    await Promise.resolve();
+    expect(socket.sent[1]).toMatchObject({ p: 1000000, s: 40 });
+    transport.close();
+    await expect(exact).resolves.toMatchObject({ event: "ambiguous" });
+
+    const secondSocket = new FakeSocket();
+    const second = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "13".repeat(32), socketFactory: () => secondSocket });
+    const secondConnecting = second.connect(); secondSocket.open(); await secondConnecting;
+    await expect(second.request({ ...intent, side: "sell", price: "102564.101", size: "0.00039" }))
+      .rejects.toThrow(/\$40 maximum notional/);
+    second.close();
+  });
+
   it("ignores a harmless heartbeat that arrives before the authenticated wallet snapshot", async () => {
     const socket = new FakeSocket();
     const transport = new PerplApiExecutionTransport({
