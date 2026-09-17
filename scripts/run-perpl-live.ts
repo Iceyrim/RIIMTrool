@@ -26,10 +26,12 @@ import { PerplLiveAdapter } from "../src/engine/PerplLiveAdapter.js";
 import {
   assertPerplLiveCapacity,
   assertPerplShutdownCapacity,
+  cancelAllPerplConfiguredMarketOrders,
   consumePerplLiveArmFile,
   estimatePerplRestingNotional,
   planPerplShutdownChunks,
   requirePerplLiveCliFlag,
+  type PerplShutdownOrderSweepResult,
 } from "../src/engine/PerplLiveStartup.js";
 import { PerplSessionEquityGuard } from "../src/engine/PerplSessionEquityGuard.js";
 import { PaperRunner, type PaperRunnerMarket } from "../src/paperRunner/PaperRunner.js";
@@ -312,6 +314,10 @@ async function main(): Promise<void> {
     shuttingDown = true;
     console.log(`\n[PERPL LIVE] Shutting down: ${reason}`);
     const result = await runner!.shutdown();
+    let configuredOrderSweep: PerplShutdownOrderSweepResult = {
+      attempted: [], cancelled: [], failed: [], unresolved: [],
+      messages: ["configured-market order sweep did not run"], successful: false,
+    };
     const flattening: Array<{
       market: string;
       initialBaseSize: number;
@@ -338,6 +344,11 @@ async function main(): Promise<void> {
         Object.fromEntries(enabled.map((market) => [market.symbol, market.leverage ?? 1])),
         executionTransport,
       );
+      configuredOrderSweep = await cancelAllPerplConfiguredMarketOrders({
+        markets: enabled.map((market) => market.symbol),
+        source: executionTransport,
+        canceller: cleanupAdapter,
+      });
       for (const market of enabled) {
         const initialBaseSize = cleanupAdapter.getPositions(market.symbol)[0]?.baseSize ?? 0;
         const entry = {
@@ -435,6 +446,7 @@ async function main(): Promise<void> {
     const finalAccount = finalAdapter.getAccountEvidence();
     const reconciled =
       result.successful &&
+      configuredOrderSweep.successful &&
       flattening.every((entry) => entry.failures.length === 0) &&
       finalOrders.length === 0 &&
       finalPositions.every((position) => position.baseSize === 0) &&
@@ -448,6 +460,7 @@ async function main(): Promise<void> {
           mode: "perpl-live",
           reason,
           cleanup: result.cleanup,
+          configuredOrderSweep,
           flattening,
           execution: "perpl-one-click-api",
           openOrders: finalOrders,

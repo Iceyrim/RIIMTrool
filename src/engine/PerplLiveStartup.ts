@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
+import type { CancelOrderResult, NormalizedOrder } from "../adapters/ExchangeAdapter.js";
 import type { MarketsConfig } from "../config/schema.js";
 
 export function consumePerplLiveArmFile(path: string, todayUtc = new Date().toISOString().slice(0, 10)): void {
@@ -45,6 +46,66 @@ export function estimatePerplGasReserveMon(
   if (gasPriceWei <= 0n || gasLimit <= 0n || !Number.isSafeInteger(minimumActions) || minimumActions < 1)
     throw new Error("invalid Perpl gas-reserve inputs");
   return Number(gasPriceWei * gasLimit * BigInt(minimumActions)) / 1e18;
+}
+
+export interface PerplShutdownOrderSweepResult {
+  attempted: string[];
+  cancelled: string[];
+  failed: string[];
+  unresolved: string[];
+  messages: string[];
+  successful: boolean;
+}
+
+export async function cancelAllPerplConfiguredMarketOrders(input: {
+  markets: readonly string[];
+  source: { connect(): Promise<void>; getOpenOrders(market?: string): NormalizedOrder[] };
+  canceller: { cancelOrder(exchangeOrderId: string, market: string): Promise<CancelOrderResult>; refreshAccountState(): Promise<void> };
+  maxAttempts?: number;
+}): Promise<PerplShutdownOrderSweepResult> {
+  const maxAttempts = input.maxAttempts ?? 3;
+  if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1)
+    throw new Error("invalid Perpl shutdown order-sweep attempt count");
+  const attempted = new Set<string>();
+  const cancelled = new Set<string>();
+  const failed = new Set<string>();
+  const messages: string[] = [];
+  await input.source.connect();
+  for (let round = 0; round < maxAttempts; round++) {
+    const open = input.markets.flatMap((market) => input.source.getOpenOrders(market));
+    if (open.length === 0) break;
+    for (const order of open) {
+      const key = order.market + ":" + order.exchangeOrderId;
+      attempted.add(key);
+      try {
+        const result = await input.canceller.cancelOrder(order.exchangeOrderId, order.market);
+        if (result.success) cancelled.add(key);
+        else {
+          failed.add(key);
+          if (messages.length < 5) messages.push("Failed to cancel configured-market order " + key);
+        }
+      } catch (error) {
+        failed.add(key);
+        if (messages.length < 5) messages.push("Failed to cancel configured-market order " + key + ": " + String(error));
+      }
+    }
+    try {
+      await input.canceller.refreshAccountState();
+    } catch (error) {
+      if (messages.length < 5) messages.push("Failed to refresh after configured-market order sweep: " + String(error));
+    }
+  }
+  const unresolved = input.markets.flatMap((market) =>
+    input.source.getOpenOrders(market).map((order) => order.market + ":" + order.exchangeOrderId),
+  );
+  return {
+    attempted: [...attempted],
+    cancelled: [...cancelled],
+    failed: [...failed],
+    unresolved,
+    messages,
+    successful: unresolved.length === 0,
+  };
 }
 
 export function planPerplShutdownChunks(input: {

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertPerplLiveCapacity,
   assertPerplShutdownCapacity,
+  cancelAllPerplConfiguredMarketOrders,
   consumePerplLiveArmFile,
   estimatePerplRestingNotional,
   planPerplShutdownChunks,
@@ -12,6 +13,32 @@ import {
 import { loadMarketsConfig } from "../../src/config/loadConfig.js";
 
 describe("Perpl Live startup gates", () => {
+  it("cancels configured-market orders that are absent from the local registry", async () => {
+    const open = [{ exchangeOrderId: "orphan-4", market: "BTCUSD", side: "buy" as const, type: "postOnly" as const, price: 77_615, size: 0.00036, filledSize: 0, remainingSize: 0.00036, isReduceOnly: false, state: "open" as const }];
+    const result = await cancelAllPerplConfiguredMarketOrders({
+      markets: ["BTCUSD", "ETHUSD"],
+      source: { connect: async () => undefined, getOpenOrders: (market) => open.filter((order) => !market || order.market === market) },
+      canceller: {
+        cancelOrder: async (id) => { open.splice(open.findIndex((order) => order.exchangeOrderId === id), 1); return { success: true, exchangeOrderId: id }; },
+        refreshAccountState: async () => undefined,
+      },
+    });
+    expect(result).toMatchObject({ attempted: ["BTCUSD:orphan-4"], cancelled: ["BTCUSD:orphan-4"], unresolved: [], successful: true });
+  });
+
+  it("reports configured-market orders that remain unresolved after bounded retries", async () => {
+    const order = { exchangeOrderId: "orphan-21", market: "BTCUSD", side: "buy" as const, type: "postOnly" as const, price: 78_393.1, size: 0.00036, filledSize: 0, remainingSize: 0.00036, isReduceOnly: false, state: "open" as const };
+    const result = await cancelAllPerplConfiguredMarketOrders({
+      markets: ["BTCUSD"],
+      source: { connect: async () => undefined, getOpenOrders: () => [order] },
+      canceller: { cancelOrder: async (id) => ({ success: false, exchangeOrderId: id }), refreshAccountState: async () => undefined },
+      maxAttempts: 2,
+    });
+    expect(result.successful).toBe(false);
+    expect(result.unresolved).toEqual(["BTCUSD:orphan-21"]);
+    expect(result.failed).toEqual(["BTCUSD:orphan-21"]);
+  });
+
   it("splits shutdown inventory into bounded exact reduce-only chunks", () => {
     expect(planPerplShutdownChunks({ positionBaseSize: -0.008, limitPrice: 2460, maxOrderSize: 0.005, maxNotionalUsd: 15, sizeDecimals: 3 })).toEqual([0.005, 0.003]);
     expect(planPerplShutdownChunks({ positionBaseSize: 0.00018, limitPrice: 78_000, maxOrderSize: 0.0002, maxNotionalUsd: 15, sizeDecimals: 5 })).toEqual([0.00018]);

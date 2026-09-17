@@ -426,7 +426,16 @@ export class MarketEngine {
     let openSellQuantity = exchangeOpenOrders
       .filter((order) => order.side === "sell")
       .reduce((sum, order) => sum + order.remainingSize, 0);
-    const exitRequired = Math.abs(currentBaseSize) > this.config.inventoryReductionThresholdBase;
+    const windowLossCapState = this.windowLossCapProvider?.getState();
+    const windowLossCapped =
+      windowLossCapState?.dailyCapped === true || windowLossCapState?.weeklyCapped === true;
+    // A breached calendar loss window changes the objective from ordinary inventory management
+    // to forced-flat safety. Any nonzero position must be reduced, even when it is below the
+    // normal inventory threshold; otherwise a capped bot can leave unsupervised directional risk.
+    const exitRequired =
+      currentBaseSize !== 0 &&
+      (windowLossCapped ||
+        Math.abs(currentBaseSize) > this.config.inventoryReductionThresholdBase);
     summary.reductionMode = exitRequired;
     summary.exitState = currentBaseSize === 0 ? "no_position" : "below_threshold";
     const existingExit = this.lifecycle.hasOpenReduceOnlyExit();
@@ -434,13 +443,21 @@ export class MarketEngine {
 
     // SPEC.md Section 5c: inventory management is a dedicated reduce-only exit, not a skew
     // applied to the normal ladder below.
-    if (exitRequired) {
+    if (exitRequired || windowLossCapped) {
       summary.reductionModeCancellation = await this.cancelOrdinaryQuotesForReductionMode();
       if (summary.reductionModeCancellation.unresolved > 0) {
         summary.exitState = "blocked";
         summary.exitDetails = {
           cause: `${summary.reductionModeCancellation.unresolved} ordinary managed quote(s) remain unresolved`,
         };
+        this.registry.save();
+        return this.finishSummary(summary);
+      }
+      if (!exitRequired) {
+        summary.blockedReason =
+          windowLossCapState?.dailyLossCapReason ??
+          windowLossCapState?.weeklyLossCapReason ??
+          "Realized-PnL loss cap reached; holding flat with no ordinary quotes";
         this.registry.save();
         return this.finishSummary(summary);
       }
