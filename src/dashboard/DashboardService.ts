@@ -72,7 +72,7 @@ export interface MarketStatus {
 
 export interface DashboardAccountStatus {
   exchangeId: string;
-  venue: "N1" | "RISEx" | "Perpl" | "Unknown";
+  venue: "N1" | "RISEx" | "Perpl" | "QFEX" | "Unknown";
   mode: "LIVE" | "PAPER" | "UNKNOWN";
   label: string;
   balances: DashboardMetric<NormalizedBalance[]>;
@@ -112,6 +112,7 @@ function cachedMetric<T>(read: () => T, source: string): DashboardMetric<T> {
 }
 
 function venueMode(exchangeId: string): Pick<DashboardAccountStatus, "venue" | "mode" | "label"> {
+  if (exchangeId === "qfex-live") return { venue: "QFEX", mode: "LIVE", label: "QFEX LIVE" };
   if (exchangeId === "n1") return { venue: "N1", mode: "LIVE", label: "N1 LIVE" };
   if (exchangeId === "n1-paper") return { venue: "N1", mode: "PAPER", label: "N1 PAPER" };
   if (exchangeId === "risex" || exchangeId === "risex-session-live") {

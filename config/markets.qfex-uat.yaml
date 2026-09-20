@@ -1,0 +1,55 @@
+accountRisk:
+  dailyLossCapUsd: 5
+  weeklyLossCapUsd: 15
+  dailyVolumeTargetUsd: 100000
+  weeklyVolumeTargetUsd: 100000
+markets:
+  - symbol: MUUSD
+    exchange: qfex
+    exchangeSymbol: MU-USD
+    enabled: true
+    leverage: 10
+    priceTickSize: 0.01
+    quantityStep: 0.001
+    minimumOrderSize: 0.01
+    orderSize: { min: 0.080, max: 0.119 }
+    spreadBps: { normal: 3, min: 1.5, max: 8 }
+    exitSpreadBps: 1.5
+    quoteLevels: 1
+    levelSpacingBps: [1.5]
+    inventoryReductionThresholdBase: 0.040
+    riskLimits:
+      maxLongPosition: 0.239
+      maxShortPosition: 0.239
+      maxOrderSize: 0.119
+      maxOrderNotionalUsd: 120
+      maxOpenOrders: 3
+    reduceOnlyExit: { minHoldMs: 10000, maxHoldMs: 60000 }
+    quoteMinimumLifetimeMs: 10000
+    quoteRepriceThresholdBps: 1
+    quoteMaximumLifetimeMs: 30000
+
+  - symbol: MSFTUSD
+    exchange: qfex
+    exchangeSymbol: MSFT-USD
+    enabled: true
+    leverage: 10
+    priceTickSize: 0.01
+    quantityStep: 0.001
+    minimumOrderSize: 0.02
+    orderSize: { min: 0.162, max: 0.242 }
+    spreadBps: { normal: 3, min: 1.5, max: 8 }
+    exitSpreadBps: 1.5
+    quoteLevels: 1
+    levelSpacingBps: [1.5]
+    inventoryReductionThresholdBase: 0.080
+    riskLimits:
+      maxLongPosition: 0.485
+      maxShortPosition: 0.485
+      maxOrderSize: 0.242
+      maxOrderNotionalUsd: 120
+      maxOpenOrders: 3
+    reduceOnlyExit: { minHoldMs: 10000, maxHoldMs: 60000 }
+    quoteMinimumLifetimeMs: 10000
+    quoteRepriceThresholdBps: 1
+    quoteMaximumLifetimeMs: 30000

@@ -45,8 +45,11 @@ export const marketConfigSchema = z
     // (SPEC.md Section 11, src/adapters/risex/), the real second exchange. Adding either here is
     // the one expected, SPEC-sanctioned touchpoint outside the adapter's own directory; nothing in
     // src/engine/, src/dashboard/, or src/paperRunner/ needs to know these literals exist.
-    exchange: z.enum(["n1", "stub", "risex", "perpl"]),
+    exchange: z.enum(["n1", "stub", "risex", "perpl", "qfex"]),
     exchangeSymbol: z.string().min(1),
+    priceTickSize: z.number().positive().optional(),
+    quantityStep: z.number().positive().optional(),
+    minimumOrderSize: z.number().positive().optional(),
     enabled: z.boolean(),
     /** Explicit order leverage. Defaults to 1 for existing N1/RiseX configurations. */
     leverage: z.number().int().positive().max(100).optional(),

@@ -16,20 +16,24 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "qfex:preflight": "tsx scripts/run-qfex-live.ts --preflight-only",
+    "qfex:live": "tsx scripts/run-qfex-live.ts --i-understand-this-places-real-orders"
   },
   "dependencies": {
-    "@noble/ed25519": "^2.3.0",
     "@n1xyz/nord-ts": "^0.7.4",
+    "@noble/ed25519": "^2.3.0",
     "@solana/web3.js": "^1.98.4",
     "ethers": "^6.15.0",
     "js-yaml": "^4.1.0",
+    "ws": "^8.21.3",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.10.5",
+    "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^8.19.0",
     "@typescript-eslint/parser": "^8.19.0",
     "eslint": "^9.17.0",

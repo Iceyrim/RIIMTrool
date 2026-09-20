@@ -17,9 +17,10 @@ describe("dashboard static safety", () => {
   const source = readFileSync(new URL("../../src/dashboard/dashboard.html", import.meta.url), "utf8");
 
   it("uses only the approved cached venue filters and no unsafe HTML interpolation", () => {
-    expect(source.match(/<option value="(?:n1-live|risex-live|perpl-live)">/g)).toHaveLength(3);
+    expect(source.match(/<option value="(?:n1-live|risex-live|perpl-live|qfex-live)">/g)).toHaveLength(4);
     expect(source).not.toContain('<option value="risex-paper">');
     expect(source).toContain('<option value="risex-live">RISEx LIVE</option>');
+    expect(source).toContain('<option value="qfex-live">QFEX LIVE</option>');
     expect(source).toContain('"risex-live":"risex-session-live"');
     expect(source).toContain('<option value="perpl-live">Perpl LIVE</option>');
     expect(source).toContain('"perpl-live":"perpl-onchain-mainnet-live"');
