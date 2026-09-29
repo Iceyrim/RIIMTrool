@@ -200,9 +200,9 @@ describe("buildDashboardStatus", () => {
     market.engine.registry.upsert({ ...base, clientOrderId: "filled", exchangeOrderId: "f", state: "FILLED" });
     market.engine.registry.upsert({ ...base, clientOrderId: "cancelled", exchangeOrderId: "c", state: "CANCELLED" });
 
-    expect(buildDashboardStatus([market]).markets[0]?.openOrders.map(({ state }) => state)).toEqual([
-      "RESTING", "PENDING_CANCEL", "UNKNOWN",
-    ]);
+    const status = buildDashboardStatus([market]).markets[0];
+    expect(status?.openOrders.map(({ state }) => state)).toEqual(["RESTING", "PENDING_CANCEL"]);
+    expect(status?.unresolvedOrders?.map(({ state }) => state)).toEqual(["UNKNOWN"]);
   });
 
   it("marks fill and volume windows unavailable with their exact authoritative sources", async () => {

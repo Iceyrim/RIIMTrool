@@ -1,6 +1,67 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import type { MarketsConfig } from "../config/schema.js";
 
+export interface QfexMarketPriceReader {
+  getMarketPrice(market: string): Promise<{ mark: number }>;
+}
+
+export interface QfexConfirmedVolumeRow {
+  quoteVolume: number;
+}
+
+export function qfexUtcDayWindow(now = new Date()): { since: string; until: string } {
+  if (!Number.isFinite(now.getTime())) throw new Error("invalid QFEX daily-volume timestamp");
+  const day = now.toISOString().slice(0, 10);
+  return { since: `${day}T00:00:00.000Z`, until: now.toISOString() };
+}
+
+export function totalQfexConfirmedVolume(rows: readonly QfexConfirmedVolumeRow[]): number {
+  return rows.reduce((total, row) => {
+    if (!Number.isFinite(row.quoteVolume) || row.quoteVolume < 0)
+      throw new Error("invalid QFEX confirmed quote volume");
+    return total + row.quoteVolume;
+  }, 0);
+}
+
+export function isQfexDailyVolumeTargetReached(volumeUsd: number, targetUsd: number): boolean {
+  if (!Number.isFinite(volumeUsd) || volumeUsd < 0 || !Number.isFinite(targetUsd) || targetUsd <= 0)
+    throw new Error("invalid QFEX daily-volume target inputs");
+  return volumeUsd >= targetUsd;
+}
+
+export async function waitForQfexMarketMarks(
+  reader: QfexMarketPriceReader,
+  markets: readonly string[],
+  options: { timeoutMs?: number; pollIntervalMs?: number } = {},
+): Promise<Map<string, number>> {
+  const timeoutMs = options.timeoutMs ?? 15_000;
+  const pollIntervalMs = options.pollIntervalMs ?? 250;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+    throw new Error("invalid QFEX market readiness timing");
+  }
+  const pending = new Set(markets);
+  const marks = new Map<string, number>();
+  const deadline = Date.now() + timeoutMs;
+  while (pending.size > 0) {
+    for (const market of Array.from(pending)) {
+      try {
+        const { mark } = await reader.getMarketPrice(market);
+        if (!Number.isFinite(mark) || mark <= 0) throw new Error(`invalid QFEX mark for ${market}`);
+        marks.set(market, mark);
+        pending.delete(market);
+      } catch (error) {
+        const retryable = error instanceof Error && "retryable" in error && (error as Error & { retryable?: unknown }).retryable === true;
+        if (!retryable) throw error;
+      }
+    }
+    if (pending.size === 0) return marks;
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new Error(`Timed out waiting for fresh QFEX marks: ${Array.from(pending).join(", ")}`);
+    await new Promise((resolve) => setTimeout(resolve, Math.min(pollIntervalMs, remainingMs)));
+  }
+  return marks;
+}
+
 export function requireQfexLiveCliFlag(argv: readonly string[]): void {
   if (!argv.includes("--i-understand-this-places-real-orders")) throw new Error("missing --i-understand-this-places-real-orders");
 }

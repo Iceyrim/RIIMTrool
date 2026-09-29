@@ -15,6 +15,12 @@ const n = (value: unknown, field: string): number => {
   if (!Number.isFinite(result)) throw new ExchangeAdapterError(`Invalid QFEX ${field}`);
   return result;
 };
+const fillTimestampMs = (value: unknown): number => {
+  const timestamp = n(value, "fill timestamp");
+  return timestamp >= 1_000_000_000_000 ? timestamp : timestamp * 1000;
+};
+const TRADE_HISTORY_PAGE_SIZE = 200;
+const MAX_TRADE_HISTORY_PAGES = 1_000;
 
 export function normalizeQfexOrder(params: Pick<PlaceOrderParams, "market" | "side" | "price" | "size">, constraints: QfexConfiguredMarket): { price: number; size: number } {
   const ticks = params.price / constraints.priceTickSize;
@@ -32,12 +38,14 @@ export class QfexAdapter implements ExchangeAdapter {
   readonly exchangeId = "qfex-live";
   private readonly registry: QfexMarketRegistry;
   private readonly orders = new Map<string, QfexOrderRaw>();
+  private readonly terminalOrders = new Set<string>();
   private readonly positions = new Map<string, QfexPositionRaw>();
   private readonly fills = new Map<string, QfexFillRaw[]>();
   private readonly marks = new Map<string, number>();
   private balance?: QfexBalanceRaw;
   private unsubscribe?: () => void;
   private connected = false;
+  private tradeHistoryTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly transport: QfexWebSocketTransport, markets: QfexConfiguredMarket[]) {
     this.registry = new QfexMarketRegistry(markets);
@@ -46,8 +54,13 @@ export class QfexAdapter implements ExchangeAdapter {
   private handle = (message: QfexMessage): void => {
     const order = message.order_response;
     if (order) {
-      if (OPEN.has(order.status.toUpperCase()) && n(order.quantity_remaining, "remaining quantity") > 0) this.orders.set(order.order_id, order);
-      else this.orders.delete(order.order_id);
+      if (OPEN.has(order.status.toUpperCase()) && n(order.quantity_remaining, "remaining quantity") > 0) {
+        this.terminalOrders.delete(order.order_id);
+        this.orders.set(order.order_id, order);
+      } else {
+        this.orders.delete(order.order_id);
+        this.terminalOrders.add(order.order_id);
+      }
     }
     const fill = message.fill_response;
     if (fill) {
@@ -88,8 +101,19 @@ export class QfexAdapter implements ExchangeAdapter {
       "open-order snapshot",
     );
     const snapshot = response.all_orders_response as { orders?: QfexOrderRaw[] };
+    const previouslyOpen = new Set(this.orders.keys());
     this.orders.clear();
-    for (const order of snapshot.orders ?? []) if (OPEN.has(order.status.toUpperCase())) this.orders.set(order.order_id, order);
+    for (const order of snapshot.orders ?? []) {
+      if (OPEN.has(order.status.toUpperCase()) && n(order.quantity_remaining, "remaining quantity") > 0) {
+        this.terminalOrders.delete(order.order_id);
+        previouslyOpen.delete(order.order_id);
+        this.orders.set(order.order_id, order);
+      } else {
+        this.terminalOrders.add(order.order_id);
+        previouslyOpen.delete(order.order_id);
+      }
+    }
+    for (const orderId of previouslyOpen) this.terminalOrders.add(orderId);
   }
 
   private mapOrder(row: QfexOrderRaw): NormalizedOrder {
@@ -169,40 +193,113 @@ export class QfexAdapter implements ExchangeAdapter {
       "cancel acknowledgement",
     );
     const success = response.order_response?.status.toUpperCase() === "CANCELLED";
-    if (success) this.orders.delete(exchangeOrderId);
+    if (success) {
+      this.orders.delete(exchangeOrderId);
+      this.terminalOrders.add(exchangeOrderId);
+    }
     return { success, exchangeOrderId };
   }
 
   private mapFills(rows: QfexFillRaw[]): NormalizedFill[] {
-    return rows.map((row) => ({ exchangeOrderId: row.order_id, tradeId: row.trade_id, market: this.registry.logicalSymbolFor(row.symbol), side: (row.side ?? row.aggressor_side) === "BUY" ? "buy" : "sell", price: n(row.price, "fill price"), size: n(row.quantity, "fill quantity"), timestamp: n(row.timestamp, "fill timestamp") * 1000 }));
+    return rows.map((row) => ({ exchangeOrderId: row.order_id, tradeId: row.trade_id, market: this.registry.logicalSymbolFor(row.symbol), side: (row.side ?? row.aggressor_side) === "BUY" ? "buy" : "sell", price: n(row.price, "fill price"), size: n(row.quantity, "fill quantity"), timestamp: fillTimestampMs(row.timestamp) }));
   }
+  private enqueueUserTrades(params: Record<string, unknown>, description: string): Promise<QfexFillRaw[]> {
+    const run = this.tradeHistoryTail.then(async () => {
+      const response = await this.transport.request(
+        { type: "get_user_trades", params },
+        (message) => Array.isArray(message.user_trades_response) || Array.isArray(message.user_trades),
+        description,
+      );
+      return response.user_trades_response ?? response.user_trades ?? [];
+    });
+    this.tradeHistoryTail = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private async getUserTradesWindow(params: { since: string; until: string }): Promise<QfexFillRaw[]> {
+    const startTs = Date.parse(params.since);
+    const endTs = Date.parse(params.until);
+    if (!Number.isFinite(startTs) || !Number.isFinite(endTs) || startTs > endTs) {
+      throw new ExchangeAdapterError("Invalid QFEX trade-history window");
+    }
+    const unique = new Map<string, QfexFillRaw>();
+    for (let page = 0; page < MAX_TRADE_HISTORY_PAGES; page++) {
+      const rows = await this.enqueueUserTrades(
+        {
+          limit: TRADE_HISTORY_PAGE_SIZE,
+          offset: page * TRADE_HISTORY_PAGE_SIZE,
+          // QFEX production expects unix milliseconds, not seconds.
+          start_ts: startTs,
+          end_ts: endTs,
+        },
+        `account trades page ${page + 1}`,
+      );
+      const before = unique.size;
+      for (const row of rows) unique.set(row.trade_id, row);
+      if (rows.length < TRADE_HISTORY_PAGE_SIZE) return [...unique.values()];
+      if (unique.size === before) {
+        throw new ExchangeAdapterError("QFEX trade-history pagination repeated without progress");
+      }
+    }
+    throw new ExchangeAdapterError("QFEX trade-history pagination exceeded the safety limit");
+  }
+
   async getOrderFills(exchangeOrderId: string): Promise<NormalizedFill[]> {
     this.assertConnected();
-    const response = await this.transport.request(
-      { type: "get_user_trades", params: { limit: 1000, offset: 0, order_id: exchangeOrderId } },
-      (message) => Array.isArray(message.user_trades),
-      "order fills",
-    );
-    return this.mapFills(response.user_trades ?? []);
+    const cached = this.fills.get(exchangeOrderId) ?? [];
+    // A terminal update or authenticated snapshot already proved this order is no longer live.
+    // Return realtime fill evidence immediately instead of queueing behind volume-history reads.
+    if (this.terminalOrders.has(exchangeOrderId)) return this.mapFills(cached);
+    try {
+      const rows = await this.enqueueUserTrades(
+        { limit: 1000, offset: 0 },
+        "order fills",
+      );
+      const merged = new Map<string, QfexFillRaw>();
+      for (const row of cached) merged.set(row.trade_id, row);
+      for (const row of rows) if (row.order_id === exchangeOrderId) merged.set(row.trade_id, row);
+      return this.mapFills([...merged.values()]);
+    } catch (error) {
+      if (cached.length > 0) return this.mapFills(cached);
+      throw error;
+    }
   }
   async getMarketPrice(market: string): Promise<MarketPrice> {
     this.assertConnected();
     const exchange = this.registry.exchangeSymbolFor(market);
     const mark = this.marks.get(exchange);
-    if (!mark) throw new ExchangeAdapterError(`No fresh QFEX mark for ${market}`, undefined, true);
+    if (!mark) throw new ExchangeAdapterError("No fresh QFEX mark for " + market, undefined, true);
     return { market, mark };
+  }
+  private volumeRows(rows: QfexFillRaw[], params: { market?: string; since: string; until: string }): AccountVolume[] {
+    const exchange = params.market ? this.registry.exchangeSymbolFor(params.market) : undefined;
+    const sinceMs = Date.parse(params.since);
+    const untilMs = Date.parse(params.until);
+    const configuredSymbols = new Set(this.registry.exchangeSymbols());
+    const selected = rows.filter((row) => {
+      if (exchange ? row.symbol !== exchange : !configuredSymbols.has(row.symbol)) return false;
+      // Production history rows omit timestamps. In that case the server-side millisecond
+      // window used by getUserTradesWindow() is authoritative. Retain client-side filtering for
+      // real-time/test rows that do carry timestamps.
+      if (row.timestamp === undefined) return true;
+      const timestampMs = fillTimestampMs(row.timestamp);
+      return timestampMs >= sinceMs && timestampMs <= untilMs;
+    });
+    return [{ market: params.market ?? null, since: params.since, until: params.until, baseVolume: selected.reduce((sum, row) => sum + n(row.quantity, "trade quantity"), 0), quoteVolume: selected.reduce((sum, row) => sum + n(row.quantity, "trade quantity") * n(row.price, "trade price"), 0) }];
   }
   async getAccountVolume(params: { market?: string; since: string; until: string }): Promise<AccountVolume[]> {
     this.assertConnected();
-    const response = await this.transport.request(
-      { type: "get_user_trades", params: { limit: 1000, offset: 0, start_ts: Math.floor(Date.parse(params.since) / 1000), end_ts: Math.floor(Date.parse(params.until) / 1000) } },
-      (message) => Array.isArray(message.user_trades),
-      "account trades",
-    );
-    const rows = response.user_trades ?? [];
-    if (rows.length >= 1000) throw new ExchangeAdapterError("QFEX volume window exceeds the safe single-page limit");
-    const exchange = params.market ? this.registry.exchangeSymbolFor(params.market) : undefined;
-    const selected = rows.filter((row) => !exchange || row.symbol === exchange);
-    return [{ market: params.market ?? null, since: params.since, until: params.until, baseVolume: selected.reduce((sum, row) => sum + n(row.quantity, "trade quantity"), 0), quoteVolume: selected.reduce((sum, row) => sum + n(row.quantity, "trade quantity") * n(row.price, "trade price"), 0) }];
+    const rows = await this.getUserTradesWindow(params);
+    return this.volumeRows(rows, params);
+  }
+  async getAccountVolumeWindows(requests: Array<{ window: string; since: string; until: string }>): Promise<Record<string, AccountVolume[]>> {
+    this.assertConnected();
+    const result: Record<string, AccountVolume[]> = {};
+    // Production history rows have no timestamp, so each window must be filtered by QFEX rather
+    // than partitioned locally from one broad response.
+    for (const request of requests) {
+      result[request.window] = await this.getAccountVolume(request);
+    }
+    return result;
   }
 }

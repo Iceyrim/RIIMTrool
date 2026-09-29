@@ -33,7 +33,8 @@ export interface QfexFillRaw {
   aggressor_side?: "BUY" | "SELL";
   order_id: string;
   client_order_id?: string;
-  timestamp: number;
+  /** Present on real-time fills; production trade-history rows may omit it. */
+  timestamp?: number;
 }
 export interface QfexPositionRaw {
   symbol: string;
@@ -64,5 +65,6 @@ export type QfexMessage = Record<string, unknown> & {
   balance_response?: QfexBalanceRaw;
   user_orders?: QfexOrderRaw[];
   user_trades?: QfexFillRaw[];
+  user_trades_response?: QfexFillRaw[];
   all_orders_response?: { orders?: QfexOrderRaw[] };
 };

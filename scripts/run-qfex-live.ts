@@ -14,7 +14,7 @@ import { DASHBOARD_SNAPSHOT_DIRECTORY, DashboardSnapshotPublisher } from "../src
 import { DashboardTelemetry } from "../src/dashboard/DashboardTelemetry.js";
 import { MarketEngine } from "../src/engine/MarketEngine.js";
 import { WindowLossCapTracker } from "../src/engine/WindowLossCapTracker.js";
-import { assertQfexPreflight, consumeQfexLiveArmFile, estimateQfexInitialMargin, planQfexFlattenChunks, requireQfexLiveCliFlag } from "../src/engine/QfexLiveStartup.js";
+import { assertQfexPreflight, consumeQfexLiveArmFile, estimateQfexInitialMargin, isQfexDailyVolumeTargetReached, planQfexFlattenChunks, qfexUtcDayWindow, requireQfexLiveCliFlag, totalQfexConfirmedVolume, waitForQfexMarketMarks } from "../src/engine/QfexLiveStartup.js";
 import { PaperRunner, type PaperRunnerMarket, type RealizedPnlSource } from "../src/paperRunner/PaperRunner.js";
 import { WindowTrackingRealizedPnlSource } from "../src/paperRunner/WindowTrackingRealizedPnlSource.js";
 
@@ -77,13 +77,32 @@ async function main(): Promise<void> {
   });
   const adapter = new QfexAdapter(transport, adapterMarkets);
   await adapter.connect();
-  const marks = new Map(await Promise.all(enabled.map(async (market) => [market.symbol, (await adapter.getMarketPrice(market.symbol)).mark] as const)));
+  let marks: Map<string, number>;
+  try {
+    marks = await waitForQfexMarketMarks(adapter, enabled.map((market) => market.symbol));
+  } catch (error) {
+    await adapter.disconnect();
+    throw error;
+  }
   const positions = adapter.getPositions();
   const orders = adapter.getOpenOrders();
   const balances = adapter.getBalances();
   const margin = adapter.getMarginStatus();
   const estimatedInitialMargin = estimateQfexInitialMargin(enabled, marks);
   const blockers: string[] = [];
+  const dailyVolumeTargetUsd = config.accountRisk.dailyVolumeTargetUsd;
+  let dailyConfirmedVolumeUsd: number | undefined;
+  if (dailyVolumeTargetUsd !== undefined) {
+    try {
+      dailyConfirmedVolumeUsd = totalQfexConfirmedVolume(
+        await adapter.getAccountVolume(qfexUtcDayWindow()),
+      );
+      if (isQfexDailyVolumeTargetReached(dailyConfirmedVolumeUsd, dailyVolumeTargetUsd))
+        blockers.push(`daily confirmed-fill volume target already reached: $${dailyConfirmedVolumeUsd.toFixed(2)} / $${dailyVolumeTargetUsd.toFixed(2)}`);
+    } catch (error) {
+      blockers.push(`unable to verify daily confirmed-fill volume target: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   try {
     assertQfexPreflight({ flat: positions.every((position) => position.baseSize === 0), openOrderCount: orders.length, availableCollateral: balances[0]?.amount ?? 0, estimatedInitialMargin, marginSafe: !margin.isAtBankruptcyRisk });
   } catch (error) { blockers.push(error instanceof Error ? error.message : String(error)); }
@@ -96,6 +115,9 @@ async function main(): Promise<void> {
   console.log(`Positions: ${JSON.stringify(positions)}`);
   console.log(`Open orders: ${JSON.stringify(orders)}`);
   console.log(`Estimated initial margin: $${estimatedInitialMargin.toFixed(2)}`);
+  console.log(`Daily confirmed-fill volume target: $${dailyVolumeTargetUsd ?? "not configured"}`);
+  if (dailyConfirmedVolumeUsd !== undefined)
+    console.log(`Daily confirmed-fill volume: $${dailyConfirmedVolumeUsd.toFixed(2)}`);
   console.log(`Preflight status: ${blockers.length ? "BLOCKED" : "READY"}`);
   for (const blocker of blockers) console.log(`Blocker: ${blocker}`);
   if (preflightOnly) {
@@ -128,9 +150,12 @@ async function main(): Promise<void> {
   publisher.start();
   const runner = new PaperRunner(markets, { intervalMs: Number(process.env.QFEX_LIVE_CYCLE_INTERVAL_MS ?? "5000"), runnerLabel: "QfexLiveRunner", logFilePath: join(stateRoot, "logs", `run-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`), alertBus, telemetry });
   let shuttingDown = false;
+  let dailyVolumeCheckRunning = false;
+  let dailyVolumeTimer: ReturnType<typeof setInterval> | undefined;
   const shutdown = async (reason: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    if (dailyVolumeTimer) clearInterval(dailyVolumeTimer);
     console.log(`\n[QFEX] Shutting down: ${reason}`);
     const result = await runner.shutdown();
     const flattening: unknown[] = [];
@@ -159,6 +184,24 @@ async function main(): Promise<void> {
   };
   process.once("SIGINT", () => void shutdown("SIGINT"));
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
+  if (dailyVolumeTargetUsd !== undefined) {
+    const checkDailyVolume = async () => {
+      if (shuttingDown || dailyVolumeCheckRunning) return;
+      dailyVolumeCheckRunning = true;
+      try {
+        const volumeUsd = totalQfexConfirmedVolume(
+          await adapter.getAccountVolume(qfexUtcDayWindow()),
+        );
+        if (isQfexDailyVolumeTargetReached(volumeUsd, dailyVolumeTargetUsd))
+          await shutdown(`daily confirmed-fill volume target reached ($${volumeUsd.toFixed(2)} / $${dailyVolumeTargetUsd.toFixed(2)})`);
+      } catch (error) {
+        console.warn(`[QFEX] Daily confirmed-volume check failed; continuing safely and retrying: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        dailyVolumeCheckRunning = false;
+      }
+    };
+    dailyVolumeTimer = setInterval(() => void checkDailyVolume(), 30_000);
+  }
   console.log(`[QFEX] Starting ${environment} live run for ${enabled.map((market) => market.symbol).join(", ")}`);
   await runner.start();
 }

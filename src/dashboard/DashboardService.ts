@@ -51,9 +51,13 @@ export interface MarketStatus {
   exchangeId: string;
   reconciliation: MarketReconciliationStatus;
   position: MarketPositionStatus | null;
+  /** Exchange-confirmed or cancellation-pending active orders only. */
   openOrders: LocalOrder[];
+  /** Ambiguous local placement records; these are not confirmed open exchange orders. */
+  unresolvedOrders?: LocalOrder[];
   fills: DashboardMetric<{ label: "current session + durable history"; entries: readonly TradeLogEntry[] }>;
   operations?: Pick<CycleSummary,
+    | "reconciliation"
     | "positionBaseSize"
     | "inventoryReductionThresholdBase"
     | "reductionMode"
@@ -131,7 +135,10 @@ function venueMode(exchangeId: string): Pick<DashboardAccountStatus, "venue" | "
 }
 
 function buildMarketStatus({ market, engine, adapter, telemetry }: DashboardMarket): MarketStatus {
-  const result = engine.reconciliation.getLastResult();
+  const operations = engine.getLastCycleSummary();
+  // A cycle summary is internally coherent. Prefer its reconciliation result over a separate
+  // mutable read that may advance between fields while the dashboard snapshot is assembled.
+  const result = operations?.reconciliation ?? engine.reconciliation.getLastResult();
   const rawPosition = adapter.getPositions(market)[0];
   return {
     market,
@@ -152,12 +159,13 @@ function buildMarketStatus({ market, engine, adapter, telemetry }: DashboardMark
         }
       : null,
     openOrders: engine.registry.list().filter(({ state }) =>
-      state === "RESTING" || state === "PENDING_CANCEL" || state === "UNKNOWN"
+      state === "RESTING" || state === "PENDING_CANCEL"
     ),
+    unresolvedOrders: engine.registry.list().filter(({ state }) => state === "UNKNOWN"),
     fills: telemetry ? { available: true, value: { label: "current session + durable history", entries: telemetry.snapshot().fills.filter((fill) => fill.market === market) } } : unavailable(
       `An in-memory, deduplicated TradeLog fill snapshot for ${market}; placements and cancellations are not volume/fill sources.`,
     ),
-    operations: engine.getLastCycleSummary(),
+    operations,
   };
 }
 

@@ -11,6 +11,9 @@ describe("QFEX live runner safety contract", () => {
     expect(source).toContain("isReduceOnly: true");
     expect(source).toContain("cancelOnDisconnect: !preflightOnly");
     expect(source).toContain('finalStatus: flat ? "completed-flat" : "manual-review-required"');
+    expect(source).toContain("daily confirmed-fill volume target reached");
+    expect(source).toContain("await adapter.getAccountVolume(qfexUtcDayWindow())");
+    expect(source).toContain("clearInterval(dailyVolumeTimer)");
   });
   it("does not connect when imported", () => {
     expect(source).toContain('if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href)');

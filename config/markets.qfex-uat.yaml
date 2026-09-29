@@ -1,7 +1,5 @@
 accountRisk:
-  dailyLossCapUsd: 5
-  weeklyLossCapUsd: 15
-  dailyVolumeTargetUsd: 100000
+  dailyVolumeTargetUsd: 5000
   weeklyVolumeTargetUsd: 100000
 markets:
   - symbol: MUUSD
@@ -12,17 +10,17 @@ markets:
     priceTickSize: 0.01
     quantityStep: 0.001
     minimumOrderSize: 0.01
-    orderSize: { min: 0.080, max: 0.119 }
+    orderSize: { min: 0.090, max: 0.134 }
     spreadBps: { normal: 3, min: 1.5, max: 8 }
     exitSpreadBps: 1.5
     quoteLevels: 1
     levelSpacingBps: [1.5]
-    inventoryReductionThresholdBase: 0.040
+    inventoryReductionThresholdBase: 0.045
     riskLimits:
-      maxLongPosition: 0.239
-      maxShortPosition: 0.239
-      maxOrderSize: 0.119
-      maxOrderNotionalUsd: 120
+      maxLongPosition: 0.268
+      maxShortPosition: 0.268
+      maxOrderSize: 0.134
+      maxOrderNotionalUsd: 144
       maxOpenOrders: 3
     reduceOnlyExit: { minHoldMs: 10000, maxHoldMs: 60000 }
     quoteMinimumLifetimeMs: 10000
@@ -37,17 +35,17 @@ markets:
     priceTickSize: 0.01
     quantityStep: 0.001
     minimumOrderSize: 0.02
-    orderSize: { min: 0.162, max: 0.242 }
+    orderSize: { min: 0.194, max: 0.289 }
     spreadBps: { normal: 3, min: 1.5, max: 8 }
     exitSpreadBps: 1.5
     quoteLevels: 1
     levelSpacingBps: [1.5]
-    inventoryReductionThresholdBase: 0.080
+    inventoryReductionThresholdBase: 0.096
     riskLimits:
-      maxLongPosition: 0.485
-      maxShortPosition: 0.485
-      maxOrderSize: 0.242
-      maxOrderNotionalUsd: 120
+      maxLongPosition: 0.578
+      maxShortPosition: 0.578
+      maxOrderSize: 0.289
+      maxOrderNotionalUsd: 144
       maxOpenOrders: 3
     reduceOnlyExit: { minHoldMs: 10000, maxHoldMs: 60000 }
     quoteMinimumLifetimeMs: 10000

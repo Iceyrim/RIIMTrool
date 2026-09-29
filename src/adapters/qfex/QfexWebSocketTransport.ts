@@ -32,6 +32,7 @@ export interface QfexTransportConfig {
 export class QfexWebSocketTransport {
   private trade?: WebSocket;
   private marketData?: WebSocket;
+  private connecting?: Promise<void>;
   private listeners = new Set<Listener>();
   private readonly timeoutMs: number;
   private readonly socketFactory: SocketFactory;
@@ -73,13 +74,25 @@ export class QfexWebSocketTransport {
     });
   }
   async connect(): Promise<void> {
+    if (this.trade?.readyState === WebSocket.OPEN && this.marketData?.readyState === WebSocket.OPEN) return;
+    if (this.connecting) return this.connecting;
+    this.connecting = this.connectFresh().finally(() => { this.connecting = undefined; });
+    return this.connecting;
+  }
+  private async connectFresh(): Promise<void> {
+    await this.disconnect();
     const tradeUrl = new URL(this.config.tradeUrl);
     tradeUrl.searchParams.set("api_key", this.config.credentials.publicKey);
     this.trade = this.socketFactory(tradeUrl.toString());
     this.marketData = this.socketFactory(this.config.marketDataUrl);
     await Promise.all([this.open(this.trade, "trade WebSocket"), this.open(this.marketData, "market-data WebSocket")]);
     const auth = this.waitFor(isQfexAuthSuccess, "authentication");
-    this.sendTrade(buildQfexAuth(this.config.credentials));
+    try {
+      this.sendTrade(buildQfexAuth(this.config.credentials));
+    } catch (error) {
+      void auth.catch(() => undefined);
+      throw error;
+    }
     await auth;
     this.sendTrade({ type: "subscribe", params: { channels: ["order_responses", "fills", "balances", "positions"] } });
     if (this.config.cancelOnDisconnect !== false) {
@@ -95,10 +108,16 @@ export class QfexWebSocketTransport {
     if (!this.marketData || this.marketData.readyState !== WebSocket.OPEN) throw new ExchangeAdapterError("QFEX market-data WebSocket is not connected");
     this.marketData.send(JSON.stringify(message));
   }
-  request(message: QfexMessage, predicate: (response: QfexMessage) => boolean, description: string): Promise<QfexMessage> {
+  async request(message: QfexMessage, predicate: (response: QfexMessage) => boolean, description: string): Promise<QfexMessage> {
+    await this.connect();
     const response = this.waitFor(predicate, description);
-    this.sendTrade(message);
-    return response;
+    try {
+      this.sendTrade(message);
+    } catch (error) {
+      void response.catch(() => undefined);
+      throw error;
+    }
+    return await response;
   }
   async disconnect(): Promise<void> {
     for (const socket of [this.trade, this.marketData]) if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "client shutdown");

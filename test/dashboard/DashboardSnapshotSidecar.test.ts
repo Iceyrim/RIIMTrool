@@ -96,6 +96,35 @@ describe("dashboard snapshot sidecar", () => {
     expect(result.unavailableTelemetry.join(" ")).toContain("conflicting fresh running sessions");
   });
 
+  it("normalizes legacy publisher orders and cycle reconciliation without a bot restart", () => {
+    const legacy = snapshot("live", "running", 100, 200);
+    legacy.status.markets = [{
+      market: "BTCUSD", exchangeId: "n1",
+      reconciliation: { healthy: true, healthyStreak: 2, degradedStreak: 0, checkedAt: 100, anomalies: [] },
+      position: null,
+      openOrders: [{ market: "BTCUSD", side: "buy", type: "postOnly", price: 1, size: 1, filledSize: 0, isReduceOnly: false, state: "UNKNOWN", placedAt: 1, updatedAt: 1, clientOrderId: "unknown", exchangeOrderId: null }],
+      fills: { available: false, value: null, sourceNeeded: "test" },
+      operations: {
+        reconciliation: { market: "BTCUSD", healthy: false, openOrderCount: 0, checkedAt: 150, anomalies: [{ kind: "LOCAL_ORDER_NOT_ON_EXCHANGE", exchangeOrderId: "x", detail: "missing" }] },
+        positionBaseSize: 0, inventoryReductionThresholdBase: 1, reductionMode: false,
+        reductionModeCancellation: { attempted: 0, succeeded: 0, unresolved: 0, messages: [] },
+        reduceOnlyAction: "none", exitState: "no_position", quotesCancelled: 0,
+        riskSkippedLevels: { openOrderCapacity: 0, aggregateLongExposure: 0, aggregateShortExposure: 0, orderSize: 0, orderNotional: 0 },
+        riskSkipMessages: [], pnlOutageCancellation: { attempted: 0, succeeded: 0, failed: 0, unresolved: 0, messages: [] },
+      },
+    }];
+    const result = aggregateDashboardSnapshots([legacy], 201);
+    expect(result.markets[0]?.reconciliation).toMatchObject({ healthy: false, checkedAt: 150 });
+    expect(result.markets[0]?.openOrders).toEqual([]);
+    expect(result.markets[0]?.unresolvedOrders).toHaveLength(1);
+  });
+
+  it("marks stopped snapshots as stale last-known telemetry", () => {
+    const result = aggregateDashboardSnapshots([snapshot("old", "stopped", 100, 200, "operator stop")], 201);
+    expect(result.snapshotSources).toMatchObject([{ lifecycle: "stopped", stale: true }]);
+    expect(result.unavailableTelemetry.join(" ")).toContain("last-known data from a stopped session");
+  });
+
   it("bounds retained session files per exchange", () => {
     const directory = mkdtempSync(join(tmpdir(), "dashboard-snapshot-"));
     vi.spyOn(console, "error").mockImplementation(() => undefined);

@@ -34,10 +34,11 @@ describe("dashboard static safety", () => {
     expect(source).toContain("dashboard is read only");
   });
 
-  it("renders distinct pending and unknown order warning states", () => {
+  it("renders confirmed active orders separately from unresolved records", () => {
     expect(source).toContain("state-pending");
     expect(source).toContain("state-unknown");
-    expect(source).toContain('x.state!=="FILLED"&&x.state!=="CANCELLED"');
+    expect(source).toContain('x.state==="RESTING"||x.state==="PENDING_CANCEL"');
+    expect(source).toContain("Ambiguous local records — not confirmed exchange orders");
   });
 
   it("labels open-order size in USD and derives it from the retained base size and limit price", () => {
@@ -79,7 +80,7 @@ describe("dashboard static safety", () => {
   });
 
   it("keeps every volume window visible and navigation limited to DOM state", () => {
-    for (const label of ['"24h":"24H"', '"7d":"7D"', '"30d":"30D"', 'allTime:"All Time"']) {
+    for (const label of ['"24h":"24H"', '"7d":"7D"', '"30d":"30D"', 'allTime:partial?"Partial history":"All Time"']) {
       expect(source).toContain(label);
     }
     expect(source).toContain('fetch("/api/status"');

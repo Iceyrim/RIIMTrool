@@ -198,8 +198,38 @@ export function aggregateDashboardSnapshots(
     else if (newest) selected.push(newest);
   }
 
-  const accounts = selected.flatMap((entry) => entry.status.accounts);
-  const markets = selected.flatMap((entry) => entry.status.markets);
+  const accounts = selected.flatMap((entry) => entry.status.accounts.map((account) =>
+    entry.lifecycle === "running"
+      ? account
+      : {
+          ...account,
+          healthy: false,
+          healthDetails: [
+            ...account.healthDetails,
+            `Last-known snapshot from ${entry.lifecycle} session${entry.reason ? `: ${entry.reason}` : ""}`,
+          ],
+        },
+  ));
+  // Normalize snapshots from already-running publishers so dashboard-only upgrades do not require
+  // restarting a trading process. UNKNOWN records are ambiguous local evidence, not confirmed
+  // exchange orders; a cycle summary's reconciliation belongs to the same coherent cycle.
+  const markets = selected.flatMap((entry) => entry.status.markets.map((market) => {
+    const cycleReconciliation = market.operations?.reconciliation;
+    const unknown = market.openOrders.filter(({ state }) => state === "UNKNOWN");
+    return {
+      ...market,
+      reconciliation: cycleReconciliation
+        ? {
+            ...market.reconciliation,
+            healthy: cycleReconciliation.healthy,
+            checkedAt: cycleReconciliation.checkedAt,
+            anomalies: cycleReconciliation.anomalies,
+          }
+        : market.reconciliation,
+      openOrders: market.openOrders.filter(({ state }) => state === "RESTING" || state === "PENDING_CANCEL"),
+      unresolvedOrders: [...(market.unresolvedOrders ?? []), ...unknown],
+    };
+  }));
   const first = accounts[0];
   return {
     generatedAt: now,
@@ -214,6 +244,8 @@ export function aggregateDashboardSnapshots(
       ...snapshotConflicts.map(({ exchangeId }) => `${exchangeId}: conflicting fresh running sessions; neither snapshot is displayed.`),
       ...selected.filter((entry) => entry.lifecycle === "running" && now - entry.publishedAt > SNAPSHOT_FRESH_MS)
         .map((entry) => `${entry.exchangeId}: running snapshot is stale.`),
+      ...selected.filter((entry) => entry.lifecycle !== "running")
+        .map((entry) => `${entry.exchangeId}: displaying last-known data from a ${entry.lifecycle} session.`),
     ],
     snapshotSources: selected.map((entry) => ({
       sessionId: entry.sessionId,
@@ -222,7 +254,7 @@ export function aggregateDashboardSnapshots(
       reason: entry.reason,
       startedAt: entry.startedAt,
       publishedAt: entry.publishedAt,
-      stale: entry.lifecycle === "running" && now - entry.publishedAt > SNAPSHOT_FRESH_MS,
+      stale: entry.lifecycle !== "running" || now - entry.publishedAt > SNAPSHOT_FRESH_MS,
     })),
     snapshotConflicts,
   };
