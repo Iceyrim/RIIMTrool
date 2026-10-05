@@ -16,8 +16,9 @@ const status = (exchangeId: string): DashboardStatus => ({
   accountPnlAvailable: true, accounts: [], markets: [],
   unavailableTelemetry: [exchangeId],
 });
-const snapshot = (sessionId: string, lifecycle: "running" | "stopped", startedAt: number, publishedAt = startedAt): DashboardSessionSnapshot => ({
+const snapshot = (sessionId: string, lifecycle: "running" | "halted" | "stopped", startedAt: number, publishedAt = startedAt, reason?: string): DashboardSessionSnapshot => ({
   version: 1, sessionId, exchangeId: "n1-paper", lifecycle, startedAt, publishedAt,
+  reason,
   status: status(sessionId),
 });
 
@@ -33,10 +34,59 @@ describe("dashboard snapshot sidecar", () => {
     expect(statSync(join(directory, files[0]!)).mode & 0o777).toBe(SNAPSHOT_FILE_MODE);
   });
 
+  it("preserves a halt reason through cleanup and stopped publication", () => {
+    const directory = mkdtempSync(join(tmpdir(), "dashboard-snapshot-"));
+    const publisher = new DashboardSnapshotPublisher(directory, "risex-live", () => status("risex"), { sessionId: "loss", startedAt: 10 });
+    publisher.halt("RISEx daily equity loss limit reached");
+    let saved = JSON.parse(readFileSync(join(directory, "risex-live--loss.json"), "utf8")) as DashboardSessionSnapshot;
+    expect(saved).toMatchObject({ lifecycle: "halted", reason: "RISEx daily equity loss limit reached" });
+    publisher.stop("RISEx daily equity loss limit reached");
+    saved = JSON.parse(readFileSync(join(directory, "risex-live--loss.json"), "utf8")) as DashboardSessionSnapshot;
+    expect(saved).toMatchObject({ lifecycle: "stopped", reason: "RISEx daily equity loss limit reached" });
+  });
+
   it("allows a newer running session to supersede a stopped predecessor", () => {
     const result = aggregateDashboardSnapshots([snapshot("old", "stopped", 100), snapshot("new", "running", 200)], 201);
     expect(result.snapshotSources).toMatchObject([{ sessionId: "new", lifecycle: "running" }]);
     expect(result.snapshotConflicts).toEqual([]);
+  });
+
+  it("prefers the sole fresh runner even when a stopped snapshot has a later start timestamp", () => {
+    const running = snapshot("active", "running", 100, 300);
+    const stopped = snapshot("short-lived", "stopped", 200, 250);
+    const result = aggregateDashboardSnapshots([running, stopped], 301);
+
+    expect(result.snapshotSources).toMatchObject([
+      { sessionId: "active", lifecycle: "running", stale: false },
+    ]);
+    expect(result.unavailableTelemetry).not.toContain("n1-paper: running snapshot is stale.");
+  });
+
+  it("retains the last fresh account balance and margin in a stopped snapshot", () => {
+    const directory = mkdtempSync(join(tmpdir(), "dashboard-snapshot-"));
+    let fresh = true;
+    const readStatus = (): DashboardStatus => ({
+      ...status("perpl"),
+      accounts: [{
+        exchangeId: "perpl-onchain-mainnet-live", venue: "Perpl", mode: "LIVE", label: "Perpl LIVE",
+        balances: fresh ? { available: true as const, value: [{ token: "AUSD", amount: 52 }] } : { available: false as const, value: null, sourceNeeded: "stale" },
+        margin: fresh ? { available: true as const, value: { accountValue: 52, maintenanceMarginFraction: 0, initialMarginFraction: 0, isAtBankruptcyRisk: false } } : { available: false as const, value: null, sourceNeeded: "stale" },
+        healthy: fresh, healthDetails: fresh ? [] : ["Margin unavailable"],
+        uptimeMs: { available: true as const, value: 1 }, sessionRealizedPnlUsd: 0,
+        sessionLossCapUsd: 1.5, pnlAvailable: true,
+        volumes: Object.fromEntries(["24h", "7d", "30d", "allTime"].map((key) => [key, { available: false as const, value: null, sourceNeeded: "test" }])) as never,
+        history: { available: false as const, value: null, sourceNeeded: "test" },
+        alertHealth: { available: false as const, value: null, sourceNeeded: "test" },
+      }],
+    });
+    const publisher = new DashboardSnapshotPublisher(directory, "perpl", readStatus, { sessionId: "one", startedAt: 10 });
+    publisher.publish("running", 20);
+    fresh = false;
+    publisher.stop();
+    const saved = JSON.parse(readFileSync(join(directory, "perpl--one.json"), "utf8")) as DashboardSessionSnapshot;
+    expect(saved.status.accounts[0]?.balances).toEqual({ available: true, value: [{ token: "AUSD", amount: 52 }] });
+    expect(saved.status.accounts[0]?.margin.available).toBe(true);
+    expect(saved.status.accounts[0]?.healthDetails).toEqual([]);
   });
 
   it("keeps two simultaneously fresh running sessions visible as a conflict", () => {
@@ -44,6 +94,35 @@ describe("dashboard snapshot sidecar", () => {
     expect(result.snapshotSources).toEqual([]);
     expect(result.snapshotConflicts).toEqual([{ exchangeId: "n1-paper", sessionIds: ["a", "b"] }]);
     expect(result.unavailableTelemetry.join(" ")).toContain("conflicting fresh running sessions");
+  });
+
+  it("normalizes legacy publisher orders and cycle reconciliation without a bot restart", () => {
+    const legacy = snapshot("live", "running", 100, 200);
+    legacy.status.markets = [{
+      market: "BTCUSD", exchangeId: "n1",
+      reconciliation: { healthy: true, healthyStreak: 2, degradedStreak: 0, checkedAt: 100, anomalies: [] },
+      position: null,
+      openOrders: [{ market: "BTCUSD", side: "buy", type: "postOnly", price: 1, size: 1, filledSize: 0, isReduceOnly: false, state: "UNKNOWN", placedAt: 1, updatedAt: 1, clientOrderId: "unknown", exchangeOrderId: null }],
+      fills: { available: false, value: null, sourceNeeded: "test" },
+      operations: {
+        reconciliation: { market: "BTCUSD", healthy: false, openOrderCount: 0, checkedAt: 150, anomalies: [{ kind: "LOCAL_ORDER_NOT_ON_EXCHANGE", exchangeOrderId: "x", detail: "missing" }] },
+        positionBaseSize: 0, inventoryReductionThresholdBase: 1, reductionMode: false,
+        reductionModeCancellation: { attempted: 0, succeeded: 0, unresolved: 0, messages: [] },
+        reduceOnlyAction: "none", exitState: "no_position", quotesCancelled: 0,
+        riskSkippedLevels: { openOrderCapacity: 0, aggregateLongExposure: 0, aggregateShortExposure: 0, orderSize: 0, orderNotional: 0 },
+        riskSkipMessages: [], pnlOutageCancellation: { attempted: 0, succeeded: 0, failed: 0, unresolved: 0, messages: [] },
+      },
+    }];
+    const result = aggregateDashboardSnapshots([legacy], 201);
+    expect(result.markets[0]?.reconciliation).toMatchObject({ healthy: false, checkedAt: 150 });
+    expect(result.markets[0]?.openOrders).toEqual([]);
+    expect(result.markets[0]?.unresolvedOrders).toHaveLength(1);
+  });
+
+  it("marks stopped snapshots as stale last-known telemetry", () => {
+    const result = aggregateDashboardSnapshots([snapshot("old", "stopped", 100, 200, "operator stop")], 201);
+    expect(result.snapshotSources).toMatchObject([{ lifecycle: "stopped", stale: true }]);
+    expect(result.unavailableTelemetry.join(" ")).toContain("last-known data from a stopped session");
   });
 
   it("bounds retained session files per exchange", () => {

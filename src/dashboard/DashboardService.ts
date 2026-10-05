@@ -51,9 +51,13 @@ export interface MarketStatus {
   exchangeId: string;
   reconciliation: MarketReconciliationStatus;
   position: MarketPositionStatus | null;
+  /** Exchange-confirmed or cancellation-pending active orders only. */
   openOrders: LocalOrder[];
+  /** Ambiguous local placement records; these are not confirmed open exchange orders. */
+  unresolvedOrders?: LocalOrder[];
   fills: DashboardMetric<{ label: "current session + durable history"; entries: readonly TradeLogEntry[] }>;
   operations?: Pick<CycleSummary,
+    | "reconciliation"
     | "positionBaseSize"
     | "inventoryReductionThresholdBase"
     | "reductionMode"
@@ -72,7 +76,7 @@ export interface MarketStatus {
 
 export interface DashboardAccountStatus {
   exchangeId: string;
-  venue: "N1" | "RISEx" | "Perpl" | "Unknown";
+  venue: "N1" | "RISEx" | "Perpl" | "QFEX" | "Unknown";
   mode: "LIVE" | "PAPER" | "UNKNOWN";
   label: string;
   balances: DashboardMetric<NormalizedBalance[]>;
@@ -81,6 +85,8 @@ export interface DashboardAccountStatus {
   healthDetails: string[];
   uptimeMs: DashboardMetric<number>;
   sessionRealizedPnlUsd: number;
+  /** Legacy snapshot compatibility; current status does not publish a session cap. */
+  sessionLossCapUsd?: number;
   pnlAvailable: boolean;
   volumes: Record<"24h" | "7d" | "30d" | "allTime", DashboardMetric<VolumeTelemetry>>;
   history: DashboardMetric<{ sessions: SessionSummary[]; points: HistoryPoint[]; status: HistoryStoreStatus }>;
@@ -110,20 +116,29 @@ function cachedMetric<T>(read: () => T, source: string): DashboardMetric<T> {
 }
 
 function venueMode(exchangeId: string): Pick<DashboardAccountStatus, "venue" | "mode" | "label"> {
+  if (exchangeId === "qfex-live") return { venue: "QFEX", mode: "LIVE", label: "QFEX LIVE" };
   if (exchangeId === "n1") return { venue: "N1", mode: "LIVE", label: "N1 LIVE" };
   if (exchangeId === "n1-paper") return { venue: "N1", mode: "PAPER", label: "N1 PAPER" };
-  if (exchangeId === "risex") return { venue: "RISEx", mode: "LIVE", label: "RISEx LIVE" };
+  if (exchangeId === "risex" || exchangeId === "risex-session-live") {
+    return { venue: "RISEx", mode: "LIVE", label: "RISEx LIVE" };
+  }
   if (exchangeId === "risex-paper") {
     return { venue: "RISEx", mode: "PAPER", label: "RISEx PAPER" };
   }
   if (exchangeId === "perpl-paper") {
     return { venue: "Perpl", mode: "PAPER", label: "Perpl PAPER" };
   }
+  if (exchangeId === "perpl-onchain-mainnet-live") {
+    return { venue: "Perpl", mode: "LIVE", label: "Perpl LIVE" };
+  }
   return { venue: "Unknown", mode: "UNKNOWN", label: exchangeId };
 }
 
 function buildMarketStatus({ market, engine, adapter, telemetry }: DashboardMarket): MarketStatus {
-  const result = engine.reconciliation.getLastResult();
+  const operations = engine.getLastCycleSummary();
+  // A cycle summary is internally coherent. Prefer its reconciliation result over a separate
+  // mutable read that may advance between fields while the dashboard snapshot is assembled.
+  const result = operations?.reconciliation ?? engine.reconciliation.getLastResult();
   const rawPosition = adapter.getPositions(market)[0];
   return {
     market,
@@ -149,10 +164,11 @@ function buildMarketStatus({ market, engine, adapter, telemetry }: DashboardMark
       state === "CANCEL_PENDING_CONFIRM" ||
       state === "UNKNOWN"
     ),
+    unresolvedOrders: engine.registry.list().filter(({ state }) => state === "UNKNOWN"),
     fills: telemetry ? { available: true, value: { label: "current session + durable history", entries: telemetry.snapshot().fills.filter((fill) => fill.market === market) } } : unavailable(
       `An in-memory, deduplicated TradeLog fill snapshot for ${market}; placements and cancellations are not volume/fill sources.`,
     ),
-    operations: engine.getLastCycleSummary(),
+    operations,
   };
 }
 

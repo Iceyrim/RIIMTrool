@@ -45,9 +45,16 @@ export const marketConfigSchema = z
     // (SPEC.md Section 11, src/adapters/risex/), the real second exchange. Adding either here is
     // the one expected, SPEC-sanctioned touchpoint outside the adapter's own directory; nothing in
     // src/engine/, src/dashboard/, or src/paperRunner/ needs to know these literals exist.
-    exchange: z.enum(["n1", "stub", "risex", "perpl"]),
+    exchange: z.enum(["n1", "stub", "risex", "perpl", "qfex"]),
     exchangeSymbol: z.string().min(1),
+    priceTickSize: z.number().positive().optional(),
+    quantityStep: z.number().positive().optional(),
+    minimumOrderSize: z.number().positive().optional(),
     enabled: z.boolean(),
+    /** Legacy dry-run typing only; configuration values remain forbidden. */
+    accountSessionLossCapUsd: z.never({ invalid_type_error: "accountSessionLossCapUsd was removed" }).optional(),
+    /** Explicit order leverage. Defaults to 1 for existing N1/RiseX configurations. */
+    leverage: z.number().int().positive().max(100).optional(),
     orderSize: orderSizeSchema,
     spreadBps: spreadBpsSchema,
     exitSpreadBps: z.number().positive(),
@@ -101,6 +108,9 @@ export const accountRiskSchema = z
   .object({
     dailyLossCapUsd: z.number().positive().optional(),
     weeklyLossCapUsd: z.number().positive().optional(),
+    sessionLossCapUsd: z.never({ invalid_type_error: "sessionLossCapUsd was removed" }).optional(),
+    dailyVolumeTargetUsd: z.number().positive().optional(),
+    weeklyVolumeTargetUsd: z.number().positive().optional(),
   })
   .strict(
     "Unknown accountRisk key (sessionLossCapUsd was removed — the account-wide session loss cap " +

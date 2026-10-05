@@ -1,0 +1,83 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import {
+  assertPerplLiveCapacity,
+  assertPerplShutdownCapacity,
+  cancelAllPerplConfiguredMarketOrders,
+  consumePerplLiveArmFile,
+  estimatePerplRestingNotional,
+  planPerplShutdownChunks,
+  requirePerplLiveCliFlag,
+} from "../../src/engine/PerplLiveStartup.js";
+import { loadMarketsConfig } from "../../src/config/loadConfig.js";
+
+describe("Perpl Live startup gates", () => {
+  it("cancels configured-market orders that are absent from the local registry", async () => {
+    const open = [{ exchangeOrderId: "orphan-4", market: "BTCUSD", side: "buy" as const, type: "postOnly" as const, price: 77_615, size: 0.00036, filledSize: 0, remainingSize: 0.00036, isReduceOnly: false, state: "open" as const }];
+    const result = await cancelAllPerplConfiguredMarketOrders({
+      markets: ["BTCUSD", "ETHUSD"],
+      source: { connect: async () => undefined, getOpenOrders: (market) => open.filter((order) => !market || order.market === market) },
+      canceller: {
+        cancelOrder: async (id) => { open.splice(open.findIndex((order) => order.exchangeOrderId === id), 1); return { success: true, exchangeOrderId: id }; },
+        refreshAccountState: async () => undefined,
+      },
+    });
+    expect(result).toMatchObject({ attempted: ["BTCUSD:orphan-4"], cancelled: ["BTCUSD:orphan-4"], unresolved: [], successful: true });
+  });
+
+  it("reports configured-market orders that remain unresolved after bounded retries", async () => {
+    const order = { exchangeOrderId: "orphan-21", market: "BTCUSD", side: "buy" as const, type: "postOnly" as const, price: 78_393.1, size: 0.00036, filledSize: 0, remainingSize: 0.00036, isReduceOnly: false, state: "open" as const };
+    const result = await cancelAllPerplConfiguredMarketOrders({
+      markets: ["BTCUSD"],
+      source: { connect: async () => undefined, getOpenOrders: () => [order] },
+      canceller: { cancelOrder: async (id) => ({ success: false, exchangeOrderId: id }), refreshAccountState: async () => undefined },
+      maxAttempts: 2,
+    });
+    expect(result.successful).toBe(false);
+    expect(result.unresolved).toEqual(["BTCUSD:orphan-21"]);
+    expect(result.failed).toEqual(["BTCUSD:orphan-21"]);
+  });
+
+  it("splits shutdown inventory into bounded exact reduce-only chunks", () => {
+    expect(planPerplShutdownChunks({ positionBaseSize: -0.008, limitPrice: 2460, maxOrderSize: 0.005, maxNotionalUsd: 15, sizeDecimals: 3 })).toEqual([0.005, 0.003]);
+    expect(planPerplShutdownChunks({ positionBaseSize: 0.00018, limitPrice: 78_000, maxOrderSize: 0.0002, maxNotionalUsd: 15, sizeDecimals: 5 })).toEqual([0.00018]);
+    expect(planPerplShutdownChunks({ positionBaseSize: -0.144, limitPrice: 2465, maxOrderSize: 0.009, maxNotionalUsd: 30, sizeDecimals: 3 })).toHaveLength(16);
+  });
+
+  it("rejects configurations whose maximum position cannot be flattened within the action bound", () => {
+    expect(() => assertPerplShutdownCapacity({
+      limitPrice: 2465, maxLongPosition: 0.045, maxShortPosition: 0.045,
+      maxOrderSize: 0.009, maxNotionalUsd: 30, sizeDecimals: 3, maxActions: 4,
+    })).toThrow(/bounded flattening action capacity/);
+    expect(() => assertPerplShutdownCapacity({
+      limitPrice: 2465, maxLongPosition: 0.045, maxShortPosition: 0.045,
+      maxOrderSize: 0.009, maxNotionalUsd: 30, sizeDecimals: 3,
+    })).not.toThrow();
+  });
+  it("consumes a valid arm file exactly once", () => {
+    const directory = join("/tmp", `perpl-live-arm-${process.pid}-${Date.now()}`);
+    const path = join(directory, "ARMED");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(path, "2026-08-30\n");
+    consumePerplLiveArmFile(path, "2026-08-30");
+    expect(() => readFileSync(path)).toThrow();
+    expect(() => consumePerplLiveArmFile(path, "2026-08-30")).toThrow(/not found/);
+  });
+
+  it("requires the explicit live-money flag", () => {
+    expect(() => requirePerplLiveCliFlag([])).toThrow(/missing/);
+    expect(() => requirePerplLiveCliFlag(["--i-understand-this-places-real-orders"])).not.toThrow();
+  });
+
+  it("blocks ladders that exceed collateral or worker capacity", () => {
+    expect(() => assertPerplLiveCapacity({ availableBalance: 18, lockedBalance: 0, estimatedRestingNotional: 40, configuredOpenOrders: 4, workerOpenOrderCap: 4 })).toThrow(/insufficient/);
+    expect(() => assertPerplLiveCapacity({ availableBalance: 100, lockedBalance: 0, estimatedRestingNotional: 40, configuredOpenOrders: 5, workerOpenOrderCap: 4 })).toThrow(/open-order cap/);
+    expect(() => assertPerplLiveCapacity({ availableBalance: 100, lockedBalance: 0, estimatedRestingNotional: 40, configuredOpenOrders: 4, workerOpenOrderCap: 4 })).not.toThrow();
+  });
+
+  it("loads the production config and estimates both sides of every level", () => {
+    const config = loadMarketsConfig(join(process.cwd(), "config/markets.perpl-live.yaml"));
+    expect(estimatePerplRestingNotional(config.markets, new Map([["BTCUSD", 75_000], ["ETHUSD", 2_500]]))).toBeCloseTo(32.25, 2);
+  });
+});

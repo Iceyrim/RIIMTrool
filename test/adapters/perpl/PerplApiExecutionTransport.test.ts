@@ -1,0 +1,280 @@
+import { describe, expect, it, vi } from "vitest";
+import { PerplApiExecutionTransport, quantizePerplLimitPrice } from "../../../src/adapters/perpl/PerplApiExecutionTransport.js";
+import type { PerplPlaceIntent } from "../../../src/adapters/perpl/onchain/executionProtocol.js";
+import { PERPL_MAINNET_EXCHANGE } from "../../../src/adapters/perpl/onchain/protocol.js";
+
+class FakeSocket {
+  readyState = 1;
+  sent: Record<string, unknown>[] = [];
+  private listeners = new Map<string, Array<(event: any) => void>>();
+  send(data: string): void {
+    const frame = JSON.parse(data) as Record<string, unknown>;
+    this.sent.push(frame);
+    if (frame.mt === 29) queueMicrotask(() => this.message({
+      mt: 19, sn: 10, at: {}, addr: "0xa89bC210BaB1156113571F2a9193c5282efBF78a", n: 1, fl: 0,
+      as: [{ in: 1, id: 5198, fr: false, fw: true, ft: 0, lfr: 100, b: "18.34", lb: "0" }],
+    }));
+    if (frame.mt === 29) queueMicrotask(() => this.message({ mt: 23, at: {}, d: [] }));
+    if (frame.mt === 29) queueMicrotask(() => this.message({ mt: 26, at: { b: 100 }, d: [] }));
+  }
+  close(): void { this.emit("close", {}); }
+  addEventListener(type: string, listener: (event: any) => void): void {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
+  open(): void { this.emit("open", {}); }
+  message(data: unknown): void { this.emit("message", { data: JSON.stringify(data) }); }
+  private emit(type: string, event: unknown): void { for (const listener of this.listeners.get(type) ?? []) listener(event); }
+}
+
+const intent: PerplPlaceIntent = {
+  version: 1, id: "x", action: "place", chainId: 143, exchange: PERPL_MAINNET_EXCHANGE,
+  accountId: 5198, market: "BTCUSD", perpetualId: 1, actionId: "123", side: "buy",
+  orderType: "postOnly", price: "78000", size: "0.00018", reduceOnly: false, leverage: "15",
+};
+
+describe("PerplApiExecutionTransport", () => {
+  it("rounds maker prices away from crossing at each market tick", () => {
+    expect(quantizePerplLimitPrice(78_000.987, 1, "buy")).toBe(78_000.9);
+    expect(quantizePerplLimitPrice(78_000.901, 1, "sell")).toBe(78_001);
+    expect(quantizePerplLimitPrice(2_453.5678, 2, "buy")).toBe(2_453.56);
+    expect(quantizePerplLimitPrice(2_453.5601, 2, "sell")).toBe(2_453.57);
+  });
+  it("uses the shared $40 limit after market quantization", async () => {
+    const socket = new FakeSocket();
+    const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "12".repeat(32), socketFactory: () => socket });
+    const connecting = transport.connect(); socket.open(); await connecting;
+    const exact = transport.request({ ...intent, price: "100000", size: "0.00040" });
+    await Promise.resolve();
+    expect(socket.sent[1]).toMatchObject({ p: 1000000, s: 40 });
+    transport.close();
+    await expect(exact).resolves.toMatchObject({ event: "ambiguous" });
+
+    const secondSocket = new FakeSocket();
+    const second = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "13".repeat(32), socketFactory: () => secondSocket });
+    const secondConnecting = second.connect(); secondSocket.open(); await secondConnecting;
+    await expect(second.request({ ...intent, side: "sell", price: "102564.101", size: "0.00039" }))
+      .rejects.toThrow(/\$40 maximum notional/);
+    second.close();
+  });
+
+  it("ignores a harmless heartbeat that arrives before the authenticated wallet snapshot", async () => {
+    const socket = new FakeSocket();
+    const transport = new PerplApiExecutionTransport({
+      apiKey: "opaque-token",
+      apiKeySecret: "10".repeat(32),
+      socketFactory: () => socket,
+    });
+    const connecting = transport.connect();
+    socket.open();
+    socket.message({ mt: 100, sn: 1 });
+    await expect(connecting).resolves.toBeUndefined();
+    expect(transport.getConnectionEvidence().accountId).toBe(5198);
+    transport.close();
+  });
+  it("signs in first, allocates rq from account lfr, and waits for a definitive order update", async () => {
+    const socket = new FakeSocket();
+    const transport = new PerplApiExecutionTransport({
+      apiKey: "opaque-token",
+      apiKeySecret: "11".repeat(32),
+      socketFactory: () => socket,
+    });
+    const connecting = transport.connect();
+    socket.open();
+    await connecting;
+
+    expect(socket.sent[0]).toMatchObject({ mt: 29, chain_id: 143, api_key: "opaque-token" });
+    expect(transport.getConnectionEvidence()).toEqual({
+      chainId: 143,
+      accountId: 5198,
+      walletAddress: "0xa89bC210BaB1156113571F2a9193c5282efBF78a",
+      lastForwardedRequestId: 100,
+    });
+    const outcomePromise = transport.request(intent);
+    await Promise.resolve();
+    const order = socket.sent[1]!;
+    expect(order).toMatchObject({ mt: 22, rq: 101, mkt: 1, acc: 5198, t: 1, p: 780000, s: 18, fl: 1, lv: 1500, lb: 0 });
+    socket.message({ mt: 3, sid: 100, sn: 11, cid: order.sn, status: { code: 0, error: "" } });
+    let settled = false;
+    void outcomePromise.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    socket.message({ mt: 24, at: {}, d: [{
+      at: {}, c: {}, rq: 101, mkt: 1, acc: 5198, oid: 6_603_226_349_594, scid: 44, st: 2, sr: 35,
+      t: 1, p: 780000, os: 18, fp: 0, fs: 0, f: "0", fl: 1, mm: 0, lv: 1500,
+    }] });
+    await expect(outcomePromise).resolves.toEqual({ version: 1, id: "x", event: "confirmed", actionId: "123", exchangeOrderId: "44" });
+
+    const cancellation = transport.request({
+      version: 1, id: "cancel", action: "cancel", chainId: 143,
+      exchange: PERPL_MAINNET_EXCHANGE, accountId: 5198, market: "BTCUSD",
+      perpetualId: 1, actionId: "124", exchangeOrderId: "44", placementActionId: "123",
+    });
+    await Promise.resolve();
+    const cancelFrame = socket.sent[2]!;
+    expect(cancelFrame).toMatchObject({ mt: 22, oid: 6_603_226_349_594, t: 5 });
+    socket.message({ mt: 24, at: {}, d: [{
+      at: {}, c: {}, rq: 102, mkt: 1, acc: 5198, oid: 6_603_226_349_594, scid: 44,
+      st: 5, sr: 28, t: 5, p: 0, os: 0, fp: 0, fs: 0, f: "0", fl: 0, mm: 0, lv: 0,
+    }] });
+    await expect(cancellation).resolves.toEqual({
+      version: 1, id: "cancel", event: "confirmed", actionId: "124", exchangeOrderId: "44",
+    });
+    transport.close();
+  });
+
+  it("restores API-to-contract order identity from the authenticated order snapshot", async () => {
+    const socket = new FakeSocket();
+    const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "44".repeat(32), socketFactory: () => socket });
+    const connecting = transport.connect(); socket.open(); await connecting;
+    socket.message({ mt: 23, at: {}, d: [{
+      at: {}, c: {}, rq: 99, mkt: 20, acc: 5198, oid: 6_603_226_611_742, scid: 47,
+      st: 2, sr: 35, t: 2, p: 245551, os: 4, fp: 0, fs: 0, f: "0", fl: 1, mm: 0, lv: 1200,
+    }] });
+    void transport.request({ version: 1, id: "cancel", action: "cancel", chainId: 143, exchange: PERPL_MAINNET_EXCHANGE, accountId: 5198, market: "ETHUSD", perpetualId: 20, actionId: "200", exchangeOrderId: "47", placementActionId: "199" });
+    await Promise.resolve();
+    expect(socket.sent[1]).toMatchObject({ oid: 6_603_226_611_742, mkt: 20, t: 5 });
+    transport.close();
+  });
+
+  it("publishes contract-identified live orders and fills from the authenticated stream", async () => {
+    const socket = new FakeSocket();
+    const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "66".repeat(32), socketFactory: () => socket });
+    const connecting = transport.connect(); socket.open(); await connecting;
+    socket.message({ mt: 24, at: {}, d: [{
+      at: { t: 1_788_180_000_000 }, c: {}, rq: 101, mkt: 20, acc: 5198,
+      oid: 6_603_226_611_742, scid: 47, st: 2, sr: 35, t: 2, p: 245551,
+      os: 4, fp: 0, fs: 0, f: "0", fl: 1, mm: 0, lv: 1200,
+    }] });
+    expect(transport.getOpenOrders("ETHUSD")).toEqual([expect.objectContaining({
+      exchangeOrderId: "47", side: "sell", price: 2455.51, size: 0.004,
+    })]);
+    socket.message({ mt: 25, at: {}, d: [{
+      at: { t: 1_788_180_001_000, l: 7 }, mkt: 20, acc: 5198,
+      oid: 6_603_226_611_742, t: 2, l: 1, p: 245551, s: 4, f: "0",
+    }] });
+    socket.message({ mt: 24, at: {}, d: [{
+      at: {}, c: {}, rq: 101, mkt: 20, acc: 5198, oid: 6_603_226_611_742,
+      scid: 47, st: 4, sr: 0, t: 2, p: 245551, os: 4, fp: 245551, fs: 4,
+      f: "0", fl: 1, mm: 0, lv: 1200,
+    }] });
+    expect(transport.getOpenOrders("ETHUSD")).toEqual([]);
+    await expect(transport.getOrderFills("47", "ETHUSD")).resolves.toEqual([
+      expect.objectContaining({ exchangeOrderId: "47", side: "sell", price: 2455.51, size: 0.004 }),
+    ]);
+    transport.close();
+  });
+
+  it("blocks on a fill until authoritative position evidence catches up", async () => {
+    const socket = new FakeSocket();
+    const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "77".repeat(32), socketFactory: () => socket });
+    const connecting = transport.connect(); socket.open(); await connecting;
+    expect(transport.getPositions("ETHUSD")).toEqual([]);
+    socket.message({ mt: 25, at: {}, d: [{
+      at: { b: 101, t: 1_788_180_001_000, l: 7 }, mkt: 20, acc: 5198,
+      oid: 10, t: 2, l: 1, p: 246500, s: 9, f: "0",
+    }] });
+    expect(() => transport.getPositions("ETHUSD")).toThrow(/has not caught up/);
+    socket.message({ mt: 27, at: {}, d: [{
+      at: { b: 102 }, mkt: 20, acc: 5198, pid: 1, rq: 1, oid: 10,
+      st: 1, sr: 21, sd: 2, c: "0", ep: 246500, s: 144, fee: "0",
+      efs: 0, lv: 1200, xfs: 0, ots: {},
+    }] });
+    expect(transport.getPositions("ETHUSD")).toEqual([
+      expect.objectContaining({ market: "ETHUSD", baseSize: -0.144, markPrice: 2465 }),
+    ]);
+    const settled = transport.waitForPositionSettled("ETHUSD", 1_000, -0.144);
+    socket.message({ mt: 27, at: {}, d: [{
+      at: { b: 103 }, mkt: 20, acc: 5198, pid: 1, rq: 2, oid: 11,
+      st: 2, sr: 21, sd: 2, c: "0", ep: 246500, s: 0, fee: "0",
+      efs: 0, lv: 1200, xfs: 0, ots: {},
+    }] });
+    await expect(settled).resolves.toBeUndefined();
+    expect(transport.getPositions("ETHUSD")).toEqual([]);
+    transport.close();
+  });
+
+  it("paginates authenticated fill history once and aggregates dashboard volume windows", async () => {
+    const requests: Array<{ url: string; headers: unknown }> = [];
+    const firstTimestamp = Date.parse("2026-08-30T12:00:00Z");
+    const secondTimestamp = Date.parse("2026-08-31T12:00:00Z");
+    const fetchFn = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requests.push({ url, headers: init?.headers });
+      const pageTwo = url.includes("page=next");
+      return new Response(JSON.stringify(pageTwo ? {
+        d: [{ at: { t: firstTimestamp, txid: "0x1", l: 1 }, mkt: 20, acc: 5198, oid: 10, t: 2, l: 1, p: 250000, s: 4, f: "0" }],
+        np: "",
+      } : {
+        d: [
+          { at: { t: secondTimestamp, txid: "0x2", l: 2 }, mkt: 1, acc: 5198, oid: 11, t: 1, l: 1, p: 800000, s: 30, f: "0" },
+          { at: { t: secondTimestamp, txid: "0x2", l: 2 }, mkt: 1, acc: 5198, oid: 11, t: 1, l: 1, p: 800000, s: 30, f: "0" },
+          { at: { t: secondTimestamp, txid: "0x3", l: 3 }, mkt: 1, acc: 9999, oid: 12, t: 1, l: 1, p: 800000, s: 30, f: "0" },
+        ],
+        np: "next",
+      }), { status: 200 });
+    });
+    const transport = new PerplApiExecutionTransport({
+      apiKey: "token", apiKeySecret: "88".repeat(32), fetchFn: fetchFn as typeof fetch,
+    });
+    const [day, week] = await Promise.all([
+      transport.getAccountVolume({ since: "2026-08-31T00:00:00Z", until: "2026-09-01T00:00:00Z" }),
+      transport.getAccountVolume({ since: "2026-08-25T00:00:00Z", until: "2026-09-01T00:00:00Z" }),
+    ]);
+    expect(day).toEqual([expect.objectContaining({ market: "BTCUSD", since: "2026-08-31T00:00:00Z", until: "2026-09-01T00:00:00Z", baseVolume: 0.0003 })]);
+    expect(day[0]?.quoteVolume).toBeCloseTo(24);
+    expect(week).toEqual(expect.arrayContaining([
+      expect.objectContaining({ market: "BTCUSD" }),
+      expect.objectContaining({ market: "ETHUSD", baseVolume: 0.004 }),
+    ]));
+    expect(week.find((row) => row.market === "BTCUSD")?.quoteVolume).toBeCloseTo(24);
+    expect(week.find((row) => row.market === "ETHUSD")?.quoteVolume).toBeCloseTo(10);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(requests[0]?.url).toContain("/v1/trading/fills?count=100");
+    expect(requests[1]?.url).toContain("page=next");
+    expect(requests[0]?.headers).toMatchObject({ "X-API-Key": "token" });
+  });
+
+  it("refuses to guess an API cancellation identity from a contract order ID", async () => {
+    const socket = new FakeSocket();
+    const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "55".repeat(32), socketFactory: () => socket });
+    const connecting = transport.connect(); socket.open(); await connecting;
+    await expect(transport.request({ version: 1, id: "cancel", action: "cancel", chainId: 143, exchange: PERPL_MAINNET_EXCHANGE, accountId: 5198, market: "BTCUSD", perpetualId: 1, actionId: "201", exchangeOrderId: "44", placementActionId: "200" })).rejects.toThrow(/no verified One-Click order identity/);
+    expect(socket.sent).toHaveLength(1);
+    transport.close();
+  });
+
+  it("maps reduce-only sides to close-order types", async () => {
+    const socket = new FakeSocket();
+    const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "22".repeat(32), socketFactory: () => socket, timeoutMs: 10 });
+    const connecting = transport.connect(); socket.open(); await connecting;
+    void transport.request({ ...intent, id: "sell", actionId: "124", side: "sell", reduceOnly: true });
+    await Promise.resolve();
+    expect(socket.sent[1]).toMatchObject({ t: 3 });
+    transport.close();
+  });
+
+  it("encodes a reduce-only shutdown exit as immediate-or-cancel", async () => {
+    const socket = new FakeSocket();
+    const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "77".repeat(32), socketFactory: () => socket, timeoutMs: 10 });
+    const connecting = transport.connect(); socket.open(); await connecting;
+    void transport.request({ ...intent, id: "ioc", actionId: "125", side: "buy", reduceOnly: true, orderType: "immediateOrCancel" });
+    await Promise.resolve();
+    expect(socket.sent[1]).toMatchObject({ t: 4, fl: 4 });
+    transport.close();
+  });
+
+  it("returns a definitive exchange failure as rejected without waiting for timeout", async () => {
+    const socket = new FakeSocket();
+    const transport = new PerplApiExecutionTransport({ apiKey: "token", apiKeySecret: "33".repeat(32), socketFactory: () => socket });
+    const connecting = transport.connect(); socket.open(); await connecting;
+    const outcome = transport.request(intent); await Promise.resolve();
+    const sent = socket.sent[1]!;
+    socket.message({ mt: 3, sid: 100, sn: 11, cid: sent.sn, status: { code: 0, error: "" } });
+    socket.message({ mt: 24, at: {}, d: [{
+      at: {}, c: {}, rq: 101, mkt: 1, acc: 5198, oid: 0, scid: 0, st: 7, sr: 36,
+      fr: 1, t: 1, p: 780000, os: 18, fp: 0, fs: 0, f: "0", fl: 1, mm: 0, lv: 1500,
+    }] });
+    await expect(outcome).resolves.toMatchObject({ event: "rejected", reason: "order failed" });
+    transport.close();
+  });
+});

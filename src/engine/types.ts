@@ -74,7 +74,10 @@ export interface ReduceOnlyExitConfig {
 }
 
 export interface EngineMarketConfig {
+  /** Legacy dry-run compatibility only; ignored by the live engine. */
+  accountSessionLossCapUsd?: number;
   symbol: string;
+  leverage?: number;
   orderSize: { min: number; max: number };
   spreadBps: { normal: number; min: number; max: number };
   exitSpreadBps: number;

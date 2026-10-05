@@ -187,19 +187,25 @@ export class DashboardTelemetry {
     // priming below both remain load-bearing here — unlike the N1 path, these 4 calls are not
     // derived from one shared, monotonically-nested cache, so a real divergence across concurrent
     // fetches is still possible.
-    const includeAllTime = this.supportsAllTime;
     const until = new Date(now).toISOString();
-    const requested: VolumeWindow[] = [...WINDOWS, ...(includeAllTime ? ["allTime" as const] : [])];
+    const requested: VolumeWindow[] = [...WINDOWS, ...(this.supportsAllTime ? ["allTime" as const] : [])];
     for (const window of requested) {
       const previous = this.volumes.get(window)!;
       this.volumes.set(window, { ...previous, partial: true });
     }
-    const reads = requested.map((window) =>
-      this.adapter.getAccountVolume({
-        since: new Date(window === "allTime" ? 0 : now - WINDOW_MS[window]).toISOString(),
-        until,
-      }),
-    );
+    const batched = this.adapter as ExchangeAdapter & {
+      getAccountVolumeWindows?: (requests: Array<{ window: VolumeWindow; since: string; until: string }>) => Promise<Partial<Record<VolumeWindow, AccountVolume[]>>>;
+    };
+    const requests = requested.map((window) => ({
+      window,
+      since: new Date(window === "allTime" ? 0 : now - WINDOW_MS[window]).toISOString(),
+      until,
+    }));
+    if (batched.getAccountVolumeWindows) {
+      await this.refreshBatched(batched as Required<Pick<typeof batched, "getAccountVolumeWindows">> & ExchangeAdapter, requests, now);
+      return;
+    }
+    const reads = requests.map(({ since, until: requestUntil }) => this.adapter.getAccountVolume({ since, until: requestUntil }));
     const allReads = Promise.allSettled(reads);
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
@@ -450,6 +456,111 @@ export class DashboardTelemetry {
     } finally {
       if (timer) clearTimeout(timer);
     }
+  }
+
+  private async refreshBatched(
+    adapter: ExchangeAdapter & { getAccountVolumeWindows: (requests: Array<{ window: VolumeWindow; since: string; until: string }>) => Promise<Partial<Record<VolumeWindow, AccountVolume[]>>> },
+    requests: Array<{ window: VolumeWindow; since: string; until: string }>,
+    now: number,
+  ): Promise<void> {
+    const bounded = requests.filter(({ window }) => window !== "allTime");
+    const allTime = requests.find(({ window }) => window === "allTime");
+    const boundedJob = this.withTimeout(adapter.getAccountVolumeWindows(bounded));
+    const allTimeJob = allTime
+      ? this.withTimeout(this.adapter.getAccountVolume({ since: allTime.since, until: allTime.until }))
+      : Promise.resolve(undefined);
+    const [boundedResult, allTimeResult] = await Promise.allSettled([boundedJob, allTimeJob]);
+    let failures = 0;
+    if (boundedResult.status === "fulfilled") {
+      for (const { window } of bounded) {
+        const rows = boundedResult.value[window];
+        if (rows) this.publishVolume(window, rows, now);
+        else { failures++; this.applyVolumeFailure(window, "RISEx API did not return this volume window", now); }
+      }
+    } else {
+      failures += bounded.length;
+      for (const { window } of bounded) this.applyVolumeFailure(window, String(boundedResult.reason), now);
+    }
+    if (allTime) {
+      if (allTimeResult.status === "fulfilled" && allTimeResult.value)
+        this.publishVolume("allTime", allTimeResult.value, now);
+      else {
+        failures++;
+        this.applyVolumeFailure("allTime", allTimeResult.status === "rejected" ? String(allTimeResult.reason) : "RISEx API did not return all-time volume", now);
+      }
+    }
+    this.failureCount = failures ? this.failureCount + 1 : 0;
+    this.nextRefreshAt = now + (failures ? Math.min(ONE_HOUR, FIVE_MINUTES * 2 ** Math.min(this.failureCount - 1, 4)) : FIVE_MINUTES);
+  }
+
+  private withTimeout<T>(promise: Promise<T>): Promise<T> {
+    return Promise.race([
+      promise,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("volume refresh timed out after 5000ms")), TIMEOUT_MS)),
+    ]);
+  }
+
+  private applyVolumeFailure(window: VolumeWindow, message: string, now: number): void {
+    const previous = this.volumes.get(window)!;
+    const durable = this.durableVolume(window, now);
+    const durableTotal = this.totalVolume(durable);
+    const previousTotal = this.totalVolume(previous.value);
+    if (durable.length && (window !== "allTime" || !previous.available || durableTotal >= previousTotal)) {
+      this.volumes.set(window, {
+        available: true,
+        value: durable,
+        updatedAt: now,
+        stale: true,
+        error: `Durable confirmed-fill fallback (up to 90 days): ${message}`,
+      });
+      return;
+    }
+    if (previous.available) {
+      this.volumes.set(window, { ...previous, stale: true, error: message });
+      return;
+    }
+    this.volumes.set(window, this.unavailable(`${window} volume unavailable: ${message}`, message));
+  }
+
+  private publishVolume(window: VolumeWindow, rows: AccountVolume[], now: number): void {
+    const durable = this.durableVolume(window, now);
+    if (!rows.length && durable.length) {
+      this.volumes.set(window, {
+        available: true,
+        value: durable,
+        updatedAt: now,
+        stale: true,
+        error: "Durable confirmed-fill fallback (up to 90 days): RISEx API returned an empty volume window",
+      });
+      return;
+    }
+    this.volumes.set(window, { available: true, value: rows, updatedAt: now, stale: false });
+  }
+
+  private totalVolume(rows: AccountVolume[] | null): number {
+    return rows?.reduce((sum, row) => sum + row.quoteVolume, 0) ?? 0;
+  }
+
+  private durableVolume(window: VolumeWindow, now: number): AccountVolume[] {
+    const sinceMs = window === "allTime" ? now - 90 * 24 * 60 * 60_000 : now - WINDOW_MS[window];
+    const fills = this.historyStore?.snapshot().history.fills ?? [];
+    const unique = new Map<string, TradeLogEntry>();
+    for (const fill of fills)
+      if (fill.timestamp >= sinceMs && fill.timestamp <= now) unique.set(fillIdentity(fill), fill);
+    const totals = new Map<string, { base: number; quote: number }>();
+    for (const fill of unique.values()) {
+      const total = totals.get(fill.market) ?? { base: 0, quote: 0 };
+      total.base += Math.abs(fill.size);
+      total.quote += Math.abs(fill.size * fill.price);
+      totals.set(fill.market, total);
+    }
+    return [...totals].map(([market, total]) => ({
+      market,
+      since: new Date(sinceMs).toISOString(),
+      until: new Date(now).toISOString(),
+      baseVolume: total.base,
+      quoteVolume: total.quote,
+    }));
   }
 
   private unavailable(sourceNeeded: string, error?: string): VolumeTelemetry {

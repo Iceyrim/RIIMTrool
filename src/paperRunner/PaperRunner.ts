@@ -33,6 +33,8 @@ export interface PaperRunnerMarket {
 
 export interface PaperRunnerConfig {
   intervalMs: number;
+  /** Human-facing runtime identity; defaults to the historical generic name. */
+  runnerLabel?: string;
   /** Total wall-clock duration to run before auto-stopping. Omit to run until stop() is called
    * explicitly (e.g. a SIGINT handler). */
   durationMs?: number;
@@ -152,6 +154,10 @@ export class PaperRunner {
   private readonly accountRiskState: AccountRiskState;
   private readonly accountPnlOwnerMarket: string | undefined;
 
+  private prefix(market: string): string {
+    return `[${this.config.runnerLabel ?? "PaperRunner"}:${market}]`;
+  }
+
   constructor(
     private readonly markets: readonly PaperRunnerMarket[],
     private readonly config: PaperRunnerConfig,
@@ -189,7 +195,7 @@ export class PaperRunner {
 
     if (this.inFlight.has(entry.market)) {
       console.warn(
-        `[PaperRunner:${entry.market}] previous cycle still in flight (stuck/degraded?), ` +
+        `${this.prefix(entry.market)} previous cycle still in flight (stuck/degraded?), ` +
           `skipping this tick — other markets are unaffected`,
       );
     } else {
@@ -289,7 +295,7 @@ export class PaperRunner {
       summary = await engine.runCycle();
     } catch (err) {
       console.error(
-        `[PaperRunner:${market}] runCycle() threw, skipping this cycle: ${String(err)}`,
+        `${this.prefix(market)} runCycle() threw, skipping this cycle: ${String(err)}`,
       );
       return undefined;
     }
@@ -340,7 +346,7 @@ export class PaperRunner {
       if (pnlDelta !== 0) engine.recordRealizedPnl(pnlDelta);
     } catch (err) {
       const reason = `realized-PnL drain failed: ${String(err)}`;
-      console.error(`[PaperRunner:${market}] ${reason}`);
+      console.error(`${this.prefix(market)} ${reason}`);
       for (const entry of this.markets) entry.engine.markSessionPnlUnavailable(reason);
       if (this.config.alertBus && this.prevPnlHealthy.get(market) !== false) {
         this.config.alertBus.emit({ type: "error", market, message: `[${market}] ${reason}` });

@@ -9,6 +9,7 @@ import type { MarketsConfig } from "./schema.js";
 export function toEngineMarketConfig(config: MarketsConfig["markets"][number]): EngineMarketConfig {
   return {
     symbol: config.symbol,
+    leverage: config.leverage,
     orderSize: config.orderSize,
     spreadBps: config.spreadBps,
     exitSpreadBps: config.exitSpreadBps,

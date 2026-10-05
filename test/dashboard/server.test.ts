@@ -17,7 +17,14 @@ describe("dashboard static safety", () => {
   const source = readFileSync(new URL("../../src/dashboard/dashboard.html", import.meta.url), "utf8");
 
   it("uses only the approved cached venue filters and no unsafe HTML interpolation", () => {
-    expect(source.match(/<option value="(?:n1-live|risex-paper|perpl-paper)">/g)).toHaveLength(3);
+    expect(source.match(/<option value="(?:n1-live|risex-live|perpl-live|qfex-live)">/g)).toHaveLength(4);
+    expect(source).not.toContain('<option value="risex-paper">');
+    expect(source).toContain('<option value="risex-live">RISEx LIVE</option>');
+    expect(source).toContain('<option value="qfex-live">QFEX LIVE</option>');
+    expect(source).toContain('"risex-live":"risex-session-live"');
+    expect(source).toContain('<option value="perpl-live">Perpl LIVE</option>');
+    expect(source).toContain('"perpl-live":"perpl-onchain-mainnet-live"');
+    expect(source).toContain('"perpl-live":"perpl"');
     expect(source).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
   });
 
@@ -27,10 +34,11 @@ describe("dashboard static safety", () => {
     expect(source).toContain("dashboard is read only");
   });
 
-  it("renders distinct pending and unknown order warning states", () => {
+  it("keeps non-terminal orders visible with unresolved records explicitly labelled", () => {
     expect(source).toContain("state-pending");
     expect(source).toContain("state-unknown");
     expect(source).toContain('x.state!=="FILLED"&&x.state!=="CANCELLED"');
+    expect(source).toContain("Ambiguous local records — not confirmed exchange orders");
   });
 
   it("labels open-order size in USD and derives it from the retained base size and limit price", () => {
@@ -41,6 +49,16 @@ describe("dashboard static safety", () => {
   it("labels confirmed-fill size in USD and derives notional without changing cached base size", () => {
     expect(source).toMatch(/Trade history[\s\S]*<th>SIZE \(USD\)<\/th>/);
     expect(source).toContain("money(Math.abs(f.size*f.price))");
+  });
+
+  it("shows live lifecycle and uptime while excluding flat cached positions", () => {
+    expect(source).toContain("selectedSource");
+    expect(source).toContain('source?.lifecycle==="running"');
+    expect(source).toContain('source?.lifecycle==="halted"?"Halted"');
+    expect(source).toContain("source?.reason");
+    expect(source).toContain('metric(am,"Live session"');
+    expect(source).toContain("Math.abs(m.position.baseSize)>1e-12");
+    expect(source).toContain("Non-flat cached adapter positions");
   });
 
   it("owns content in five client-side views while preserving filters and locked settings", () => {
@@ -64,7 +82,7 @@ describe("dashboard static safety", () => {
   });
 
   it("keeps every volume window visible and navigation limited to DOM state", () => {
-    for (const label of ['"24h":"24H"', '"7d":"7D"', '"30d":"30D"', 'allTime:"All Time"']) {
+    for (const label of ['"24h":"24H"', '"7d":"7D"', '"30d":"30D"', 'allTime:partial?"Partial history":"All Time"']) {
       expect(source).toContain(label);
     }
     expect(source).toContain('fetch("/api/status"');

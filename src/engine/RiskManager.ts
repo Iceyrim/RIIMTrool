@@ -24,6 +24,9 @@ export interface RiskCheckContext {
    * successful placements earlier in this cycle. Opposing sides are deliberately not netted. */
   openBuyQuantity: number;
   openSellQuantity: number;
+  /** Legacy dry-run inputs; intentionally ignored. Calendar caps govern placement. */
+  sessionRealizedPnlUsd?: number;
+  sessionLossCapUsd?: number;
   /** Account-wide daily/weekly realized-PnL loss caps (WindowLossCapTracker) — the only
    * realized-PnL-based placement gate in this codebase (the former account-wide session loss
    * cap was removed; restarting the bot no longer creates or resets any loss-control boundary,

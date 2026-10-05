@@ -1,0 +1,9 @@
+import {describe,expect,it} from "vitest";
+import {PerplTradingProtocol} from "../../../src/adapters/perpl/tradingProtocol.js";
+function ready():PerplTradingProtocol{const p=new PerplTradingProtocol();p.connect();p.acceptWalletSnapshot(10,[{id:1,lfr:40},{id:2,lfr:90}]);return p;}
+describe("PerplTradingProtocol",()=>{
+ it("tracks contiguous heartbeats only and allocates rq per account",()=>{const p=ready();p.acceptHeartbeat(11);const a=p.begin(1,"place",{lb:20}),b=p.begin(2,"place",{lb:20});expect([a.rq,b.rq]).toEqual([41,91]);expect(()=>p.acceptHeartbeat(13)).toThrow(/reconnect/);});
+ it("correlates gateway status by cid, then outcome by account and rq",()=>{const p=ready();const id=p.begin(1,"place",{lb:20});p.markSent(id.sn);expect(p.correlateGateway({cid:id.sn,status:{code:0,error:""}})).toBeUndefined();expect(p.correlateOrder({acc:1,rq:id.rq,oid:8,st:2,sr:35})).toEqual({state:"confirmed",status:2,reason:35});});
+ it("applies retry, expiry, sr:32, and disconnect ambiguity rules",()=>{const p=ready();const a=p.begin(1,"place",{lb:20});p.markSent(a.sn);expect(p.retry(a.sn,19)).toEqual({action:"same-rq",rq:a.rq});p.correlateOrder({acc:1,rq:a.rq,oid:0,st:7,sr:32});expect(p.retry(a.sn,19)).toEqual({action:"new-rq",rq:42});const b=p.begin(2,"place",{lb:12});p.markSent(b.sn);expect(p.retry(b.sn,12)).toEqual({action:"new-rq",rq:92});const c=p.begin(2,"place",{lb:30});p.markSent(c.sn);p.disconnect();expect(p.resolution(c.sn)).toMatchObject({state:"ambiguous"});});
+ it("does not infer cancellation from absence and accepts definitive races",()=>{const p=ready();const a=p.begin(1,"cancel",{orderId:7});p.markSent(a.sn);expect(p.resolveCancellation(a.sn,{status:"absent"})).toMatchObject({state:"ambiguous"});const b=p.begin(1,"cancel",{orderId:8});expect(p.resolveCancellation(b.sn,{status:"filled"})).toEqual({state:"confirmed",status:4,reason:0});});
+});

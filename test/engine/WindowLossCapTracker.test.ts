@@ -155,6 +155,19 @@ describe("WindowLossCapTracker", () => {
     expect(restarted.getState().dailyCapped).toBe(true);
   });
 
+  it("seeds a first dedicated anchor from the preserved equity journal without resetting the week", () => {
+    const tracker = new WindowLossCapTracker({
+      dailyLossCapUsd: 5,
+      weeklyLossCapUsd: 15,
+      anchorFilePath: tempAnchorPath(),
+      initialDailyRealizedPnlUsd: -2,
+      initialWeeklyRealizedPnlUsd: -7,
+    });
+    const now = Date.now();
+    expect(tracker.observe(0, now).dailyCapped).toBe(false);
+    expect(tracker.observe(-8, now + 1_000).weeklyCapped).toBe(true);
+  });
+
   it("throws on a malformed anchor file rather than silently resetting", () => {
     const anchorFilePath = tempAnchorPath();
     writeFileSync(anchorFilePath, "{ not json", "utf-8");

@@ -137,6 +137,7 @@ export class MarketEngine {
   readonly tradeLog: TradeLog;
 
   private accountRiskState: AccountRiskState;
+  private readonly windowLossCapProvider?: WindowLossCapProvider;
   private started = false;
   // Defaults healthy: PaperRunner only ever calls markSessionPnlUnavailable() after a real
   // drain attempt fails, and startup (run-live.ts) aborts before any cycle runs if the initial
@@ -144,7 +145,7 @@ export class MarketEngine {
   private quiescing = false;
   private quoteLadderReferencePrice?: number;
   private lastCycleSummary?: CycleSummary;
-  private readonly windowLossCapProvider?: WindowLossCapProvider;
+  private reduceOnlyPlacementFailures = 0;
 
   constructor(
     private readonly adapter: ExchangeAdapter,
@@ -424,7 +425,16 @@ export class MarketEngine {
     let openSellQuantity = exchangeOpenOrders
       .filter((order) => order.side === "sell")
       .reduce((sum, order) => sum + order.remainingSize, 0);
-    const exitRequired = Math.abs(currentBaseSize) > this.config.inventoryReductionThresholdBase;
+    const windowLossCapState = this.windowLossCapProvider?.getState();
+    const windowLossCapped =
+      windowLossCapState?.dailyCapped === true || windowLossCapState?.weeklyCapped === true;
+    // A breached calendar loss window changes the objective from ordinary inventory management
+    // to forced-flat safety. Any nonzero position must be reduced, even when it is below the
+    // normal inventory threshold; otherwise a capped bot can leave unsupervised directional risk.
+    const exitRequired =
+      currentBaseSize !== 0 &&
+      (windowLossCapped ||
+        Math.abs(currentBaseSize) > this.config.inventoryReductionThresholdBase);
     summary.reductionMode = exitRequired;
     summary.exitState = currentBaseSize === 0 ? "no_position" : "below_threshold";
     const existingExit = this.lifecycle.hasOpenReduceOnlyExit();
@@ -432,13 +442,21 @@ export class MarketEngine {
 
     // SPEC.md Section 5c: inventory management is a dedicated reduce-only exit, not a skew
     // applied to the normal ladder below.
-    if (exitRequired) {
+    if (exitRequired || windowLossCapped) {
       summary.reductionModeCancellation = await this.cancelOrdinaryQuotesForReductionMode();
       if (summary.reductionModeCancellation.unresolved > 0) {
         summary.exitState = "blocked";
         summary.exitDetails = {
           cause: `${summary.reductionModeCancellation.unresolved} ordinary managed quote(s) remain unresolved`,
         };
+        this.registry.save();
+        return this.finishSummary(summary);
+      }
+      if (!exitRequired) {
+        summary.blockedReason =
+          windowLossCapState?.dailyLossCapReason ??
+          windowLossCapState?.weeklyLossCapReason ??
+          "Realized-PnL loss cap reached; holding flat with no ordinary quotes";
         this.registry.save();
         return this.finishSummary(summary);
       }
@@ -606,6 +624,10 @@ export class MarketEngine {
     return currentBaseSize > 0 ? markPrice + offset : markPrice - offset;
   }
 
+  private computeEmergencyExitPrice(currentBaseSize: number, markPrice: number): number {
+    return currentBaseSize > 0 ? markPrice * 0.995 : markPrice * 1.005;
+  }
+
   private async manageReduceOnlyExit(
     currentBaseSize: number,
     progressiveOpenOrderCount: number,
@@ -646,24 +668,32 @@ export class MarketEngine {
     }
 
     const marketPrice = await this.adapter.getMarketPrice(this.config.symbol);
-    const exitPrice = this.computeExitPrice(currentBaseSize, marketPrice.mark);
+    const positionLimit = currentBaseSize > 0
+      ? this.config.riskLimits.maxLongPosition
+      : this.config.riskLimits.maxShortPosition;
+    const emergency = Math.abs(currentBaseSize) > positionLimit || this.reduceOnlyPlacementFailures >= 3;
+    const exitPrice = emergency
+      ? this.computeEmergencyExitPrice(currentBaseSize, marketPrice.mark)
+      : this.computeExitPrice(currentBaseSize, marketPrice.mark);
     const side: OrderSide = currentBaseSize > 0 ? "sell" : "buy";
     const size = Math.min(Math.abs(currentBaseSize), this.config.riskLimits.maxOrderSize);
 
     if (this.quiescing) return { action: "none", state: "blocked", details: { cause: "engine quiescing" } };
     const result = await this.lifecycle.placeReduceOnlyExit({
       side,
-      type: "postOnly",
+      type: emergency ? "immediateOrCancel" : "postOnly",
       size,
       price: exitPrice,
     });
     if (!result.success) {
+      this.reduceOnlyPlacementFailures++;
       return {
         action: result.message?.includes("already open") ? "skipped_duplicate" : "none",
         state: result.order?.state === "UNKNOWN" ? "unresolved" : "placement_failed",
         details: { size, price: exitPrice, orderId: result.order?.exchangeOrderId ?? undefined, cause: result.message },
       };
     }
+    this.reduceOnlyPlacementFailures = 0;
     return { action: "placed", state: "placed", details: { size, price: exitPrice, orderId: result.order?.exchangeOrderId ?? undefined, ageMs: 0 }, placedOrder: { side, size } };
   }
 
@@ -769,7 +799,6 @@ export class MarketEngine {
     });
 
     const nearestLevelBps = this.config.levelSpacingBps[0] ?? 1;
-    const windowLossCapState = this.windowLossCapProvider?.getState();
 
     let placed = 0;
     let attempted = 0;
@@ -778,6 +807,8 @@ export class MarketEngine {
     const riskSkippedLevels = emptyRiskSkippedLevels;
     const riskSkipMessages: string[] = [];
     const MAX_RISK_MESSAGES = 5;
+
+    const windowLossCapState = this.windowLossCapProvider?.getState();
 
     for (const level of ladder) {
       const alreadyCovered = stillResting.some(

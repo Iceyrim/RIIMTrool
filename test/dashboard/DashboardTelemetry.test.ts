@@ -235,4 +235,83 @@ describe("DashboardTelemetry", () => {
       { timestamp: 1_300_000, realizedPnlUsd: 3, quoteVolume: null },
     ]);
   });
+
+  it("publishes RISEx volume windows independently from one batched refresh", async () => {
+    const adapter = new FakeExchangeAdapter() as FakeExchangeAdapter & {
+      getAccountVolumeWindows: ReturnType<typeof vi.fn>;
+    };
+    adapter.getAccountVolumeWindows = vi.fn().mockResolvedValue({
+      "24h": [{ market: "BTCUSD", since: "s", until: "u", baseVolume: 1, quoteVolume: 10 }],
+      "7d": [{ market: "BTCUSD", since: "s", until: "u", baseVolume: 2, quoteVolume: 20 }],
+      "30d": [{ market: "BTCUSD", since: "s", until: "u", baseVolume: 3, quoteVolume: 30 }],
+    });
+    vi.spyOn(adapter, "getAccountVolume").mockRejectedValue(new Error("all-time scan failed"));
+    const telemetry = new DashboardTelemetry(adapter, true);
+    telemetry.refreshIfDue(1_000_000);
+    await vi.waitFor(() => expect(telemetry.snapshot().volumes["24h"].available).toBe(true));
+    expect(adapter.getAccountVolumeWindows).toHaveBeenCalledTimes(1);
+    expect(telemetry.snapshot().volumes["30d"]).toMatchObject({ available: true, stale: false });
+    expect(telemetry.snapshot().volumes.allTime).toMatchObject({ available: false });
+  });
+
+  it("uses deduplicated durable confirmed fills as a labelled per-window fallback", async () => {
+    const now = Date.now();
+    const store = new DashboardHistoryStore(mkdtempSync(`${tmpdir()}/riimtrool-volume-fallback-`), "risex-live");
+    const fill = { timestamp: now - 1_000, market: "BTCUSD", side: "buy" as const, size: 0.5, price: 100, isReduceOnly: false, clientOrderId: "c", exchangeOrderId: "e", tradeId: "trade-1", source: "placement" as const };
+    store.recordFill(fill, now);
+    store.recordFill(fill, now);
+    const adapter = new FakeExchangeAdapter() as FakeExchangeAdapter & { getAccountVolumeWindows: ReturnType<typeof vi.fn> };
+    adapter.getAccountVolumeWindows = vi.fn().mockRejectedValue(new Error("temporary API outage"));
+    const telemetry = new DashboardTelemetry(adapter, true, 100, store);
+    telemetry.refreshIfDue(now);
+    await vi.waitFor(() => expect(telemetry.snapshot().volumes["24h"].available).toBe(true));
+    const volume = telemetry.snapshot().volumes["24h"];
+    expect(volume).toMatchObject({ available: true, stale: true });
+    expect(volume.error).toContain("Durable confirmed-fill fallback");
+    expect(volume.value?.[0]?.quoteVolume).toBe(50);
+  });
+
+  it("uses durable confirmed fills when a RISEx bounded window returns an empty result", async () => {
+    const now = Date.now();
+    const store = new DashboardHistoryStore(mkdtempSync(`${tmpdir()}/riimtrool-empty-volume-`), "risex-live");
+    store.recordFill({ timestamp: now - 1_000, market: "ETHUSD", side: "sell", size: 2, price: 25, isReduceOnly: false, clientOrderId: "client-empty", exchangeOrderId: "order-empty", tradeId: "trade-empty", source: "reconciliation" }, now);
+    const adapter = new FakeExchangeAdapter() as FakeExchangeAdapter & { getAccountVolumeWindows: ReturnType<typeof vi.fn> };
+    adapter.getAccountVolumeWindows = vi.fn().mockResolvedValue({ "24h": [], "7d": [], "30d": [] });
+    vi.spyOn(adapter, "getAccountVolume").mockResolvedValue([]);
+    const telemetry = new DashboardTelemetry(adapter, true, 100, store);
+
+    telemetry.refreshIfDue(now);
+    await vi.waitFor(() => expect(telemetry.snapshot().volumes["24h"].available).toBe(true));
+
+    for (const window of ["24h", "7d", "30d", "allTime"] as const) {
+      const volume = telemetry.snapshot().volumes[window];
+      expect(volume).toMatchObject({ available: true, stale: true });
+      expect(volume.error).toContain("Durable confirmed-fill fallback");
+      expect(volume.value?.[0]?.quoteVolume).toBe(50);
+    }
+  });
+
+  it("replaces an incomplete all-time cache with a larger durable total after refresh failure", async () => {
+    const now = Date.now();
+    const store = new DashboardHistoryStore(mkdtempSync(`${tmpdir()}/riimtrool-newer-volume-`), "risex-live");
+    store.recordFill({ timestamp: now - 2_000, market: "BTCUSD", side: "buy", size: 1, price: 100, isReduceOnly: false, clientOrderId: "client-old", exchangeOrderId: "order-old", tradeId: "trade-old", source: "reconciliation" }, now);
+    const adapter = new FakeExchangeAdapter() as FakeExchangeAdapter & { getAccountVolumeWindows: ReturnType<typeof vi.fn> };
+    adapter.getAccountVolumeWindows = vi.fn().mockResolvedValue({ "24h": [], "7d": [], "30d": [] });
+    const allTimeRead = vi.spyOn(adapter, "getAccountVolume").mockResolvedValue([
+      { market: "BTCUSD", since: "s", until: "u", baseVolume: 0.5, quoteVolume: 50 },
+    ]);
+    const telemetry = new DashboardTelemetry(adapter, true, 100, store);
+    telemetry.refreshIfDue(now);
+    await vi.waitFor(() => expect(telemetry.snapshot().volumes.allTime.available).toBe(true));
+
+    store.recordFill({ timestamp: now + 1_000, market: "BTCUSD", side: "buy", size: 1, price: 100, isReduceOnly: false, clientOrderId: "client-new", exchangeOrderId: "order-new", tradeId: "trade-new", source: "reconciliation" }, now + 1_000);
+    allTimeRead.mockRejectedValue(new Error("volume refresh timed out after 5000ms"));
+    telemetry.refreshIfDue(now + 300_000);
+    await vi.waitFor(() => expect(telemetry.snapshot().volumes.allTime.stale).toBe(true));
+
+    const allTime = telemetry.snapshot().volumes.allTime;
+    expect(allTime.error).toContain("Durable confirmed-fill fallback");
+    expect(allTime.value?.[0]?.quoteVolume).toBe(200);
+  });
+
 });

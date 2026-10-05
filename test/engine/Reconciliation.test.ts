@@ -242,6 +242,7 @@ describe("Reconciliation.checkAgainstExchange (runtime)", () => {
     expect(result.healthy).toBe(true);
     expect(result.anomalies).toHaveLength(0);
     const resolved = registry.get("c1");
+    expect(reconciliation.getDegradedStreak()).toBe(0);
     expect(resolved?.state).toBe("FILLED");
     expect(resolved?.filledSize).toBe(0.01);
   });

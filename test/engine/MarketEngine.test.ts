@@ -522,6 +522,82 @@ describe("MarketEngine", () => {
     expect(reduceOnlyOrder?.side).toBe("sell"); // long position -> exit by selling
   });
 
+  it("uses an immediate-or-cancel reduce-only exit when authoritative exposure exceeds its limit", async () => {
+    adapter.positions.push({
+      market: MARKET,
+      baseSize: -0.144,
+      markPrice: 60_000,
+      unrealizedPnl: 0,
+      openOrderCount: 0,
+    });
+    const engine = new MarketEngine(adapter, testConfig(), tempPaths());
+    await engine.start();
+
+    const summary = await engine.runCycle();
+
+    expect(summary.reductionMode).toBe(true);
+    expect(summary.reduceOnlyAction).toBe("placed");
+    expect(adapter.placeOrderCalls[0]).toMatchObject({
+      side: "buy",
+      type: "immediateOrCancel",
+      isReduceOnly: true,
+      size: 0.0025,
+    });
+  });
+
+  it("forces below-threshold inventory flat and cancels ordinary quotes when the daily loss cap is active", async () => {
+    let capped = false;
+    const engine = new MarketEngine(adapter, testConfig(), {
+      ...tempPaths(),
+      windowLossCapProvider: { getState: () => ({ dailyCapped: capped, weeklyCapped: false, dailyLossCapReason: "daily cap" }) },
+    });
+    await engine.start();
+    await engine.runCycle();
+    capped = true;
+    adapter.positions.push({ market: MARKET, baseSize: 0.001, markPrice: 60_000, unrealizedPnl: 0, openOrderCount: 10 });
+
+    const summary = await engine.runCycle();
+
+    expect(summary.reductionMode).toBe(true);
+    expect(summary.reductionModeCancellation.attempted).toBeGreaterThan(0);
+    expect(summary.reduceOnlyAction).toBe("placed");
+    expect(adapter.placeOrderCalls.at(-1)).toMatchObject({ side: "sell", isReduceOnly: true });
+    expect(engine.registry.listByState("RESTING").filter((order) => !order.isReduceOnly)).toHaveLength(0);
+  });
+
+  it("forces below-threshold inventory flat when the weekly loss cap is active", async () => {
+    adapter.positions.push({ market: MARKET, baseSize: -0.001, markPrice: 60_000, unrealizedPnl: 0, openOrderCount: 0 });
+    const engine = new MarketEngine(adapter, testConfig(), {
+      ...tempPaths(),
+      windowLossCapProvider: { getState: () => ({ dailyCapped: false, weeklyCapped: true, weeklyLossCapReason: "weekly cap" }) },
+    });
+    await engine.start();
+
+    const summary = await engine.runCycle();
+
+    expect(summary.reductionMode).toBe(true);
+    expect(summary.reduceOnlyAction).toBe("placed");
+    expect(adapter.placeOrderCalls[0]).toMatchObject({ side: "buy", isReduceOnly: true });
+  });
+
+  it("keeps a loss-capped flat market free of ordinary quotes", async () => {
+    let capped = false;
+    const engine = new MarketEngine(adapter, testConfig(), {
+      ...tempPaths(),
+      windowLossCapProvider: { getState: () => ({ dailyCapped: capped, weeklyCapped: false, dailyLossCapReason: "daily cap" }) },
+    });
+    await engine.start();
+    await engine.runCycle();
+    capped = true;
+
+    const summary = await engine.runCycle();
+
+    expect(summary.reductionModeCancellation.attempted).toBeGreaterThan(0);
+    expect(summary.reduceOnlyAction).toBe("none");
+    expect(summary.blockedReason).toBe("daily cap");
+    expect(engine.registry.listByState("RESTING").filter((order) => !order.isReduceOnly)).toHaveLength(0);
+  });
+
   it("documents residual policy: inventory at the threshold remains open and normal quoting continues", async () => {
     adapter.positions.push({
       market: MARKET,

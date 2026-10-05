@@ -132,6 +132,35 @@ describe("buildDashboardStatus", () => {
     expect(status.markets.filter((market) => market.market === "BTCUSD").map((market) => market.exchangeId)).toEqual(["fake", "perpl-paper"]);
   });
 
+  it("labels the Perpl mainnet adapter as LIVE", async () => {
+    const perpl = new FakeExchangeAdapter();
+    Object.defineProperty(perpl, "exchangeId", { value: "perpl-onchain-mainnet-live" });
+    perpl.marketPrices.set("BTCUSD", { market: "BTCUSD", mark: 60_000, index: 60_000 });
+    const market = await buildMarket("BTCUSD", perpl);
+    const status = buildDashboardStatus([market]);
+
+    expect(status.accounts[0]).toMatchObject({
+      exchangeId: "perpl-onchain-mainnet-live",
+      venue: "Perpl",
+      mode: "LIVE",
+      label: "Perpl LIVE",
+    });
+  });
+
+  it("labels the RISEx session adapter as LIVE", async () => {
+    const risex = new FakeExchangeAdapter();
+    Object.defineProperty(risex, "exchangeId", { value: "risex-session-live" });
+    risex.marketPrices.set("BTCUSD", { market: "BTCUSD", mark: 60_000, index: 60_000 });
+    const market = await buildMarket("BTCUSD", risex);
+
+    expect(buildDashboardStatus([market]).accounts[0]).toMatchObject({
+      exchangeId: "risex-session-live",
+      venue: "RISEx",
+      mode: "LIVE",
+      label: "RISEx LIVE",
+    });
+  });
+
   it("surfaces reconciliation anomalies and a degraded status without touching the exchange", async () => {
     const market = await buildMarket("BTCUSD", adapter);
     adapter.openOrders.push({
@@ -167,12 +196,13 @@ describe("buildDashboardStatus", () => {
     market.engine.registry.upsert({ ...base, clientOrderId: "resting", exchangeOrderId: "r", state: "RESTING" });
     market.engine.registry.upsert({ ...base, clientOrderId: "pending", exchangeOrderId: "p", state: "PENDING_CANCEL" });
     market.engine.registry.upsert({ ...base, clientOrderId: "unknown", exchangeOrderId: null, state: "UNKNOWN" });
+    market.engine.registry.upsert({ ...base, clientOrderId: "cancel-confirm", exchangeOrderId: "cc", state: "CANCEL_PENDING_CONFIRM" });
     market.engine.registry.upsert({ ...base, clientOrderId: "filled", exchangeOrderId: "f", state: "FILLED" });
     market.engine.registry.upsert({ ...base, clientOrderId: "cancelled", exchangeOrderId: "c", state: "CANCELLED" });
 
-    expect(buildDashboardStatus([market]).markets[0]?.openOrders.map(({ state }) => state)).toEqual([
-      "RESTING", "PENDING_CANCEL", "UNKNOWN",
-    ]);
+    const status = buildDashboardStatus([market]).markets[0];
+    expect(status?.openOrders.map(({ state }) => state)).toEqual(["RESTING", "PENDING_CANCEL", "UNKNOWN", "CANCEL_PENDING_CONFIRM"]);
+    expect(status?.unresolvedOrders?.map(({ state }) => state)).toEqual(["UNKNOWN"]);
   });
 
   it("marks fill and volume windows unavailable with their exact authoritative sources", async () => {

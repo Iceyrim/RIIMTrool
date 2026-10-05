@@ -195,4 +195,10 @@ describe("RiskManager.checkMarginHealth", () => {
     expect(result.allowed).toBe(false);
     expect(result.reason).toMatch(/bankruptcy/);
   });
+
+  it("allows placement when neither calendar window is capped", () => {
+    const rm = new RiskManager(new FakeExchangeAdapter());
+    expect(rm.canPlaceOrder(baseCtx({ dailyLossCapped: false, weeklyLossCapped: false })).allowed).toBe(true);
+  });
+
 });

@@ -1,0 +1,39 @@
+accountRisk:
+  sessionLossCapUsd: 6
+markets:
+  - symbol: BTCUSD
+    exchange: perpl
+    exchangeSymbol: BTC
+    enabled: true
+    orderSize: { min: 0.00018, max: 0.00018 }
+    spreadBps: { normal: 5, min: 4, max: 7.5 }
+    exitSpreadBps: 2.5
+    quoteLevels: 5
+    levelSpacingBps: [2, 3, 4, 7, 10]
+    inventoryReductionThresholdBase: 0.00036
+    riskLimits:
+      {
+        maxLongPosition: 0.001,
+        maxShortPosition: 0.001,
+        maxOrderSize: 0.0002,
+        maxOrderNotionalUsd: 20,
+        maxOpenOrders: 12,
+      }
+  - symbol: ETHUSD
+    exchange: perpl
+    exchangeSymbol: ETH
+    enabled: true
+    orderSize: { min: 0.004, max: 0.004 }
+    spreadBps: { normal: 5, min: 4, max: 7.5 }
+    exitSpreadBps: 2.5
+    quoteLevels: 5
+    levelSpacingBps: [2, 3, 4, 7, 10]
+    inventoryReductionThresholdBase: 0.008
+    riskLimits:
+      {
+        maxLongPosition: 0.025,
+        maxShortPosition: 0.025,
+        maxOrderSize: 0.005,
+        maxOrderNotionalUsd: 20,
+        maxOpenOrders: 12,
+      }

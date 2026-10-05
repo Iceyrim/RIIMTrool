@@ -114,10 +114,9 @@ describe("session loss cap removal: restart regression", () => {
     const summary = await engine.runCycle();
     expect(summary.quotesPlaced).toBe(0);
     expect(summary.quotesAttempted).toBe(0);
-    expect(summary.riskSkipMessages.some((m) => /[Dd]aily.*loss cap/.test(m))).toBe(true);
-    // The daily cap only ever reaches RiskManager.canPlaceOrder (the ladder path) — it must never
-    // produce a whole-cycle blockedReason, which would also block a reduce-only exit.
-    expect(summary.blockedReason).toBeUndefined();
+    // Flat accounts report the cap; the position case below must still place its exit.
+    expect(summary.blockedReason).toMatch(/[Dd]aily.*loss.*cap/);
+    expect(adapter.getOpenOrders()).toHaveLength(0);
 
     // A position requiring reduction still gets its reduce-only exit placed, unaffected by the
     // still-tripped daily cap — proving the cap's placement-only-scoped-to-the-ladder design.

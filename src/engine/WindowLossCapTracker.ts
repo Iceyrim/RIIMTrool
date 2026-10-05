@@ -23,6 +23,8 @@ export interface WindowLossCapTrackerConfig {
   /** state/live/pnl-window-anchors.json — deliberately separate from pnl-session-anchor.json. */
   anchorFilePath: string;
   alertBus?: AlertBus;
+  initialDailyRealizedPnlUsd?: number;
+  initialWeeklyRealizedPnlUsd?: number;
 }
 
 export interface WindowLossCapState {
@@ -73,8 +75,8 @@ export class WindowLossCapTracker {
   constructor(private readonly config: WindowLossCapTrackerConfig) {
     const persisted = this.loadPersistedAnchors();
     const nowMs = Date.now();
-    this.daily = persisted?.daily ?? freshAnchor(utcDayWindowStart(nowMs));
-    this.weekly = persisted?.weekly ?? freshAnchor(utcWeekWindowStart(nowMs));
+    this.daily = persisted?.daily ?? { ...freshAnchor(utcDayWindowStart(nowMs)), realizedPnlUsd: config.initialDailyRealizedPnlUsd ?? 0 };
+    this.weekly = persisted?.weekly ?? { ...freshAnchor(utcWeekWindowStart(nowMs)), realizedPnlUsd: config.initialWeeklyRealizedPnlUsd ?? 0 };
     this.persistAnchors();
   }
 

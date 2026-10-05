@@ -9,22 +9,23 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, join } from "node:path";
-import type { DashboardStatus } from "./DashboardService.js";
+import type { DashboardAccountStatus, DashboardStatus } from "./DashboardService.js";
 
-export type SnapshotLifecycle = "running" | "stopped";
+export type SnapshotLifecycle = "running" | "halted" | "stopped";
 
 export interface DashboardSessionSnapshot {
   version: 1;
   sessionId: string;
   exchangeId: string;
   lifecycle: SnapshotLifecycle;
+  reason?: string;
   startedAt: number;
   publishedAt: number;
   status: DashboardStatus;
 }
 
 export interface DashboardSidecarStatus extends DashboardStatus {
-  snapshotSources: Array<Pick<DashboardSessionSnapshot, "sessionId" | "exchangeId" | "lifecycle" | "startedAt" | "publishedAt"> & { stale: boolean }>;
+  snapshotSources: Array<Pick<DashboardSessionSnapshot, "sessionId" | "exchangeId" | "lifecycle" | "reason" | "startedAt" | "publishedAt"> & { stale: boolean }>;
   snapshotConflicts: Array<{ exchangeId: string; sessionIds: string[] }>;
 }
 
@@ -43,7 +44,8 @@ function isSnapshot(value: unknown): value is DashboardSessionSnapshot {
   if (!value || typeof value !== "object") return false;
   const row = value as Partial<DashboardSessionSnapshot>;
   return row.version === 1 && typeof row.sessionId === "string" &&
-    typeof row.exchangeId === "string" && (row.lifecycle === "running" || row.lifecycle === "stopped") &&
+    typeof row.exchangeId === "string" && ["running", "halted", "stopped"].includes(row.lifecycle ?? "") &&
+    (row.reason === undefined || typeof row.reason === "string") &&
     typeof row.startedAt === "number" && typeof row.publishedAt === "number" &&
     !!row.status && typeof row.status === "object" && Array.isArray(row.status.accounts) &&
     Array.isArray(row.status.markets);
@@ -55,6 +57,10 @@ export class DashboardSnapshotPublisher {
   private readonly startedAt: number;
   private readonly filePath: string;
   private timer?: ReturnType<typeof setInterval>;
+  private readonly lastGoodAccountMetrics = new Map<string, {
+    balances?: DashboardAccountStatus["balances"];
+    margin?: DashboardAccountStatus["margin"];
+  }>();
 
   constructor(
     private readonly directory: string,
@@ -73,13 +79,19 @@ export class DashboardSnapshotPublisher {
     this.timer.unref();
   }
 
-  stop(): void {
+  halt(reason: string): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    this.publish("stopped");
+    this.publish("halted", Date.now(), reason);
   }
 
-  publish(lifecycle: SnapshotLifecycle, now = Date.now()): void {
+  stop(reason?: string): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+    this.publish("stopped", Date.now(), reason);
+  }
+
+  publish(lifecycle: SnapshotLifecycle, now = Date.now(), reason?: string): void {
     try {
       mkdirSync(this.directory, { recursive: true, mode: SNAPSHOT_DIRECTORY_MODE });
       const snapshot: DashboardSessionSnapshot = {
@@ -87,9 +99,10 @@ export class DashboardSnapshotPublisher {
         sessionId: this.sessionId,
         exchangeId: this.exchangeId,
         lifecycle,
+        reason,
         startedAt: this.startedAt,
         publishedAt: now,
-        status: this.readStatus(),
+        status: this.statusForLifecycle(lifecycle),
       };
       const temporary = `${this.filePath}.${process.pid}.tmp`;
       writeFileSync(temporary, JSON.stringify(snapshot), { encoding: "utf8", mode: SNAPSHOT_FILE_MODE });
@@ -99,6 +112,36 @@ export class DashboardSnapshotPublisher {
     } catch (error) {
       console.error(`[DashboardSnapshot] publication failed: ${String(error)}`);
     }
+  }
+
+  private statusForLifecycle(lifecycle: SnapshotLifecycle): DashboardStatus {
+    const status = this.readStatus();
+    for (const account of status.accounts) {
+      const cached = this.lastGoodAccountMetrics.get(account.exchangeId) ?? {};
+      if (account.balances.available) cached.balances = account.balances;
+      if (account.margin.available) cached.margin = account.margin;
+      this.lastGoodAccountMetrics.set(account.exchangeId, cached);
+    }
+    if (lifecycle !== "stopped") return status;
+    return {
+      ...status,
+      accounts: status.accounts.map((account) => {
+        const cached = this.lastGoodAccountMetrics.get(account.exchangeId);
+        const balances = account.balances.available ? account.balances : cached?.balances ?? account.balances;
+        const margin = account.margin.available ? account.margin : cached?.margin ?? account.margin;
+        const restoredMargin = !account.margin.available && margin.available;
+        const healthDetails = restoredMargin
+          ? account.healthDetails.filter((detail) => detail !== "Margin unavailable")
+          : account.healthDetails;
+        return {
+          ...account,
+          balances,
+          margin,
+          healthDetails,
+          healthy: healthDetails.length === 0,
+        };
+      }),
+    };
   }
 
   private prune(): void {
@@ -148,12 +191,45 @@ export function aggregateDashboardSnapshots(
       continue;
     }
     const newest = [...group].sort((a, b) => b.startedAt - a.startedAt || b.publishedAt - a.publishedAt)[0];
-    if (freshRunning.length === 1 && freshRunning[0]!.startedAt >= (newest?.startedAt ?? 0)) selected.push(freshRunning[0]!);
+    // A sole fresh publisher is authoritative for the currently running session. A stopped
+    // snapshot may have a later clock-derived startedAt (or may have been written by a short
+    // preflight process), but it must not freeze telemetry from the active runner.
+    if (freshRunning.length === 1) selected.push(freshRunning[0]!);
     else if (newest) selected.push(newest);
   }
 
-  const accounts = selected.flatMap((entry) => entry.status.accounts);
-  const markets = selected.flatMap((entry) => entry.status.markets);
+  const accounts = selected.flatMap((entry) => entry.status.accounts.map((account) =>
+    entry.lifecycle === "running"
+      ? account
+      : {
+          ...account,
+          healthy: false,
+          healthDetails: [
+            ...account.healthDetails,
+            `Last-known snapshot from ${entry.lifecycle} session${entry.reason ? `: ${entry.reason}` : ""}`,
+          ],
+        },
+  ));
+  // Normalize snapshots from already-running publishers so dashboard-only upgrades do not require
+  // restarting a trading process. UNKNOWN records are ambiguous local evidence, not confirmed
+  // exchange orders; a cycle summary's reconciliation belongs to the same coherent cycle.
+  const markets = selected.flatMap((entry) => entry.status.markets.map((market) => {
+    const cycleReconciliation = market.operations?.reconciliation;
+    const unknown = market.openOrders.filter(({ state }) => state === "UNKNOWN");
+    return {
+      ...market,
+      reconciliation: cycleReconciliation
+        ? {
+            ...market.reconciliation,
+            healthy: cycleReconciliation.healthy,
+            checkedAt: cycleReconciliation.checkedAt,
+            anomalies: cycleReconciliation.anomalies,
+          }
+        : market.reconciliation,
+      openOrders: market.openOrders.filter(({ state }) => state === "RESTING" || state === "PENDING_CANCEL"),
+      unresolvedOrders: [...(market.unresolvedOrders ?? []), ...unknown],
+    };
+  }));
   const first = accounts[0];
   return {
     generatedAt: now,
@@ -167,14 +243,17 @@ export function aggregateDashboardSnapshots(
       ...snapshotConflicts.map(({ exchangeId }) => `${exchangeId}: conflicting fresh running sessions; neither snapshot is displayed.`),
       ...selected.filter((entry) => entry.lifecycle === "running" && now - entry.publishedAt > SNAPSHOT_FRESH_MS)
         .map((entry) => `${entry.exchangeId}: running snapshot is stale.`),
+      ...selected.filter((entry) => entry.lifecycle !== "running")
+        .map((entry) => `${entry.exchangeId}: displaying last-known data from a ${entry.lifecycle} session.`),
     ],
     snapshotSources: selected.map((entry) => ({
       sessionId: entry.sessionId,
       exchangeId: entry.exchangeId,
       lifecycle: entry.lifecycle,
+      reason: entry.reason,
       startedAt: entry.startedAt,
       publishedAt: entry.publishedAt,
-      stale: entry.lifecycle === "running" && now - entry.publishedAt > SNAPSHOT_FRESH_MS,
+      stale: entry.lifecycle !== "running" || now - entry.publishedAt > SNAPSHOT_FRESH_MS,
     })),
     snapshotConflicts,
   };

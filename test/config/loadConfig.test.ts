@@ -162,4 +162,16 @@ markets:
     );
     expect(() => loadMarketsConfig(writeTempConfig(legacy))).toThrow(/Unknown market configuration key/);
   });
+
+  it("loads Perpl live with all loss caps disabled and RISEx live with only daily/weekly caps", () => {
+    const perpl = loadMarketsConfig(join(process.cwd(), "config/markets.perpl-live.yaml"));
+    expect(perpl.accountRisk.sessionLossCapUsd).toBeUndefined();
+    expect(perpl.accountRisk.dailyLossCapUsd).toBeUndefined();
+    expect(perpl.accountRisk.weeklyLossCapUsd).toBeUndefined();
+
+    const risex = loadMarketsConfig(join(process.cwd(), "config/markets.risex-live.yaml"));
+    expect(risex.accountRisk.sessionLossCapUsd).toBeUndefined();
+    expect(risex.accountRisk).toMatchObject({ dailyLossCapUsd: 5, weeklyLossCapUsd: 15 });
+  });
+
 });

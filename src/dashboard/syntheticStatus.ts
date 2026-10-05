@@ -123,6 +123,13 @@ export function buildSyntheticDashboardStatus(): DashboardStatus {
       ],
       fills: { available: true, value: { label: "current session + durable history", entries: [fill(exchangeId, market, offset), fill(exchangeId, market, offset + 120)] } },
       operations: {
+        reconciliation: {
+          market,
+          healthy: !anomaly,
+          openOrderCount: offset === 5 ? 3 : 1,
+          anomalies: anomaly ? [{ kind: "LOCAL_ORDER_NOT_ON_EXCHANGE" as const, exchangeOrderId: "synthetic-missing-order", detail: "Synthetic preview anomaly" }] : [],
+          checkedAt: SYNTHETIC_NOW - offset * 1_000,
+        },
         positionBaseSize: exitState === "no_position" ? 0 : market === "BTCUSD" ? 0.01 : -0.2,
         inventoryReductionThresholdBase: market === "BTCUSD" ? 0.008 : 0.15,
         reductionMode: exitState !== "no_position",
